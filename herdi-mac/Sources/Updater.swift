@@ -6,7 +6,7 @@ import Observation
 final class Updater {
     static let shared = Updater()
 
-    let currentVersion = "0.3.1"
+    let currentVersion = "0.3.2"
     let repo = "dcolinmorgan/herdi"
 
     var latestVersion: String?
@@ -50,9 +50,13 @@ final class Updater {
     }
 
     private func ghRelease() async throws -> [String: Any]? {
+        // Find gh binary - try common paths since .app doesn't have shell PATH
+        let ghPaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+        guard let ghPath = ghPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else { return nil }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["gh", "api", "repos/\(repo)/releases/latest"]
+        process.executableURL = URL(fileURLWithPath: ghPath)
+        process.arguments = ["api", "repos/\(repo)/releases/latest"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -91,9 +95,12 @@ final class Updater {
                 try? FileManager.default.removeItem(at: tmpDMG)
 
                 // Try gh release download first
+                let ghPaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+                let ghPath = ghPaths.first(where: { FileManager.default.fileExists(atPath: $0) })
+
                 let ghDl = Process()
-                ghDl.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                ghDl.arguments = ["gh", "release", "download", "v\(latestVersion ?? "")", "--repo", repo, "--pattern", "*.dmg", "--dir", tmpDMG.deletingLastPathComponent().path, "--clobber"]
+                ghDl.executableURL = URL(fileURLWithPath: ghPath ?? "/usr/bin/false")
+                ghDl.arguments = ["release", "download", "v\(latestVersion ?? "")", "--repo", repo, "--pattern", "*.dmg", "--dir", tmpDMG.deletingLastPathComponent().path, "--clobber"]
                 ghDl.standardError = FileHandle.nullDevice
                 try? ghDl.run()
                 ghDl.waitUntilExit()

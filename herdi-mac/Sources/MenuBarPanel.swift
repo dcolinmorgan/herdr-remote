@@ -96,6 +96,7 @@ struct SettingsPanel: View {
     @Binding var launchAtLogin: Bool
     let updater: Updater
     @State private var relayURL = "ws://127.0.0.1:8375"
+    @State private var newRemote = ""
 
     var body: some View {
         ScrollView {
@@ -136,9 +137,40 @@ struct SettingsPanel: View {
                             }
                         }
                         if relay.mode == .direct {
-                            Text("Polling herdr every 2s via CLI")
+                            Text("Polling herdr CLI every 2s")
                                 .font(.caption2).foregroundStyle(.tertiary)
                         }
+                    }
+                    .padding(4)
+                }
+
+                // Remote Hosts
+                GroupBox("Remote Hosts (SSH)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if relay.remotes.isEmpty {
+                            Text("No remotes configured").font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        ForEach(relay.remotes, id: \.self) { remote in
+                            HStack {
+                                Image(systemName: "server.rack").font(.caption2)
+                                Text(remote).font(.caption)
+                                Spacer()
+                                Button { relay.removeRemote(remote) } label: {
+                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                        HStack {
+                            TextField("user@host", text: $newRemote)
+                                .textFieldStyle(.roundedBorder).font(.caption)
+                            Button("Add") {
+                                relay.addRemote(newRemote)
+                                newRemote = ""
+                            }
+                            .font(.caption).disabled(newRemote.isEmpty)
+                        }
+                        Text("Requires SSH key auth (no password)")
+                            .font(.caption2).foregroundStyle(.tertiary)
                     }
                     .padding(4)
                 }

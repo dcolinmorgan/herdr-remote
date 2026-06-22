@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Herdi"
 BUNDLE_ID="com.dcolinmorgan.herdi"
-VERSION="0.3.1"
+VERSION="0.3.2"
 BUILD_DIR="$SCRIPT_DIR/.build/release"
 APP_DIR="$SCRIPT_DIR/dist/$APP_NAME.app"
 
