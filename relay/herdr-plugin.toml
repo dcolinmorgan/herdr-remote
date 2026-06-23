@@ -1,8 +1,8 @@
 id = "herdr-remote.relay"
-name = "Herdi Relay"
+name = "Herdr Remote Relay"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
-description = "Pushes agent status events to herdr-remote relay daemon via UDP"
+description = "Push agent events to the local herdr-remote relay via UDP"
 platforms = ["macos", "linux"]
 
 [[events]]
