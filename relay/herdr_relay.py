@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
 import asyncio, json, os, re, signal, socket, subprocess
-from http import HTTPStatus
 
 try:
     from websockets.asyncio.server import serve
@@ -158,16 +157,43 @@ async def event_push():
 
 
 async def process_request(connection, request):
-    """Handle HTTP POST for plugin push (curl-friendly). Return None to proceed with WebSocket."""
-    if request.method == "POST":
-        try:
-            body = (await request.body()).decode()
-            event = json.loads(body)
-            event_queue.put_nowait(event)
-        except Exception:
-            pass
-        return connection.respond(HTTPStatus.OK, "ok\n")
-    return None
+    """Handle HTTP POST on the same port as WebSocket."""
+    from websockets.http11 import Response
+    from websockets.datastructures import Headers
+
+    # Check if this is a WebSocket upgrade
+    upgrade = None
+    for key, value in request.headers.raw_items():
+        if key.lower() == "upgrade":
+            upgrade = value.lower()
+    if upgrade == "websocket":
+        return None  # proceed with WebSocket handshake
+
+    # For CORS preflight
+    if request.path and "OPTIONS" in str(request.headers):
+        headers = Headers([
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type"),
+        ])
+        return Response(204, "No Content", headers, b"")
+
+    # HTTP POST — parse event from URL query params as fallback
+    # (since we can't read request body in websockets 16)
+    # Plugins should encode payload in the URL path: POST /push?payload=...
+    import urllib.parse
+    if "?" in (request.path or ""):
+        _, qs = request.path.split("?", 1)
+        params = urllib.parse.parse_qs(qs)
+        if "d" in params:
+            try:
+                event = json.loads(urllib.parse.unquote(params["d"][0]))
+                event_queue.put_nowait(event)
+            except Exception:
+                pass
+
+    headers = Headers([("Access-Control-Allow-Origin", "*")])
+    return Response(200, "OK", headers, b"ok\n")
 
 
 async def handle_client(ws):
@@ -226,7 +252,7 @@ async def main():
     asyncio.create_task(event_push())
     server = await serve(handle_client, "0.0.0.0", WS_PORT, process_request=process_request)
     hosts = ["local"] + REMOTES
-    print(f"herdr-remote relay on ws://0.0.0.0:{WS_PORT} (also accepts HTTP POST)")
+    print(f"herdr-remote relay on :{WS_PORT} (WebSocket + HTTP POST)")
     print(f"  polling: {', '.join(hosts)}")
     stop = loop.create_future()
     for sig in (signal.SIGINT, signal.SIGTERM):
