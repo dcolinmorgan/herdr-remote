@@ -24,11 +24,12 @@ export default {
     server.accept();
 
     const agents = [
-      { pane_id: 'demo:1', agent: 'kiro', status: 'working', project: 'graphrag_api', cwd: '/dev/graphrag_api', host: 'local' },
-      { pane_id: 'demo:2', agent: 'codex', status: 'idle', project: 'bioingest', cwd: '/dev/bioingest', host: 'local' },
-      { pane_id: 'demo:3', agent: 'claude', status: 'blocked', project: 'graffold-frontend', cwd: '/dev/graffold-frontend', host: 'local' },
-      { pane_id: 'demo:4', agent: 'kiro', status: 'working', project: 'herdr-remote', cwd: '/dev/herdr-remote', host: 'remote-1' },
-      { pane_id: 'demo:5', agent: 'grok', status: 'idle', project: 'pyGS', cwd: '/dev/pyGS', host: 'local' },
+      { pane_id: 'demo:1', agent: 'claude', status: 'working', project: 'phoenix-api', cwd: '/dev/phoenix-api', host: 'local' },
+      { pane_id: 'demo:2', agent: 'codex', status: 'idle', project: 'nova-ingest', cwd: '/dev/nova-ingest', host: 'local' },
+      { pane_id: 'demo:3', agent: 'kiro', status: 'blocked', project: 'orbit-ui', cwd: '/dev/orbit-ui', host: 'local' },
+      { pane_id: 'demo:4', agent: 'grok', status: 'working', project: 'atlas-core', cwd: '/dev/atlas-core', host: 'remote-1' },
+      { pane_id: 'demo:5', agent: 'copilot', status: 'idle', project: 'delta-sync', cwd: '/dev/delta-sync', host: 'local' },
+      { pane_id: 'demo:6', agent: 'claude', status: 'working', project: 'nebula-ml', cwd: '/dev/nebula-ml', host: 'remote-2' },
     ];
 
     const blockedPrompt = `Do you want to allow this tool call?\n\nTool: write_file\nPath: src/components/Graph.tsx\n\n> yes, single permission\n> trust, always allow\n> no (tab to edit)`;
