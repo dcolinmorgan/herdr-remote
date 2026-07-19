@@ -4,7 +4,7 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, json, logging, os, re, shutil, signal, socket, subprocess, time
+import asyncio, json, logging, os, re, shutil, signal, socket, subprocess, threading, time
 
 from agent_state import complete_agent_update_message
 
@@ -20,6 +20,9 @@ import sys
 def _get_log_dir():
     if sys.platform == "darwin":
         return os.path.expanduser("~/Library/Logs/herdr-remote")
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local"))
+        return os.path.join(base, "herdr-remote", "logs")
     if os.path.isdir("/var/log") and os.access("/var/log", os.W_OK):
         return "/var/log/herdr-remote"
     return os.path.expanduser("~/.local/state/herdr-remote/log")
@@ -41,8 +44,14 @@ log.addHandler(_file_handler)
 log.addHandler(_console_handler)
 logging.getLogger("websockets").setLevel(logging.WARNING)
 
-HERDR = os.environ.get("HERDR_BIN") or shutil.which("herdr") or "/opt/homebrew/bin/herdr"
+HERDR = (
+    os.environ.get("HERDR_BIN")
+    or shutil.which("herdr")
+    or ("herdr" if sys.platform == "win32" else "/opt/homebrew/bin/herdr")
+)
+REMOTE_HERDR = os.environ.get("HERDR_REMOTE_BIN", "herdr")
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
+RELAY_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1")
 POLL_INTERVAL = 2
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Optional: shared secret for relay auth
 
@@ -52,6 +61,9 @@ VAPID_PRIVATE_KEY = os.environ.get("HERDR_VAPID_PRIVATE", "")
 VAPID_SUBJECT = os.environ.get("HERDR_VAPID_SUBJECT", "mailto:herdr@localhost")
 push_subscriptions = []  # list of PushSubscription dicts
 PUSH_SUBS_FILE = os.path.join(LOG_DIR, "push_subs.json")
+
+if RELAY_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_TOKEN:
+    raise SystemExit("HERDR_RELAY_TOKEN is required when HERDR_RELAY_HOST binds beyond loopback")
 
 # Remote hosts: comma-separated SSH targets
 REMOTES = [r.strip() for r in os.environ.get("HERDR_REMOTES", "").split(",") if r.strip()]
@@ -72,6 +84,8 @@ event_queue = asyncio.Queue()
 pane_remote_map = {}
 known_panes = set()
 agent_cache = {}
+_remote_locks = {}
+_remote_locks_guard = threading.Lock()
 
 SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
 SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
@@ -160,10 +174,39 @@ _load_push_subs()
 
 def run_herdr_result(*args, remote=None):
     if remote:
-        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, HERDR, *args]
-    else:
-        cmd = [HERDR, *args]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        cmd = [
+            "ssh",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "BatchMode=yes",
+            remote,
+            REMOTE_HERDR,
+            *args,
+        ]
+        with _remote_locks_guard:
+            remote_lock = _remote_locks.get(remote)
+            if remote_lock is None:
+                remote_lock = threading.Lock()
+                _remote_locks[remote] = remote_lock
+        with remote_lock:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+    cmd = [HERDR, *args]
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+    )
 
 
 def run_herdr(*args, remote=None):
@@ -171,6 +214,13 @@ def run_herdr(*args, remote=None):
         return run_herdr_result(*args, remote=remote).stdout.strip()
     except Exception:
         return ""
+
+
+def _mutate_herdr(*args, remote=None):
+    try:
+        return run_herdr_result(*args, remote=remote).returncode == 0
+    except Exception:
+        return False
 
 
 def get_agents_from_host(remote=None):
@@ -203,6 +253,23 @@ def get_all_agents():
     for remote in REMOTES:
         agents.extend(get_agents_from_host(remote=remote))
     return agents
+
+
+def update_pane_maps(agents):
+    current_pane_ids = {agent["pane_id"] for agent in agents}
+    for agent in agents:
+        pane_id = agent["pane_id"]
+        pane_remote_map[pane_id] = agent.get("remote")
+        known_panes.add(pane_id)
+        agent_cache[pane_id] = agent
+
+    stale = known_panes - current_pane_ids
+    if stale:
+        known_panes.difference_update(stale)
+        for pane_id in stale:
+            pane_remote_map.pop(pane_id, None)
+            last_statuses.pop(pane_id, None)
+            agent_cache.pop(pane_id, None)
 
 
 def read_pane(pane_id, remote=None):
@@ -246,11 +313,7 @@ async def poll_loop():
 
 async def _poll_once():
         agents = get_all_agents()
-        # Always broadcast (even empty list) so clients stay in sync
-        for a in agents:
-            pane_remote_map[a["pane_id"]] = a.get("remote")
-            known_panes.add(a["pane_id"])
-            agent_cache[a["pane_id"]] = a
+        update_pane_maps(agents)
         await broadcast({"type": "agents", "agents": agents})
         for a in agents:
             pid, status = a["pane_id"], a["status"]
@@ -274,17 +337,6 @@ async def _poll_once():
             if status != "blocked" and last_statuses.get(pid) == "blocked":
                 await send_web_push("", "", clear=True)
             last_statuses[pid] = status
-        # Clean up panes that are no longer reported
-        current_pane_ids = {a["pane_id"] for a in agents}
-        stale = known_panes - current_pane_ids
-        if stale:
-            known_panes.difference_update(stale)
-            for pid in stale:
-                pane_remote_map.pop(pid, None)
-                last_statuses.pop(pid, None)
-                agent_cache.pop(pid, None)
-
-
 async def event_push():
     while True:
         event = await event_queue.get()
@@ -464,14 +516,15 @@ async def handle_client(ws):
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
-                text = msg.get("text", "")
-                if text.strip().lower() not in SAFE_RESPONSES:
+                text = msg.get("text", "").strip()
+                if text.lower() not in SAFE_RESPONSES:
                     await ws.send(json.dumps({"type": "error", "message": "response not in allowlist"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
                 log.info("Response from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("respond", ip, device, pane_id, f"text={text!r}")
-                run_herdr("pane", "send-text", pane_id, text + "\n", remote=remote)
+                if _mutate_herdr("pane", "send-text", pane_id, text, remote=remote):
+                    _mutate_herdr("pane", "send-keys", pane_id, "Enter", remote=remote)
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
             elif msg_type == "read_pane":
@@ -561,7 +614,6 @@ def start_mdns():
     try:
         from zeroconf import Zeroconf, ServiceInfo
         import socket as sock_mod
-        import threading
         ip = sock_mod.gethostbyname(sock_mod.gethostname())
         info = ServiceInfo(
             "_herdr-remote._tcp.local.", "herdr-remote._herdr-remote._tcp.local.",
@@ -577,26 +629,61 @@ def start_mdns():
 
 
 async def main():
-    zc, info = start_mdns()
     loop = asyncio.get_running_loop()
-    try:
-        await loop.create_datagram_endpoint(UDPPlugin, local_addr=("127.0.0.1", 8376))
-    except OSError:
-        log.warning("UDP 8376 in use, plugin push disabled")
-    asyncio.create_task(poll_loop())
-    asyncio.create_task(event_push())
-    server = await serve(handle_client, "0.0.0.0", WS_PORT, process_request=process_request)
-    hosts = ["local"] + REMOTES
-    log.info("herdr-remote relay on :%d (WebSocket + HTTP POST)", WS_PORT)
-    log.info("Polling: %s", ", ".join(hosts))
     stop = loop.create_future()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set_result, None)
-    await stop
-    server.close()
-    if zc and info:
-        zc.unregister_service(info)
-        zc.close()
+    zc = info = udp_transport = server = None
+    tasks = []
+    loop_signal_handlers = []
+    fallback_signal_handlers = {}
+
+    def resolve_stop():
+        if not stop.done():
+            stop.set_result(None)
+
+    def request_stop(*_):
+        loop.call_soon_threadsafe(resolve_stop)
+
+    try:
+        zc, info = start_mdns()
+        try:
+            udp_transport, _ = await loop.create_datagram_endpoint(
+                UDPPlugin, local_addr=("127.0.0.1", 8376)
+            )
+        except OSError:
+            log.warning("UDP 8376 in use, plugin push disabled")
+        tasks = [asyncio.create_task(poll_loop()), asyncio.create_task(event_push())]
+        server = await serve(handle_client, RELAY_HOST, WS_PORT, process_request=process_request)
+        hosts = ["local"] + REMOTES
+        log.info("herdr-remote relay on %s:%d (WebSocket + HTTP POST)", RELAY_HOST, WS_PORT)
+        log.info("Polling: %s", ", ".join(hosts))
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, request_stop)
+                loop_signal_handlers.append(sig)
+            except NotImplementedError:
+                fallback_signal_handlers[sig] = signal.getsignal(sig)
+                signal.signal(sig, request_stop)
+        await stop
+    finally:
+        for sig in loop_signal_handlers:
+            loop.remove_signal_handler(sig)
+        for sig, handler in fallback_signal_handlers.items():
+            signal.signal(sig, handler)
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        if udp_transport is not None:
+            udp_transport.close()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if zc is not None:
+            try:
+                if info is not None:
+                    zc.unregister_service(info)
+            finally:
+                zc.close()
 
 
 if __name__ == "__main__":

@@ -3,6 +3,15 @@
 PASS=0; FAIL=0
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+if command -v python3 >/dev/null 2>&1 && python3 -c "pass" >/dev/null 2>&1; then
+    PYTHON=python3
+elif command -v python >/dev/null 2>&1 && python -c "pass" >/dev/null 2>&1; then
+    PYTHON=python
+else
+    echo "Python 3 is required"
+    exit 1
+fi
+
 assert_eq() {
   if [ "$1" = "$2" ]; then PASS=$((PASS+1)); echo "  pass: $3"
   else FAIL=$((FAIL+1)); echo "  FAIL: $3 (expected '$2', got '$1')"; fi
@@ -14,8 +23,12 @@ echo ""
 # --- Relay ---
 echo "=== Relay ==="
 echo "1. relay syntax"
-python3 -c "import ast; ast.parse(open('$DIR/relay/herdr_relay.py').read())" 2>/dev/null
+"$PYTHON" -c "import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))" "$DIR/relay/herdr_relay.py" 2>/dev/null
 assert_eq "$?" "0" "herdr_relay.py parses"
+
+echo "1b. relay behavior"
+"$PYTHON" -m unittest discover -s "$DIR/tests" -p "test_*.py"
+assert_eq "$?" "0" "relay behavior"
 
 echo "2. PEP 723 metadata"
 grep -q "requires-python" "$DIR/relay/herdr_relay.py"
@@ -29,11 +42,11 @@ assert_eq "$?" "0" "start.sh +x"
 echo ""
 echo "=== Telegram bot ==="
 echo "4. telegram bot syntax"
-python3 -c "import ast; ast.parse(open('$DIR/relay/herdr_telegram.py').read())" 2>/dev/null
+"$PYTHON" -c "import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))" "$DIR/relay/herdr_telegram.py" 2>/dev/null
 assert_eq "$?" "0" "herdr_telegram.py parses"
 
 echo "5. telegram demo bot syntax"
-python3 -c "import ast; ast.parse(open('$DIR/relay/herdr_telegram_demo.py').read())" 2>/dev/null
+"$PYTHON" -c "import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))" "$DIR/relay/herdr_telegram_demo.py" 2>/dev/null
 assert_eq "$?" "0" "herdr_telegram_demo.py parses"
 
 echo "6. telegram bot has all commands"
@@ -58,7 +71,7 @@ assert_eq "$?" "0" "agent state tests"
 echo ""
 echo "=== TUI ==="
 echo "10. TUI syntax"
-python3 -c "import ast; ast.parse(open('$DIR/relay/herdr_tui.py').read())" 2>/dev/null
+"$PYTHON" -c "import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))" "$DIR/relay/herdr_tui.py" 2>/dev/null
 assert_eq "$?" "0" "herdr_tui.py parses"
 
 # --- Web app ---

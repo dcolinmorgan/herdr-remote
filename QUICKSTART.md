@@ -4,6 +4,8 @@ Get mobile notifications + approval for your herdr agents in 60 seconds.
 
 ## 1. Install persistent local services
 
+**macOS/Linux:**
+
 ```bash
 git clone https://github.com/dcolinmorgan/herdr-remote
 cd herdr-remote/relay
@@ -11,6 +13,18 @@ cd herdr-remote/relay
 ```
 
 The installer creates restartable user services for the relay and, optionally, Telegram. Choose `none` for the Cloudflare tunnel when you only need Telegram; the bot connects to the relay over localhost.
+
+**Windows PowerShell:**
+
+```powershell
+git clone https://github.com/dcolinmorgan/herdr-remote
+Set-Location herdr-remote
+herdr plugin link .
+./relay/start.ps1
+```
+
+The Windows launcher binds to `127.0.0.1` with no tunnel by default. Set
+`HERDR_RELAY_TOKEN` before enabling a tunnel or binding beyond loopback.
 
 ## 2. Configure Telegram
 
