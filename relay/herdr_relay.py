@@ -215,7 +215,7 @@ def detect_options(text):
 async def broadcast(msg):
     data = json.dumps(msg)
     dead = set()
-    for ws in clients:
+    for ws in list(clients):
         try:
             await ws.send(data)
         except (ConnectionClosedError, ConnectionClosedOK):
@@ -229,6 +229,14 @@ async def broadcast(msg):
 
 async def poll_loop():
     while True:
+        try:
+            await _poll_once()
+        except Exception:
+            log.exception("poll cycle failed; retrying")
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+async def _poll_once():
         agents = get_all_agents()
         # Always broadcast (even empty list) so clients stay in sync
         for a in agents:
@@ -265,7 +273,6 @@ async def poll_loop():
             for pid in stale:
                 pane_remote_map.pop(pid, None)
                 last_statuses.pop(pid, None)
-        await asyncio.sleep(POLL_INTERVAL)
 
 
 async def event_push():
