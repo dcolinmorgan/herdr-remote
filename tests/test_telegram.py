@@ -459,7 +459,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
     def test_relay_allows_numeric_approval_keys_and_acknowledges_them(self):
         relay_path = ROOT / "relay" / "herdr_relay.py"
-        source = relay_path.read_text()
+        source = relay_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         safe_keys = next(
             node.value

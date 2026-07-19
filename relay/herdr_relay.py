@@ -330,6 +330,25 @@ async def process_request(connection, request):
     from websockets.http11 import Response
     from websockets.datastructures import Headers
 
+    path = (request.path or "/").split("?")[0]
+    static_files = {
+        "/HackNerdFont-Regular.woff2": ("HackNerdFont-Regular.woff2", "font/woff2"),
+        "/HackNerdFont-LICENSE.txt": ("HackNerdFont-LICENSE.txt", "text/plain; charset=utf-8"),
+    }
+    if path in static_files:
+        filename, content_type = static_files[path]
+        asset_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "web", filename
+        )
+        if os.path.isfile(asset_path):
+            with open(asset_path, "rb") as f:
+                body = f.read()
+            headers = Headers([
+                ("Content-Type", content_type),
+                ("Cache-Control", "public, max-age=3600, must-revalidate"),
+            ])
+            return Response(200, "OK", headers, body)
+
     # Token auth (if configured)
     if AUTH_TOKEN:
         token = None
@@ -480,8 +499,15 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 lines = msg.get("lines", "30")
+                read_format = msg.get("format", "text")
+                if read_format not in {"text", "ansi"}:
+                    await ws.send(json.dumps({"type": "error", "message": "invalid pane read format"}))
+                    continue
                 remote = pane_remote_map.get(pane_id)
-                content = run_herdr("pane", "read", pane_id, "--lines", str(lines), "--source", "recent", remote=remote)
+                content = run_herdr(
+                    "pane", "read", pane_id, "--lines", str(lines), "--source", "recent",
+                    "--format", read_format, remote=remote
+                )
                 await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content}))
             elif msg_type == "send_keys":
                 pane_id = msg["pane_id"]
