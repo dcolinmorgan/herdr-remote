@@ -385,7 +385,22 @@ function handleMessage(msg) {
       }
       prevStatuses[a.pane_id] = a.status;
     }
-    agents = msg.agents; render();
+    const previousAgents = new Map(agents.map(agent => [agent.pane_id, agent]));
+    agents = msg.agents.map(agent => {
+      const previous = previousAgents.get(agent.pane_id);
+      if (agent.status !== 'blocked' || !previous) return agent;
+      return {
+        ...agent,
+        prompt: previous.prompt,
+        options: previous.options,
+        multi_options: previous.multi_options,
+        interaction: previous.interaction,
+        multi: previous.multi,
+        prompt_id: previous.prompt_id,
+        selected_options: previous.selected_options,
+      };
+    });
+    render();
   }
   else if (msg.type === 'agent_update') {
     const update = msg.agent;
@@ -403,12 +418,24 @@ function handleMessage(msg) {
   }
   else if (msg.type === 'blocked') {
     const a = agents.find(x => x.pane_id === msg.pane_id);
-    if (a) { a.status='blocked'; a.prompt=msg.prompt; a.options=msg.options; }
+    if (a) {
+      a.status='blocked';
+      a.prompt=msg.prompt;
+      a.prompt_id=msg.prompt_id;
+      a.options=msg.options;
+      a.selected_options=msg.selected_options||[];
+      a.multi_options=msg.multi_options||[];
+      a.interaction=msg.interaction;
+      a.multi=msg.multi;
+    }
     else agents.push({...msg, status:'blocked'});
     if(window.cue) cue('chime');
-    timeline.unshift({project: msg.project, agent: msg.agent, status: 'blocked', time: new Date()});
-    if (timeline.length > 100) timeline.pop();
+    if (!msg.update) {
+      timeline.unshift({project: msg.project, agent: msg.agent, status: 'blocked', time: new Date()});
+      if (timeline.length > 100) timeline.pop();
+    }
     render();
+    if (msg.pane_id===activePane) openTerminal(activePane);
   } else if (msg.type === 'pane_content' && msg.pane_id === activePane) {
     const el = document.getElementById('termContent');
     const prevHeight = el.scrollHeight;
@@ -533,21 +560,54 @@ function openTerminal(paneId) {
   const a = agents.find(x => x.pane_id===paneId);
   document.getElementById('termTitle').textContent = a?`${a.label||a.project} · ${a.agent}`:paneId;
   document.getElementById('agentListView').style.display = 'none';
+  if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
   const qa = document.getElementById('quickActions');
   const ak = document.getElementById('actionKeys');
+  qa.replaceChildren();
+  ak.replaceChildren();
   if (a&&a.status==='blocked') {
-    const opts = a.options||['yes, single permission','trust, always allow','no (tab to edit)'];
-    qa.innerHTML = opts.map(o => {
-      const cls = o.includes('yes')||o.includes('approve')?'btn-yes':o.includes('trust')?'btn-trust':'btn-no';
-      const icon = o.includes('yes') ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : o.includes('trust') ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>' : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-      const label = o.includes('yes') ? 'Yes' : o.includes('trust') ? 'Yes All' : 'No';
-      return `<button class="${cls}" onclick="respond('${o.replace(/'/g,"\\'")}')">${icon} ${label}</button>`;
-    }).join('');
-    ak.innerHTML = '';
-  } else {
-    qa.innerHTML='';
-    ak.innerHTML='';
+    const opts = a.interaction==='omp_question'&&a.multi
+      ? (Array.isArray(a.multi_options)?a.multi_options:[])
+      : (Array.isArray(a.options)?a.options:[]);
+    for (const option of opts) {
+      const button = document.createElement('button');
+      const lower = option.toLowerCase();
+      button.className = lower.includes('yes')||lower.includes('approve')?'btn-yes':lower.includes('trust')?'btn-trust':'btn-no';
+      button.textContent = option.split(',')[0];
+      if (a.interaction==='omp_question'&&a.multi) {
+        button.dataset.selected=String((a.selected_options||[]).includes(option));
+        button.classList.toggle('selected',button.dataset.selected==='true');
+        button.addEventListener('click',()=>{
+          const selected=button.dataset.selected!=='true';
+          button.dataset.selected=String(selected);
+          button.classList.toggle('selected',selected);
+          ws.send(JSON.stringify({type:'question_toggle',pane_id:activePane,prompt_id:a.prompt_id,option}));
+        });
+      } else {
+        button.addEventListener('click',()=>respond(option));
+      }
+      qa.appendChild(button);
+    }
+    if (a.interaction==='omp_question'&&a.multi) {
+      const submit=document.createElement('button');
+      submit.className='btn-yes';
+      submit.textContent='Submit';
+      submit.addEventListener('click',()=>ws.send(JSON.stringify({type:'question_submit',pane_id:activePane,prompt_id:a.prompt_id})));
+      qa.appendChild(submit);
+    } else if (a.interaction!=='omp_question'&&opts.includes('yes, single permission')) {
+      for (const [label,cls,response] of [
+        ['y','key-green','yes, single permission'],
+        ['a','key-blue','trust, always allow'],
+        ['n','key-red','no (tab to edit)'],
+      ]) {
+        const button = document.createElement('button');
+        button.className = cls;
+        button.textContent = label;
+        button.addEventListener('click',()=>respond(response));
+        ak.appendChild(button);
+      }
+    }
   }
   refreshPane();
   refreshInterval = setInterval(refreshPane, 3000);
@@ -560,13 +620,18 @@ function closeTerminal() {
 }
 
 let paneLines = 200;
-function refreshPane() { if(ws&&activePane) ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines})); }
+function refreshPane() { if(ws&&ws.readyState===WebSocket.OPEN&&activePane) ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines})); }
 function loadMore() { paneLines = Math.min(paneLines + 500, 5000); refreshPane(); }
 function sendText() {
   const i=document.getElementById('termInput');
   if(!i.value||!ws||!activePane)return;
-  ws.send(JSON.stringify({type:'send_text',pane_id:activePane,text:i.value}));
-  ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:['Enter']}));
+  const agent=agents.find(a=>a.pane_id===activePane);
+  if(agent&&agent.status==='blocked') {
+    ws.send(JSON.stringify({type:'respond',pane_id:activePane,prompt_id:agent.prompt_id,text:i.value}));
+  } else {
+    ws.send(JSON.stringify({type:'send_text',pane_id:activePane,text:i.value}));
+    ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:['Enter']}));
+  }
   i.value=''; setTimeout(refreshPane,500);
 }
 function sendKey(k){if(!ws||!activePane)return;ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:[k]}));setTimeout(refreshPane,300);}

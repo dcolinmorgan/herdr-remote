@@ -43,6 +43,7 @@ if not TOKEN:
 # State
 pending: OrderedDict[tuple[int, int], str] = OrderedDict()  # (chat_id, message_id) -> pane_id
 approval_tokens: dict[str, str] = {}  # pane_id -> current blocked-notification generation
+blocked_prompt_ids: dict[str, str] = {}  # pane_id -> current relay prompt identity
 agents: list[dict] = []       # current agent list from relay
 prev_statuses: dict[str, str] = {}  # pane_id -> last known status
 relay_connected = False
@@ -50,6 +51,7 @@ daily_stats: dict[str, dict] = {}  # pane_id -> {agent, project, blocked_count, 
 
 AGENT_PAGE_SIZE = 20
 PENDING_LIMIT = 500
+COMMAND_ACK_TIMEOUT = 20
 STATUS_ORDER = {"blocked": 0, "working": 1, "done": 2, "idle": 3, "unknown": 3}
 STATUS_LABELS = {"blocked": "BLOCKED", "working": "WORKING", "done": "DONE", "idle": "IDLE", "unknown": "IDLE"}
 ACTION_CODES = {
@@ -65,31 +67,61 @@ CODE_ACTIONS = {code: action for action, code in ACTION_CODES.items()}
 
 # --- Relay communication ---
 
-async def send_to_relay(pane_id: str, text: str):
+async def await_command_result(ws, request_id: str, command: str):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + COMMAND_ACK_TIMEOUT
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise RuntimeError(f"relay did not acknowledge {command}")
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(f"relay did not acknowledge {command}") from exc
+        response = json.loads(raw)
+        response_request_id = response.get("request_id")
+        if response.get("type") == "command_result" and response_request_id != request_id:
+            continue
+        if response_request_id not in (None, request_id):
+            continue
+        if response.get("type") == "error":
+            raise RuntimeError(response.get("message", f"relay rejected {command}"))
+        if response.get("type") == "command_result" and response.get("command") == command:
+            if not response.get("ok"):
+                raise RuntimeError(response.get("message", f"relay rejected {command}"))
+            return
+
+
+async def send_to_relay(pane_id: str, text: str, prompt_id: str | None = None):
     """Send a response to the relay via WebSocket."""
     import websockets
-    try:
-        async with websockets.connect(RELAY_WS) as ws:
-            await ws.send(json.dumps({"type": "respond", "pane_id": pane_id, "text": text}))
-    except Exception as e:
-        log.warning(f"Failed to send to relay: {scrub(e)}")
+    async with websockets.connect(RELAY_WS) as ws:
+        request_id = secrets.token_hex(8)
+        await ws.send(json.dumps({
+            "type": "respond",
+            "pane_id": pane_id,
+            "prompt_id": prompt_id if prompt_id is not None else blocked_prompt_ids.get(pane_id, ""),
+            "text": text,
+            "request_id": request_id,
+        }))
+        await await_command_result(ws, request_id, "respond")
 
 
-async def send_keys_to_relay(pane_id: str, keys: list[str]):
+async def send_keys_to_relay(pane_id: str, keys: list[str], prompt_id: str | None = None):
     """Send raw key presses to the relay via WebSocket (e.g. ["1"] to pick a prompt option)."""
     import websockets
     async with websockets.connect(RELAY_WS) as ws:
-        await ws.send(json.dumps({"type": "send_keys", "pane_id": pane_id, "keys": keys}))
-        for _ in range(5):
-            raw = await asyncio.wait_for(ws.recv(), timeout=5)
-            response = json.loads(raw)
-            if response.get("type") == "error":
-                raise RuntimeError(response.get("message", "relay rejected keys"))
-            if response.get("type") == "command_result" and response.get("command") == "send_keys":
-                if not response.get("ok"):
-                    raise RuntimeError(response.get("message", "relay rejected keys"))
-                return
-        raise RuntimeError("relay did not acknowledge keys")
+        request_id = secrets.token_hex(8)
+        message = {
+            "type": "send_keys",
+            "pane_id": pane_id,
+            "keys": keys,
+            "request_id": request_id,
+        }
+        if prompt_id is not None:
+            message["prompt_id"] = prompt_id
+        await ws.send(json.dumps(message))
+        await await_command_result(ws, request_id, "send_keys")
 
 
 async def read_pane(pane_id: str, lines: int = 15) -> str:
@@ -152,6 +184,7 @@ def clear_relay_connection_state():
     relay_connected = False
     agents = []
     approval_tokens.clear()
+    blocked_prompt_ids.clear()
 
 
 async def send_reply_prompt(message, chat, agent: dict, content: str | None = None):
@@ -437,10 +470,8 @@ async def cmd_interrupt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"No agent matching '{query}'.")
         return
 
-    import websockets
     try:
-        async with websockets.connect(RELAY_WS) as ws:
-            await ws.send(json.dumps({"type": "send_keys", "pane_id": match["pane_id"], "keys": ["Ctrl+c"]}))
+        await send_keys_to_relay(match["pane_id"], ["C-c"])
         await update.message.reply_text(f"Sent Ctrl+C to {match['project']}")
     except Exception as e:
         await update.message.reply_text(f"Failed: {scrub(e)}")
@@ -523,8 +554,15 @@ async def cmd_trust(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"No blocked agent matching '{query}'.")
         return
 
-    await send_to_relay(match["pane_id"], "trust, always allow")
-    await update.message.reply_text(f"Trusted {match['project']} (always allow)")
+    try:
+        await send_to_relay(
+            match["pane_id"],
+            "trust, always allow",
+            prompt_id=blocked_prompt_ids.get(match["pane_id"]),
+        )
+        await update.message.reply_text(f"Trusted {match['project']} (always allow)")
+    except Exception as e:
+        await update.message.reply_text(f"Failed: {scrub(e)}")
 
 
 async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -595,10 +633,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "interrupt":
-        import websockets
         try:
-            async with websockets.connect(RELAY_WS) as ws:
-                await ws.send(json.dumps({"type": "send_keys", "pane_id": data["pane_id"], "keys": ["Ctrl+c"]}))
+            await send_keys_to_relay(data["pane_id"], ["C-c"])
             await query.message.reply_text("Sent Ctrl+C")
         except Exception as e:
             await query.message.reply_text(f"Failed: {scrub(e)}")
@@ -616,8 +652,15 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "trust":
-        await send_to_relay(data["pane_id"], "trust, always allow")
-        await query.message.reply_text(f"Trusted {selected_agent['project']} (always allow)")
+        try:
+            await send_to_relay(
+                data["pane_id"],
+                "trust, always allow",
+                prompt_id=blocked_prompt_ids.get(data["pane_id"]),
+            )
+            await query.message.reply_text(f"Trusted {selected_agent['project']} (always allow)")
+        except Exception as e:
+            await query.message.reply_text(f"Failed: {scrub(e)}")
         return
 
     if action != "approval":
@@ -629,6 +672,46 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "That approval belongs to an older prompt. Use the controls on the latest blocked notification."
         )
+        return
+
+    prompt_id = blocked_prompt_ids.get(pane_id)
+    if not prompt_id:
+        await query.message.reply_text(
+            "That approval belongs to an older prompt. Use the controls on the latest blocked notification."
+        )
+        return
+
+    option_index = data.get("i")
+    if option_index is not None:
+        try:
+            option_index = int(option_index)
+        except (TypeError, ValueError):
+            await query.message.reply_text("That approval action is no longer supported. Use the latest notification.")
+            return
+        label = None
+        if query.message and query.message.reply_markup:
+            for row in query.message.reply_markup.inline_keyboard:
+                for btn in row:
+                    try:
+                        button_data = parse_callback_data(btn.callback_data)
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        continue
+                    if button_data.get("i") == str(option_index):
+                        label = btn.text
+                        break
+                if label is not None:
+                    break
+        if not label:
+            await query.message.reply_text("That approval action is no longer supported. Use the latest notification.")
+            return
+        try:
+            await send_to_relay(pane_id, label, prompt_id=prompt_id)
+        except Exception as e:
+            await query.message.reply_text(f"Failed: {scrub(e)}")
+            return
+        approval_tokens.pop(pane_id, None)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(f"Sent: {label}")
         return
 
     # Confirm a blocked agent's prompt by pressing the option number.
@@ -651,7 +734,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except (ValueError, TypeError):
                     pass
     try:
-        await send_keys_to_relay(pane_id, [key])
+        await send_keys_to_relay(pane_id, [key], prompt_id=prompt_id)
     except Exception as e:
         await query.message.reply_text(f"Failed: {scrub(e)}")
         return
@@ -680,7 +763,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await send_text_to_relay(pane_id, update.message.text)
+        prompt_id = blocked_prompt_ids.get(pane_id)
+        if prompt_id:
+            await send_to_relay(pane_id, update.message.text, prompt_id=prompt_id)
+        else:
+            await send_text_to_relay(pane_id, update.message.text)
         await update.message.reply_text("Sent")
     except Exception as e:
         await update.message.reply_text(f"Failed: {scrub(e)}")
@@ -705,20 +792,34 @@ def make_keyboard(
     pane_id: str,
     options: list[str] | None,
     generation: str | None = None,
+    interaction: str | None = None,
 ) -> InlineKeyboardMarkup:
-    if options and "trust" in " ".join(options).lower():
+    if not options:
+        return interaction_keyboard(pane_id)
+    if interaction == "omp_question":
+        buttons = [(opt, opt) for opt in options]
+    elif "trust" in " ".join(options).lower():
         buttons = TOOL_BUTTONS
-    elif options and "approve all" in " ".join(options).lower():
+    elif "approve all" in " ".join(options).lower():
         buttons = SUBAGENT_BUTTONS
     else:
-        buttons = [(opt.split(",")[0], opt) for opt in (options or ["yes, single permission", "no (tab to edit)"])]
+        buttons = [(opt.split(",")[0], opt) for opt in options]
 
-    # Encode the option's 1-based position as "k"; the callback presses that number
-    # key on the agent's prompt. Sending the option *text* does not work (see handle_callback).
-    # callback_data must stay under Telegram's 64-byte limit, so keep it to the
-    # pane token and the option number; the confirmation label is recovered from the
-    # keyboard on press (see handle_callback).
     generation = generation or secrets.token_hex(4)
+    if interaction == "omp_question":
+        keyboard = [
+            [InlineKeyboardButton(label, callback_data=pane_callback_data(
+                "approval", pane_id, g=generation, i=str(i),
+            ))]
+            for i, (label, _resp) in enumerate(buttons)
+        ]
+        keyboard.append([InlineKeyboardButton(
+            "Open output & reply",
+            callback_data=pane_callback_data("select_reply", pane_id),
+        )])
+        return InlineKeyboardMarkup(keyboard)
+
+    # Standard approval prompts require a real numeric key press.
     keyboard = [
         [InlineKeyboardButton(label, callback_data=pane_callback_data(
             "approval", pane_id, g=generation, k=str(i + 1)))]
@@ -740,23 +841,47 @@ def interaction_keyboard(pane_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
-async def notify_blocked(app: Application, pane_id: str, agent: str, project: str, prompt: str, options: list[str] | None):
+async def notify_blocked(
+    app: Application,
+    pane_id: str,
+    agent: str,
+    project: str,
+    prompt: str,
+    options: list[str] | None,
+    prompt_id: str | None = None,
+    interaction: str | None = None,
+    multi: bool = False,
+):
     if not CHAT_ID:
         return
+    instruction = (
+        "Use the web terminal or manual terminal controls to select multiple options."
+        if multi
+        else "Use an approval button, open the output, or reply to this notification."
+    )
     text = (
         f"*{agent}* blocked in `{project}`\n\n```\n{prompt[:400]}\n```\n\n"
-        "Use an approval button, open the output, or reply to this notification."
+        f"{instruction}"
     )
     generation = secrets.token_hex(4)
-    keyboard = make_keyboard(pane_id, options, generation=generation)
+    keyboard = make_keyboard(
+        pane_id,
+        [] if multi else options,
+        generation=generation,
+        interaction=interaction,
+    )
     msg = await app.bot.send_message(
         chat_id=int(CHAT_ID), text=text, parse_mode="Markdown", reply_markup=keyboard
     )
     approval_tokens[pane_id] = generation
+    if prompt_id:
+        blocked_prompt_ids[pane_id] = prompt_id
     register_pending(int(CHAT_ID), msg.message_id, pane_id)
 
 
 async def notify_blocked_safely(app: Application, msg: dict):
+    if msg.get("update"):
+        return
     try:
         await notify_blocked(
             app,
@@ -765,6 +890,9 @@ async def notify_blocked_safely(app: Application, msg: dict):
             project=msg.get("project", ""),
             prompt=msg.get("prompt", ""),
             options=msg.get("options"),
+            prompt_id=msg.get("prompt_id"),
+            interaction=msg.get("interaction"),
+            multi=bool(msg.get("multi")),
         )
     except Exception as e:
         log.warning("Failed to send blocked notification: %s", scrub(e))
@@ -801,6 +929,7 @@ async def track_agent_updates(app: Application, updated_agents: list[dict]):
             stats["last_change"] = now
         if agent_data.get("status") and new_status != "blocked":
             approval_tokens.pop(pane_id, None)
+            blocked_prompt_ids.pop(pane_id, None)
 
         if old_status and old_status != new_status and new_status in ("idle", "done") and old_status in ("working", "blocked"):
             try:
@@ -843,6 +972,7 @@ async def relay_listener(app: Application):
                         for pane_id in list(approval_tokens):
                             if pane_id not in blocked_panes:
                                 approval_tokens.pop(pane_id, None)
+                                blocked_prompt_ids.pop(pane_id, None)
                         await track_agent_updates(app, new_agents)
                         agents = apply_agent_message(agents, msg)
 
