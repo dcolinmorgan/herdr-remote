@@ -4,7 +4,7 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, json, logging, os, re, signal, socket, subprocess, time
+import asyncio, json, logging, os, re, shutil, signal, socket, subprocess, time
 
 try:
     from websockets.asyncio.server import serve
@@ -39,7 +39,7 @@ log.addHandler(_file_handler)
 log.addHandler(_console_handler)
 logging.getLogger("websockets").setLevel(logging.WARNING)
 
-HERDR = os.environ.get("HERDR_BIN", "/opt/homebrew/bin/herdr")
+HERDR = os.environ.get("HERDR_BIN") or shutil.which("herdr") or "/opt/homebrew/bin/herdr"
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
 POLL_INTERVAL = 2
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Optional: shared secret for relay auth
