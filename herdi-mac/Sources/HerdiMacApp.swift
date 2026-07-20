@@ -1,47 +1,66 @@
 import SwiftUI
 import ServiceManagement
+import UserNotifications
 
 @main
 struct HerdiApp: App {
-    @State private var relay = RelayConnection()
-    @State private var panelController = NotchPanelController()
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
+    @NSApplicationDelegateAdaptor(HerdiAppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // Minimal menu bar icon as a fallback / quit target
-        MenuBarExtra {
-            VStack(spacing: 8) {
-                Button("Show Notch Panel") { panelController.expand() }
-                Divider()
-                Button("Quit Herdi") { NSApplication.shared.terminate(nil) }
-            }
-            .padding(8)
-        } label: {
-            let blocked = relay.agents.filter { $0.status == .blocked }.count
-            if blocked > 0 {
-                Label("\(blocked)", systemImage: "exclamationmark.circle.fill")
-            } else {
-                Image(systemName: relay.isConnected ? "circle.fill" : "circle")
-            }
-        }
-        .menuBarExtraStyle(.menu)
-        .onChange(of: launchAtLogin) { _, newValue in
-            do {
-                if newValue {
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
-                }
-            } catch {
-                launchAtLogin = !newValue
-            }
-        }
+        // No visible window — the panel IS the UI
+        Settings { EmptyView() }
+    }
+}
+
+@MainActor
+class HerdiAppDelegate: NSObject, NSApplicationDelegate {
+    var panelController: PanelWindowController?
+    let relay = RelayConnection()
+    private var statusItem: NSStatusItem?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Request notification permissions
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
+        // Minimal status bar item (quit + show panel)
+        setupStatusItem()
+
+        // Launch the notch panel
+        panelController = PanelWindowController(relay: relay)
+        panelController?.showPanel()
+
+        // Auto-expand when an agent gets blocked
+        observeBlockedAgents()
     }
 
-    init() {
-        // Launch the notch panel on startup
-        DispatchQueue.main.async {
-            panelController.setup(with: relay)
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = statusItem?.button {
+            button.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Herdi")
+            button.image?.size = NSSize(width: 14, height: 14)
+        }
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Quit Herdi", action: #selector(quitApp), keyEquivalent: "q"))
+        statusItem?.menu = menu
+    }
+
+    @objc private func quitApp() {
+        NSApplication.shared.terminate(nil)
+    }
+
+    /// Watch for agents transitioning to blocked state and auto-expand the panel
+    private func observeBlockedAgents() {
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let blocked = self.relay.agents.filter { $0.status == .blocked }
+                // Auto-pop the approval card if panel is collapsed and there's a blocked agent
+                if let agent = blocked.first, self.panelController?.surface == .collapsed {
+                    withAnimation(NotchAnimation.pop) {
+                        self.panelController?.surface = .approval(agentId: agent.id)
+                    }
+                }
+            }
         }
     }
 }
