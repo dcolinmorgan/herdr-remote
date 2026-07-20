@@ -509,43 +509,38 @@ private struct ApprovalCard: View {
             )
             .padding(.horizontal, 12)
 
-            // Quick-action buttons
-            if let options = agent.options {
-                HStack(spacing: 6) {
-                    ForEach(options, id: \.self) { option in
-                        ApprovalButton(label: shortLabel(option), tint: tint(for: option)) {
-                            respond(option)
-                        }
-                    }
-                }
-                .padding(.horizontal, 12)
+            // Response buttons — clean grid of common actions
+            ResponseButtonGrid(options: agent.options) { response in
+                respond(response)
             }
+            .padding(.horizontal, 12)
 
             // Custom text input
             HStack(spacing: 6) {
-                TextField("Reply…", text: $customResponse)
+                TextField("Custom reply…", text: $customResponse)
                     .textFieldStyle(.plain)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
                     .background(
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: 8)
                             .fill(.white.opacity(0.05))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(.white.opacity(0.08), lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(.white.opacity(0.1), lineWidth: 0.5)
                     )
                     .onSubmit { if !customResponse.isEmpty { respond(customResponse) } }
 
                 Button { respond(customResponse) } label: {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(customResponse.isEmpty ? .white.opacity(0.2) : .blue)
+                        .font(.system(size: 20))
+                        .foregroundStyle(customResponse.isEmpty ? .white.opacity(0.15) : .blue)
                 }
                 .buttonStyle(.plain)
                 .disabled(customResponse.isEmpty)
+                .keyboardShortcut(.return, modifiers: .command)
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
@@ -559,50 +554,136 @@ private struct ApprovalCard: View {
         agent.options = nil
         onDismiss()
     }
+}
 
-    private func shortLabel(_ option: String) -> String {
-        if option.contains("single permission") { return "Allow" }
-        if option.contains("always allow") { return "Trust" }
-        if option.contains("tab to edit") || option.lowercased().starts(with: "no") { return "Deny" }
-        if option.contains("approve all") { return "Approve All" }
-        if option.contains("exit") || option.contains("cancel") { return "Cancel" }
-        return String(option.prefix(14))
+// MARK: - Response Button Grid
+
+/// Clean, icon-labeled buttons for common agent responses.
+/// Maps raw option strings to clear UI with icons and keyboard shortcuts.
+private struct ResponseButtonGrid: View {
+    let options: [String]?
+    let onRespond: (String) -> Void
+
+    private var buttons: [ResponseAction] {
+        guard let options else { return defaultActions }
+        return options.map { mapOption($0) }
     }
 
-    private func tint(for option: String) -> Color {
-        if option.contains("yes") || option.contains("approve") || option.contains("single") { return .green }
-        if option.contains("no") || option.contains("exit") || option.contains("cancel") { return .red }
-        if option.contains("trust") || option.contains("always") { return .blue }
-        return .white.opacity(0.6)
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(buttons) { btn in
+                ResponseButton(action: btn) { onRespond(btn.rawValue) }
+            }
+        }
+    }
+
+    // Default actions when no options detected
+    private var defaultActions: [ResponseAction] {
+        [
+            ResponseAction(label: "Allow", icon: "checkmark", tint: .green, shortcut: "⌘Y", rawValue: "yes, single permission"),
+            ResponseAction(label: "Trust", icon: "shield.checkered", tint: .blue, shortcut: "⌘T", rawValue: "trust, always allow"),
+            ResponseAction(label: "Deny", icon: "xmark", tint: .red, shortcut: "⌘N", rawValue: "no (tab to edit)"),
+        ]
+    }
+
+    private func mapOption(_ option: String) -> ResponseAction {
+        let lower = option.lowercased()
+
+        // Permission responses
+        if lower.contains("single permission") || lower == "y" || lower == "yes" {
+            return ResponseAction(label: "Allow", icon: "checkmark", tint: .green, shortcut: "⌘Y", rawValue: option)
+        }
+        if lower.contains("always allow") || lower.contains("trust") {
+            return ResponseAction(label: "Trust", icon: "shield.checkered", tint: .blue, shortcut: "⌘T", rawValue: option)
+        }
+        if lower.contains("tab to edit") || lower.starts(with: "no") || lower == "n" {
+            return ResponseAction(label: "Deny", icon: "xmark", tint: .red, shortcut: "⌘N", rawValue: option)
+        }
+
+        // Batch responses
+        if lower.contains("approve all") {
+            return ResponseAction(label: "Approve All", icon: "checkmark.circle.fill", tint: .green, shortcut: "⌘A", rawValue: option)
+        }
+        if lower.contains("configure individually") {
+            return ResponseAction(label: "Configure", icon: "slider.horizontal.3", tint: .orange, shortcut: nil, rawValue: option)
+        }
+
+        // Flow control
+        if lower.contains("continue") || lower.contains("proceed") {
+            return ResponseAction(label: "Continue", icon: "play.fill", tint: .green, shortcut: "⌘↩", rawValue: option)
+        }
+        if lower.contains("edit") || lower.contains("modify") {
+            return ResponseAction(label: "Edit", icon: "pencil", tint: .orange, shortcut: "⌘E", rawValue: option)
+        }
+        if lower.contains("retry") || lower.contains("again") {
+            return ResponseAction(label: "Retry", icon: "arrow.clockwise", tint: .blue, shortcut: "⌘R", rawValue: option)
+        }
+        if lower.contains("skip") {
+            return ResponseAction(label: "Skip", icon: "forward.fill", tint: .gray, shortcut: nil, rawValue: option)
+        }
+        if lower.contains("exit") || lower.contains("cancel") || lower.contains("abort") {
+            return ResponseAction(label: "Cancel", icon: "xmark.circle", tint: .red, shortcut: "⌘.", rawValue: option)
+        }
+
+        // Fallback
+        let shortLabel = String(option.prefix(16))
+        return ResponseAction(label: shortLabel, icon: "circle", tint: .white.opacity(0.6), shortcut: nil, rawValue: option)
     }
 }
 
-// MARK: - Approval Button
-
-private struct ApprovalButton: View {
+private struct ResponseAction: Identifiable {
     let label: String
+    let icon: String
     let tint: Color
-    let action: () -> Void
+    let shortcut: String?
+    let rawValue: String
+
+    var id: String { rawValue }
+}
+
+private struct ResponseButton: View {
+    let action: ResponseAction
+    let onTap: () -> Void
+    @State private var hovered = false
     @State private var pressed = false
 
     var body: some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(tint)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(tint.opacity(pressed ? 0.2 : 0.1))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(tint.opacity(0.3), lineWidth: 0.5)
-                )
+        Button {
+            withAnimation(.easeOut(duration: 0.08)) { pressed = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                pressed = false
+                onTap()
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: action.icon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(action.label)
+                    .font(.system(size: 10, weight: .semibold))
+                if let shortcut = action.shortcut {
+                    Text(shortcut)
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(action.tint.opacity(0.5))
+                }
+            }
+            .foregroundStyle(hovered ? .white : action.tint)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(hovered ? action.tint.opacity(0.25) : action.tint.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(action.tint.opacity(hovered ? 0.5 : 0.2), lineWidth: 0.5)
+            )
+            .scaleEffect(pressed ? 0.95 : 1)
         }
         .buttonStyle(.plain)
-        .onHover { pressed = $0 }
+        .onHover { hovered = $0 }
+        .animation(NotchAnimation.micro, value: hovered)
+        .animation(.easeOut(duration: 0.08), value: pressed)
     }
 }
 
