@@ -22,17 +22,25 @@ private class NotchHostingView<Content: View>: NSHostingView<Content> {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    private func applySuperNeedsUpdateConstraints(_ value: Bool) {
+        super.needsUpdateConstraints = value
+    }
+
+    private func applySuperNeedsLayout(_ value: Bool) {
+        super.needsLayout = value
+    }
+
     override var needsUpdateConstraints: Bool {
         get { super.needsUpdateConstraints }
         set {
             if applyingDeferred {
-                super.needsUpdateConstraints = newValue
+                applySuperNeedsUpdateConstraints(newValue)
                 return
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.applyingDeferred = true
-                super.needsUpdateConstraints = newValue
+                self.applySuperNeedsUpdateConstraints(newValue)
                 self.applyingDeferred = false
             }
         }
@@ -42,13 +50,13 @@ private class NotchHostingView<Content: View>: NSHostingView<Content> {
         get { super.needsLayout }
         set {
             if applyingDeferred {
-                super.needsLayout = newValue
+                applySuperNeedsLayout(newValue)
                 return
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.applyingDeferred = true
-                super.needsLayout = newValue
+                self.applySuperNeedsLayout(newValue)
                 self.applyingDeferred = false
             }
         }
