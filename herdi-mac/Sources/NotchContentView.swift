@@ -177,6 +177,7 @@ private struct CompactBar: View {
     let notchHeight: CGFloat
     let blocked: [Agent]
     let working: [Agent]
+    private let updater = Updater.shared
 
     var body: some View {
         HStack(spacing: 6) {
@@ -219,8 +220,13 @@ private struct CompactBar: View {
                 Spacer()
             }
 
-            // Right wing: agent count
+            // Right wing: update badge + agent count
             HStack(spacing: 4) {
+                if updater.updateAvailable && !expanded {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.cyan)
+                }
                 if !expanded {
                     Text("\(relay.agents.count)")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -229,6 +235,7 @@ private struct CompactBar: View {
             }
             .padding(.trailing, 10)
         }
+        .onAppear { updater.checkForUpdates() }
     }
 }
 
@@ -259,10 +266,16 @@ private struct SessionListContent: View {
     let idle: [Agent]
     let onSelectAgent: (Agent) -> Void
     let onJump: (Agent) -> Void
+    private let updater = Updater.shared
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 8) {
+                // Update banner
+                if updater.updateAvailable {
+                    UpdateBanner(updater: updater)
+                }
+
                 // Blocked: hoisted to top with urgency
                 if !blocked.isEmpty {
                     SectionHeader(title: "NEEDS YOU", color: .red, count: blocked.count)
@@ -299,11 +312,77 @@ private struct SessionListContent: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 30)
                 }
+
+                // Version footer
+                HStack {
+                    Spacer()
+                    Text("v\(updater.currentVersion)")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.2))
+                    Spacer()
+                }
+                .padding(.top, 4)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
         }
         .frame(maxHeight: 320)
+    }
+}
+
+// MARK: - Update Banner
+
+private struct UpdateBanner: View {
+    let updater: Updater
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 14))
+                .foregroundStyle(.cyan)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Update available")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                Text("v\(updater.currentVersion) → v\(updater.latestVersion ?? "?")")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            Spacer()
+
+            if updater.isUpdating {
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .frame(width: 16, height: 16)
+            } else {
+                Button { updater.performUpdate() } label: {
+                    Text("Install")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(.cyan)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.cyan.opacity(hovered ? 0.12 : 0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.cyan.opacity(0.2), lineWidth: 0.5)
+        )
+        .onHover { hovered = $0 }
     }
 }
 
