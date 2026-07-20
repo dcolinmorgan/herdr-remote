@@ -107,6 +107,20 @@ final class RelayConnection {
         task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
     }
 
+    func toggleQuestionOption(paneId: String, promptId: String, option: String) {
+        guard let data = try? JSONEncoder().encode(
+            QuestionToggleMessage(pane_id: paneId, prompt_id: promptId, option: option)
+        ) else { return }
+        task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
+    }
+
+    func submitQuestion(paneId: String, promptId: String) {
+        guard let data = try? JSONEncoder().encode(
+            QuestionSubmitMessage(pane_id: paneId, prompt_id: promptId)
+        ) else { return }
+        task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
+    }
+
     func fetchHistory(for paneId: String) {
         let msg = ["type": "read_pane", "pane_id": paneId]
         guard let data = try? JSONSerialization.data(withJSONObject: msg) else { return }
@@ -174,10 +188,17 @@ final class RelayConnection {
                 if let pid = msg.pane_id,
                    let agent = agents.first(where: { $0.id == pid }) {
                     agent.prompt = msg.prompt
+                    agent.promptId = msg.prompt_id
                     agent.options = msg.options
+                    agent.multiOptions = msg.multi_options ?? []
+                    agent.selectedOptions = msg.selected_options ?? []
+                    agent.interaction = msg.interaction
+                    agent.isMultiSelect = msg.multi ?? false
                     agent.status = .blocked
-                    HapticManager.shared.blocked()
-                    NotificationManager.shared.notifyBlocked(agent: agent.name, project: agent.project)
+                    if msg.update != true {
+                        HapticManager.shared.blocked()
+                        NotificationManager.shared.notifyBlocked(agent: agent.name, project: agent.project)
+                    }
                 }
 
             case "pane_content":

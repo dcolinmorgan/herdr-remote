@@ -147,9 +147,10 @@ struct SwipeableAgentCard: View {
 
     private func respond(_ text: String) {
         HapticManager.shared.sent()
-        relay.send(response: ResponseMessage(pane_id: agent.id, text: text))
+        relay.send(response: ResponseMessage(pane_id: agent.id, prompt_id: agent.promptId, text: text))
         agent.status = .working
         agent.prompt = nil
+        agent.promptId = nil
         agent.options = nil
     }
 }

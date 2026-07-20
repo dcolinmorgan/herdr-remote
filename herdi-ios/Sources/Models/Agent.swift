@@ -14,6 +14,11 @@ final class Agent: Identifiable {
     var host: String
     var prompt: String?
     var options: [String]?
+    var promptId: String?
+    var multiOptions: [String] = []
+    var selectedOptions: [String] = []
+    var interaction: String?
+    var isMultiSelect = false
 
     init(id: String, name: String, status: AgentStatus, project: String, cwd: String, host: String = "local") {
         self.id = id
@@ -34,6 +39,12 @@ struct AgentMessage: Decodable {
     let project: String?
     let prompt: String?
     let options: [String]?
+    let prompt_id: String?
+    let multi_options: [String]?
+    let selected_options: [String]?
+    let interaction: String?
+    let multi: Bool?
+    let update: Bool?
 
     struct AgentData: Decodable {
         let pane_id: String
@@ -45,7 +56,8 @@ struct AgentMessage: Decodable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case type, agents, pane_id, agent, project, prompt, options
+        case type, agents, pane_id, agent, project, prompt, options, prompt_id
+        case multi_options, selected_options, interaction, multi, update
     }
 
     init(from decoder: Decoder) throws {
@@ -56,6 +68,12 @@ struct AgentMessage: Decodable {
         project = try? values.decode(String.self, forKey: .project)
         prompt = try? values.decode(String.self, forKey: .prompt)
         options = try? values.decode([String].self, forKey: .options)
+        prompt_id = try? values.decode(String.self, forKey: .prompt_id)
+        multi_options = try? values.decode([String].self, forKey: .multi_options)
+        selected_options = try? values.decode([String].self, forKey: .selected_options)
+        interaction = try? values.decode(String.self, forKey: .interaction)
+        multi = try? values.decode(Bool.self, forKey: .multi)
+        update = try? values.decode(Bool.self, forKey: .update)
         if type == "agent_update" {
             agentData = try? values.decode(AgentData.self, forKey: .agent)
             agent = nil
@@ -69,5 +87,19 @@ struct AgentMessage: Decodable {
 struct ResponseMessage: Codable {
     let type = "respond"
     let pane_id: String
+    let prompt_id: String?
     let text: String
+}
+
+struct QuestionToggleMessage: Codable {
+    let type = "question_toggle"
+    let pane_id: String
+    let prompt_id: String
+    let option: String
+}
+
+struct QuestionSubmitMessage: Codable {
+    let type = "question_submit"
+    let pane_id: String
+    let prompt_id: String
 }

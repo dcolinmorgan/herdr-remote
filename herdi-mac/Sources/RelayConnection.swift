@@ -227,10 +227,27 @@ final class RelayConnection {
                     _ = runHerdr("pane", "send-text", paneId, response.text + "\n")
                 }
             }
+
         } else {
             guard let data = try? JSONEncoder().encode(response) else { return }
             task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
         }
+    }
+
+    func toggleQuestionOption(paneId: String, promptId: String, option: String) {
+        guard mode == .relay,
+              let data = try? JSONEncoder().encode(
+                QuestionToggleMessage(pane_id: paneId, prompt_id: promptId, option: option)
+              ) else { return }
+        task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
+    }
+
+    func submitQuestion(paneId: String, promptId: String) {
+        guard mode == .relay,
+              let data = try? JSONEncoder().encode(
+                QuestionSubmitMessage(pane_id: paneId, prompt_id: promptId)
+              ) else { return }
+        task?.send(.string(String(data: data, encoding: .utf8)!)) { _ in }
     }
 
     func focusPane(_ paneId: String) {
@@ -296,9 +313,16 @@ final class RelayConnection {
             case "blocked":
                 if let pid = msg.pane_id, let agent = agents.first(where: { $0.id == pid }) {
                     agent.prompt = msg.prompt
+                    agent.promptId = msg.prompt_id
                     agent.options = msg.options
+                    agent.multiOptions = msg.multi_options ?? []
+                    agent.selectedOptions = msg.selected_options ?? []
+                    agent.interaction = msg.interaction
+                    agent.isMultiSelect = msg.multi ?? false
                     agent.status = .blocked
-                    sendNotification(agent: agent.name, project: agent.project)
+                    if msg.update != true {
+                        sendNotification(agent: agent.name, project: agent.project)
+                    }
                 }
             default: break
             }

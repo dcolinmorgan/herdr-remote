@@ -116,6 +116,7 @@ def make_active_approval_keyboard(pane_id, options):
     markup = tg.make_keyboard(pane_id, options)
     generation = json.loads(markup.inline_keyboard[0][0].callback_data)["g"]
     tg.approval_tokens[pane_id] = generation
+    tg.blocked_prompt_ids[pane_id] = "prompt-123"
     return markup
 
 
@@ -127,6 +128,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         tg.relay_connected = False
         tg.pending.clear()
         tg.approval_tokens.clear()
+        tg.blocked_prompt_ids.clear()
         tg.prev_statuses.clear()
         tg.daily_stats.clear()
 
@@ -410,7 +412,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(tg, "send_keys_to_relay", AsyncMock()) as send_keys:
             await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
 
-        send_keys.assert_awaited_once_with("w0:p1", ["1"])
+        send_keys.assert_awaited_once_with("w0:p1", ["1"], prompt_id="prompt-123")
         self.assertEqual(callback.edit_calls, 1)
         self.assertIn("Sent: yes", callback.message.replies[0][0])
         self.assertNotIn("w0:p1", tg.approval_tokens)
@@ -446,11 +448,18 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_keys_requires_positive_relay_acknowledgement(self):
         accepted = FakeRelayConnection([
             {"type": "agents", "agents": []},
-            {"type": "command_result", "command": "send_keys", "ok": True},
+            {"type": "command_result", "command": "send_keys", "ok": True, "request_id": "request-123"},
         ])
-        with patch("websockets.connect", return_value=accepted):
+        with patch("websockets.connect", return_value=accepted), patch.object(
+            tg.secrets, "token_hex", return_value="request-123"
+        ):
             await tg.send_keys_to_relay("w0:p1", ["1"])
-        self.assertEqual(accepted.sent, [{"type": "send_keys", "pane_id": "w0:p1", "keys": ["1"]}])
+        self.assertEqual(accepted.sent, [{
+            "type": "send_keys",
+            "pane_id": "w0:p1",
+            "keys": ["1"],
+            "request_id": "request-123",
+        }])
 
         rejected = FakeRelayConnection([{"type": "error", "message": "keys contain disallowed values"}])
         with patch("websockets.connect", return_value=rejected):
@@ -459,7 +468,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
     def test_relay_allows_numeric_approval_keys_and_acknowledges_them(self):
         relay_path = ROOT / "relay" / "herdr_relay.py"
-        source = relay_path.read_text()
+        source = relay_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         safe_keys = next(
             node.value
@@ -469,19 +478,46 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         )
         values = eval(compile(ast.Expression(safe_keys), str(relay_path), "eval"), {"range": range})
         self.assertTrue({"1", "2", "3"}.issubset(values))
-        self.assertIn('"command": "send_keys", "ok": True', source)
+        self.assertIn('"command": "send_keys"', source)
+        self.assertIn('"ok": True', source)
         self.assertIn("if result.returncode != 0:", source)
+
+    async def test_omp_choice_uses_question_response_with_label_and_prompt_id(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(1, status="blocked")
+        tg.agents[0]["agent"] = "omp"
+        tg.blocked_prompt_ids["w0:p1"] = "prompt-123"
+        markup = tg.make_keyboard(
+            "w0:p1",
+            ["Red", "Blue"],
+            generation="generation",
+            interaction="omp_question",
+        )
+        tg.approval_tokens["w0:p1"] = "generation"
+        callback = FakeCallback(markup.inline_keyboard[1][0].callback_data)
+        callback.message.reply_markup = markup
+
+        with (
+            patch.object(tg, "send_to_relay", AsyncMock()) as send_to_relay,
+            patch.object(tg, "send_keys_to_relay", AsyncMock()) as send_keys,
+        ):
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+        send_to_relay.assert_awaited_once_with("w0:p1", "Blue", prompt_id="prompt-123")
+        send_keys.assert_not_awaited()
 
     def test_relay_disconnect_clears_approval_generations(self):
         tg.relay_connected = True
         tg.agents = make_agents(1, status="blocked")
         tg.approval_tokens["w0:p1"] = "generation"
+        tg.blocked_prompt_ids["w0:p1"] = "prompt"
 
         tg.clear_relay_connection_state()
 
         self.assertFalse(tg.relay_connected)
         self.assertEqual(tg.agents, [])
         self.assertEqual(tg.approval_tokens, {})
+        self.assertEqual(tg.blocked_prompt_ids, {})
 
     async def test_failed_blocked_notification_preserves_previous_generation(self):
         tg.approval_tokens["w0:p1"] = "previous"
@@ -614,6 +650,26 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
 
         send_text.assert_awaited_once_with("w0:p1", "follow up")
         self.assertEqual(message.replies[0][0], "Sent")
+
+    async def test_blocked_notification_reply_uses_prompt_response(self):
+        tg.relay_connected = True
+        tg.agents = make_agents(1, status="blocked")
+        tg.blocked_prompt_ids["w0:p1"] = "prompt-123"
+        tg.register_pending(42, 77, "w0:p1")
+        message = FakeMessage()
+        message.reply_to_message = SimpleNamespace(message_id=77)
+        message.text = "custom answer"
+
+        with (
+            patch.object(tg, "send_to_relay", AsyncMock()) as send_response,
+            patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text,
+        ):
+            await tg.handle_text(make_update(message=message), SimpleNamespace())
+
+        send_response.assert_awaited_once_with(
+            "w0:p1", "custom answer", prompt_id="prompt-123"
+        )
+        send_text.assert_not_awaited()
 
     async def test_mapped_reply_rejects_disconnected_and_stale_panes(self):
         tg.register_pending(42, 77, "w0:p1")
