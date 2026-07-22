@@ -10,11 +10,28 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs every request URL at INFO; that URL contains the bot token. Silence it.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("herdr-tg")
 
 TOKEN = os.environ.get("HERDR_TG_TOKEN", "")
 CHAT_ID = os.environ.get("HERDR_TG_CHAT_ID", "")
 RELAY_WS = os.environ.get("HERDR_RELAY", "ws://127.0.0.1:8375")
+RELAY_WS_SAFE = RELAY_WS.split("?", 1)[0]  # token-free variant for display and logging; never leak the token
+_RELAY_TOKEN = RELAY_WS.split("token=", 1)[1] if "token=" in RELAY_WS else ""
+
+
+def scrub(value) -> str:
+    """Strip secrets from any string before it is logged or sent to Telegram.
+
+    WebSocket exceptions (e.g. InvalidURI) embed the full relay URL incl. the
+    ?token= query, so raw exception text must never be surfaced unredacted.
+    """
+    s = str(value)
+    for secret in (_RELAY_TOKEN, TOKEN):
+        if secret:
+            s = s.replace(secret, "<redacted>")
+    return s
 
 if not TOKEN:
     print("Set HERDR_TG_TOKEN (from @BotFather)")
@@ -38,7 +55,17 @@ async def send_to_relay(pane_id: str, text: str):
         async with websockets.connect(RELAY_WS) as ws:
             await ws.send(json.dumps({"type": "respond", "pane_id": pane_id, "text": text}))
     except Exception as e:
-        log.warning(f"Failed to send to relay: {e}")
+        log.warning(f"Failed to send to relay: {scrub(e)}")
+
+
+async def send_keys_to_relay(pane_id: str, keys: list[str]):
+    """Send raw key presses to the relay via WebSocket (e.g. ["1"] to pick a prompt option)."""
+    import websockets
+    try:
+        async with websockets.connect(RELAY_WS) as ws:
+            await ws.send(json.dumps({"type": "send_keys", "pane_id": pane_id, "keys": keys}))
+    except Exception as e:
+        log.warning(f"Failed to send keys to relay: {scrub(e)}")
 
 
 async def read_pane(pane_id: str, lines: int = 15) -> str:
@@ -56,7 +83,7 @@ async def read_pane(pane_id: str, lines: int = 15) -> str:
                 raw = await asyncio.wait_for(ws.recv(), timeout=3)
                 msg = json.loads(raw)
     except Exception as e:
-        return f"(error reading pane: {e})"
+        return f"(error reading pane: {scrub(e)})"
     return "(no response)"
 
 
@@ -126,7 +153,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     status = "Connected" if relay_connected else "Disconnected"
     text = (
-        f"Relay: {RELAY_WS}\n"
+        f"Relay: {RELAY_WS_SAFE}\n"
         f"Status: {status}\n"
         f"Agents: {len(agents)} ({b} blocked, {w} working, {i} idle)"
     )
@@ -193,7 +220,7 @@ async def cmd_interrupt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ws.send(json.dumps({"type": "send_keys", "pane_id": match["pane_id"], "keys": ["Ctrl+c"]}))
         await update.message.reply_text(f"Sent Ctrl+C to {match['project']}")
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(f"Failed: {scrub(e)}")
 
 
 async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -229,7 +256,7 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ws.send(json.dumps({"type": "send_keys", "pane_id": match["pane_id"], "keys": ["Enter"]}))
         await update.message.reply_text(f"Sent to {match['project']}: {text}")
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(f"Failed: {scrub(e)}")
 
 
 async def cmd_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -336,7 +363,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ws.send(json.dumps({"type": "send_keys", "pane_id": data["pane_id"], "keys": ["Ctrl+c"]}))
             await query.message.reply_text("Sent Ctrl+C")
         except Exception as e:
-            await query.message.reply_text(f"Failed: {e}")
+            await query.message.reply_text(f"Failed: {scrub(e)}")
         return
 
     if action == "select_send":
@@ -361,12 +388,30 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"Trusted {agent_name} (always allow)")
         return
 
-    # Default: respond to blocked agent
+    # Default: confirm a blocked agent's prompt by pressing the option number.
+    # Sending the option *text* via `respond` does NOT work: the relay pastes it via
+    # send-text, and Claude's TUI treats a pasted trailing newline as paste content,
+    # not as Enter, so the prompt never gets confirmed. A real key press does.
     pane_id = data["pane_id"]
-    response = data["response"]
-    await send_to_relay(pane_id, response)
+    key = data.get("k")
+    if key is None:  # legacy text buttons: fall back to the old path
+        await send_to_relay(pane_id, data.get("response", ""))
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+    # Recover the pressed button's label for the confirmation (kept out of
+    # callback_data to respect Telegram's 64-byte limit).
+    label = f"option {key}"
+    if query.message and query.message.reply_markup:
+        for row in query.message.reply_markup.inline_keyboard:
+            for btn in row:
+                try:
+                    if json.loads(btn.callback_data).get("k") == key:
+                        label = btn.text
+                except (ValueError, TypeError):
+                    pass
+    await send_keys_to_relay(pane_id, [key])
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(f"Sent: `{response}`", parse_mode="Markdown")
+    await query.message.reply_text(f"Sent: {label}")
 
 
 # --- Free text reply ---
@@ -394,7 +439,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ws.send(json.dumps({"type": "send_keys", "pane_id": pane_id, "keys": ["Enter"]}))
         await update.message.reply_text("Sent")
     except Exception as e:
-        await update.message.reply_text(f"Failed: {e}")
+        await update.message.reply_text(f"Failed: {scrub(e)}")
 
 
 # --- Blocked notification ---
@@ -420,9 +465,15 @@ def make_keyboard(pane_id: str, options: list[str] | None) -> InlineKeyboardMark
     else:
         buttons = [(opt.split(",")[0], opt) for opt in (options or ["yes, single permission", "no (tab to edit)"])]
 
+    # Encode the option's 1-based position as "k"; the callback presses that number
+    # key on the agent's prompt. Sending the option *text* does not work (see handle_callback).
+    # callback_data must stay under Telegram's 64-byte limit, so keep it to the
+    # pane and the option number; the confirmation label is recovered from the
+    # keyboard on press (see handle_callback).
     keyboard = [
-        [InlineKeyboardButton(label, callback_data=json.dumps({"pane_id": pane_id, "response": resp}))]
-        for label, resp in buttons
+        [InlineKeyboardButton(label, callback_data=json.dumps(
+            {"pane_id": pane_id, "k": str(i + 1)}, separators=(",", ":")))]
+        for i, (label, _resp) in enumerate(buttons)
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -449,7 +500,7 @@ async def relay_listener(app: Application):
         try:
             async with websockets.connect(RELAY_WS) as ws:
                 relay_connected = True
-                log.info(f"Connected to relay at {RELAY_WS}")
+                log.info(f"Connected to relay at {RELAY_WS_SAFE}")
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
