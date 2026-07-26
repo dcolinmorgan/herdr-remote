@@ -32,6 +32,8 @@ herdr server reload-config
 **Web app** (phone):
 Open [herdr-remote.pages.dev](https://herdr-remote.pages.dev), tap ⚙, paste your tunnel URL.
 
+**Telegram:** send `/start` for a clickable dashboard of every running agent. Select an agent to read its recent output and send your next message; larger herds include Previous and Next buttons.
+
 **Menu bar app** (macOS):
 Download from [Releases](https://github.com/dcolinmorgan/herdr-remote/releases).
 

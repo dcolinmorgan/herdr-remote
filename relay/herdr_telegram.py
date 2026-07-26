@@ -4,10 +4,13 @@
 # dependencies = ["python-telegram-bot>=21.0", "websockets>=14.0"]
 # ///
 """herdr-remote Telegram bot — monitor and approve agents from Telegram."""
-import asyncio, json, os, logging
+import asyncio, hashlib, json, os, logging
+from collections import Counter
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters
+
+from agent_state import apply_agent_message
 
 logging.basicConfig(level=logging.INFO)
 # httpx logs every request URL at INFO; that URL contains the bot token. Silence it.
@@ -44,6 +47,10 @@ prev_statuses: dict[str, str] = {}  # pane_id -> last known status
 relay_connected = False
 send_target: str = ""         # pane_id for next free-text message (set by /send picker)
 daily_stats: dict[str, dict] = {}  # pane_id -> {agent, project, blocked_count, working_mins, last_change}
+
+AGENT_PAGE_SIZE = 20
+STATUS_ORDER = {"blocked": 0, "working": 1, "done": 2, "idle": 3, "unknown": 3}
+STATUS_LABELS = {"blocked": "BLOCKED", "working": "WORKING", "done": "DONE", "idle": "IDLE", "unknown": "IDLE"}
 
 
 # --- Relay communication ---
@@ -96,23 +103,138 @@ def authorized(update: Update) -> bool:
     return str(update.effective_chat.id) == CHAT_ID
 
 
+def agents_for_action(action: str) -> list[dict]:
+    if action == "interrupt":
+        return [agent for agent in agents if agent.get("status") in ("working", "blocked")]
+    if action == "trust":
+        return [agent for agent in agents if agent.get("status") == "blocked"]
+    return list(agents)
+
+
+def sorted_agents(agent_list: list[dict]) -> list[dict]:
+    return sorted(agent_list, key=lambda agent: (
+        STATUS_ORDER.get(agent.get("status", "unknown"), 3),
+        agent.get("project", "").lower(),
+        agent.get("agent", "").lower(),
+        agent.get("host", "local").lower(),
+        agent.get("pane_id", ""),
+    ))
+
+
+def compact_identifier(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    digest = hashlib.sha1(value.encode()).hexdigest()[:12]
+    return value[:limit - 15] + "..." + digest
+
+
+def agent_button_labels(agent_list: list[dict]) -> list[str]:
+    bases = []
+    contexts = []
+    for agent in agent_list:
+        status = STATUS_LABELS.get(agent.get("status", "unknown"), "UNKNOWN")
+        project = agent.get("project") or agent.get("cwd") or "unknown"
+        name = agent.get("agent") or "agent"
+        host = agent.get("host", "local")
+        bases.append(f"[{status}] {project} ({name})")
+        contexts.append(f" @{compact_identifier(host, 24)}" if host != "local" else "")
+
+    provisional = [base[:max(1, 64 - len(context))] + context for base, context in zip(bases, contexts)]
+    counts = Counter(provisional)
+    labels = []
+    for agent, base, context, candidate in zip(agent_list, bases, contexts, provisional):
+        if counts[candidate] == 1:
+            labels.append(candidate)
+            continue
+        pane_id = compact_identifier(agent.get("pane_id", "?"), 18)
+        suffix = context + f" [{pane_id}]"
+        labels.append(base[:max(1, 64 - len(suffix))] + suffix)
+    unique_labels = []
+    used = set()
+    for label in labels:
+        candidate = label
+        ordinal = 2
+        while candidate in used:
+            marker = f" #{ordinal}"
+            candidate = label[:64 - len(marker)] + marker
+            ordinal += 1
+        used.add(candidate)
+        unique_labels.append(candidate)
+    return unique_labels
+
+
+def build_agent_keyboard(action: str, page: int = 0, agent_list: list[dict] | None = None) -> InlineKeyboardMarkup:
+    ordered = sorted_agents(agents_for_action(action) if agent_list is None else agent_list)
+    page_count = max(1, (len(ordered) + AGENT_PAGE_SIZE - 1) // AGENT_PAGE_SIZE)
+    page = min(max(page, 0), page_count - 1)
+    start = page * AGENT_PAGE_SIZE
+    visible = ordered[start:start + AGENT_PAGE_SIZE]
+    labels = agent_button_labels(ordered)[start:start + AGENT_PAGE_SIZE]
+    keyboard = [[InlineKeyboardButton(
+        label,
+        callback_data=json.dumps(
+            {"action": action, "pane_id": agent["pane_id"]}, separators=(",", ":")
+        ),
+    )] for agent, label in zip(visible, labels)]
+
+    if page_count > 1:
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(
+                "Previous",
+                callback_data=json.dumps(
+                    {"action": "page", "menu": action, "page": page - 1}, separators=(",", ":")
+                ),
+            ))
+        if page + 1 < page_count:
+            navigation.append(InlineKeyboardButton(
+                "Next",
+                callback_data=json.dumps(
+                    {"action": "page", "menu": action, "page": page + 1}, separators=(",", ":")
+                ),
+            ))
+        keyboard.append(navigation)
+    return InlineKeyboardMarkup(keyboard)
+
+
+def refresh_keyboard(action: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "Refresh agents",
+            callback_data=json.dumps({"action": "page", "menu": action, "page": 0}, separators=(",", ":")),
+        )
+    ]])
+
+
+def dashboard_text() -> str:
+    if not relay_connected:
+        text = "herdr-remote bot\n\nRelay disconnected. Use /status for connection details."
+    elif not agents:
+        text = "herdr-remote bot\n\nConnected to relay. No agents are running."
+    else:
+        blocked = sum(agent.get("status") == "blocked" for agent in agents)
+        working = sum(agent.get("status") == "working" for agent in agents)
+        done = sum(agent.get("status") == "done" for agent in agents)
+        idle = len(agents) - blocked - working - done
+        text = f"herdr-remote bot\n\nAgents: {len(agents)} ({blocked} blocked, {working} working, {done} done, {idle} idle)\nSelect an agent to read and reply."
+    if not CHAT_ID:
+        text += "\n\nChat ID: {chat_id}"
+    return text
+
+
 # --- Bot commands ---
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
-    await update.message.reply_text(
-        "herdr-remote bot\n\n"
-        "Commands:\n"
-        "/agents — list all agents\n"
-        "/status — relay connection info\n"
-        "/read — read last output from an agent\n"
-        "/send — send text to an agent\n"
-        "/trust — trust all tools for a blocked agent\n"
-        "/interrupt — send Ctrl+C to an agent\n\n"
-        "Pick an agent from the menu, then type — no reply needed.\n"
-        "You'll get notified when agents block or finish.\n\n"
-        f"Chat ID: {update.effective_chat.id}"
-    )
+    if not authorized(update):
+        return
+    text = dashboard_text()
+    if not CHAT_ID:
+        text = text.format(chat_id=update.effective_chat.id)
+    if relay_connected and agents:
+        await update.message.reply_text(text, reply_markup=build_agent_keyboard("select_reply"))
+        return
+    await update.message.reply_text(text)
 
 
 async def cmd_agents(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -123,6 +245,7 @@ async def cmd_agents(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     blocked = [a for a in agents if a.get("status") == "blocked"]
     working = [a for a in agents if a.get("status") == "working"]
+    done = [a for a in agents if a.get("status") == "done"]
     idle = [a for a in agents if a.get("status") in ("idle", "unknown")]
 
     lines = []
@@ -134,6 +257,11 @@ async def cmd_agents(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if working:
         lines.append("WORKING:")
         for a in working:
+            host = f" @{a['host']}" if a.get('host', 'local') != 'local' else ''
+            lines.append(f"  {a['project']} ({a['agent']}){host}")
+    if done:
+        lines.append("DONE:")
+        for a in done:
             host = f" @{a['host']}" if a.get('host', 'local') != 'local' else ''
             lines.append(f"  {a['project']} ({a['agent']}){host}")
     if idle:
@@ -149,13 +277,14 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle /status — show connection info."""
     b = len([a for a in agents if a.get("status") == "blocked"])
     w = len([a for a in agents if a.get("status") == "working"])
+    d = len([a for a in agents if a.get("status") == "done"])
     i = len([a for a in agents if a.get("status") in ("idle", "unknown")])
 
     status = "Connected" if relay_connected else "Disconnected"
     text = (
         f"Relay: {RELAY_WS_SAFE}\n"
         f"Status: {status}\n"
-        f"Agents: {len(agents)} ({b} blocked, {w} working, {i} idle)"
+        f"Agents: {len(agents)} ({b} blocked, {w} working, {d} done, {i} idle)"
     )
     await update.message.reply_text(text)
 
@@ -168,11 +297,7 @@ async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not agents:
             await update.message.reply_text("No agents. Use /agents to check.")
             return
-        keyboard = [[InlineKeyboardButton(
-            f"{a['project']} ({a['agent']})",
-            callback_data=json.dumps({"action": "read", "pane_id": a["pane_id"]})
-        )] for a in agents[:8]]
-        await update.message.reply_text("Read which agent?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Read which agent?", reply_markup=build_agent_keyboard("read"))
         return
 
     # Find agent by project name
@@ -201,11 +326,10 @@ async def cmd_interrupt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not working:
             await update.message.reply_text("No active agents to interrupt.")
             return
-        keyboard = [[InlineKeyboardButton(
-            f"{a['project']} ({a['agent']})",
-            callback_data=json.dumps({"action": "interrupt", "pane_id": a["pane_id"]})
-        )] for a in working[:8]]
-        await update.message.reply_text("Interrupt which agent?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "Interrupt which agent?",
+            reply_markup=build_agent_keyboard("interrupt", agent_list=working),
+        )
         return
 
     query = " ".join(args).lower()
@@ -230,11 +354,10 @@ async def cmd_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not agents:
             await update.message.reply_text("No agents.")
             return
-        keyboard = [[InlineKeyboardButton(
-            f"{a['project']} ({a['agent']})",
-            callback_data=json.dumps({"action": "select_send", "pane_id": a["pane_id"]})
-        )] for a in agents[:8]]
-        await update.message.reply_text("Send to which agent?\n(After selecting, reply with your text)", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "Send to which agent?\n(After selecting, reply with your text)",
+            reply_markup=build_agent_keyboard("select_send"),
+        )
         return
 
     query = args[0].lower()
@@ -269,11 +392,7 @@ async def cmd_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        keyboard = [[InlineKeyboardButton(
-            f"{a['project']} ({a['agent']})",
-            callback_data=json.dumps({"action": "select_reply", "pane_id": a["pane_id"]})
-        )] for a in agents[:8]]
-        await update.message.reply_text("Reply to which agent?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Reply to which agent?", reply_markup=build_agent_keyboard("select_reply"))
         return
 
     query = " ".join(args).lower()
@@ -300,11 +419,10 @@ async def cmd_trust(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        keyboard = [[InlineKeyboardButton(
-            f"{a['project']} ({a['agent']})",
-            callback_data=json.dumps({"action": "trust", "pane_id": a["pane_id"]})
-        )] for a in blocked[:8]]
-        await update.message.reply_text("Trust which agent?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "Trust which agent?",
+            reply_markup=build_agent_keyboard("trust", agent_list=blocked),
+        )
         return
 
     query = " ".join(args).lower()
@@ -339,14 +457,44 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
+    global send_target
     query = update.callback_query
     if CHAT_ID and str(update.effective_chat.id) != CHAT_ID:
         await query.answer("Unauthorized")
         return
     await query.answer()
 
+    if not relay_connected:
+        send_target = ""
+        await query.message.reply_text("Relay disconnected. Use /start after it reconnects.")
+        return
+
     data = json.loads(query.data)
     action = data.get("action", "respond")
+
+    if action == "page":
+        menu = data.get("menu", "select_reply")
+        if not agents_for_action(menu):
+            await query.message.reply_text("No eligible agents are available.")
+            return
+        await query.edit_message_reply_markup(
+            reply_markup=build_agent_keyboard(menu, page=data.get("page", 0))
+        )
+        return
+
+    selected_agent = None
+    if action in {"read", "interrupt", "select_send", "select_reply", "trust"}:
+        selected_agent = next(
+            (agent for agent in agents_for_action(action) if agent.get("pane_id") == data.get("pane_id")),
+            None,
+        )
+        if selected_agent is None:
+            send_target = ""
+            await query.message.reply_text(
+                "That agent is no longer available for this action. Refresh the list and choose another agent.",
+                reply_markup=refresh_keyboard(action),
+            )
+            return
 
     if action == "read":
         content = await read_pane(data["pane_id"])
@@ -367,25 +515,21 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "select_send":
-        global send_target
         send_target = data["pane_id"]
-        agent_name = next((a['project'] for a in agents if a['pane_id'] == data['pane_id']), '?')
-        await query.message.reply_text(f"Ready. Type your message — it will be sent to {agent_name}.")
+        await query.message.reply_text(f"Ready. Type your message — it will be sent to {selected_agent['project']}.")
         return
 
     if action == "select_reply":
         send_target = data["pane_id"]
-        agent_name = next((a['project'] for a in agents if a['pane_id'] == data['pane_id']), '?')
         content = await read_pane(data["pane_id"])
         if len(content) > 3000:
             content = content[-3000:]
-        await query.message.reply_text(f"{agent_name}:\n\n{content}\n\n--- Type your response below ---")
+        await query.message.reply_text(f"{selected_agent['project']}:\n\n{content}\n\n--- Type your response below ---")
         return
 
     if action == "trust":
         await send_to_relay(data["pane_id"], "trust, always allow")
-        agent_name = next((a['project'] for a in agents if a['pane_id'] == data['pane_id']), '?')
-        await query.message.reply_text(f"Trusted {agent_name} (always allow)")
+        await query.message.reply_text(f"Trusted {selected_agent['project']} (always allow)")
         return
 
     # Default: confirm a blocked agent's prompt by pressing the option number.
@@ -491,6 +635,45 @@ async def notify_blocked(app: Application, pane_id: str, agent: str, project: st
 
 # --- Relay listener ---
 
+async def track_agent_updates(app: Application, updated_agents: list[dict]):
+    """Track status transitions for full snapshots and pane-level updates."""
+    if not CHAT_ID:
+        return
+
+    import time
+    now = time.time()
+    for agent_data in updated_agents:
+        pane_id = agent_data["pane_id"]
+        new_status = agent_data.get("status", "unknown")
+        old_status = prev_statuses.get(pane_id)
+
+        if pane_id not in daily_stats:
+            daily_stats[pane_id] = {
+                "agent": agent_data.get("agent", ""),
+                "project": agent_data.get("project", ""),
+                "blocked_count": 0,
+                "working_mins": 0,
+                "last_change": now,
+            }
+        stats = daily_stats[pane_id]
+        if old_status == "working" and old_status != new_status:
+            stats["working_mins"] += int((now - stats["last_change"]) / 60)
+        if new_status == "blocked" and old_status != "blocked":
+            stats["blocked_count"] += 1
+        if old_status != new_status:
+            stats["last_change"] = now
+
+        if old_status and old_status != new_status and new_status in ("idle", "done") and old_status in ("working", "blocked"):
+            try:
+                await app.bot.send_message(
+                    chat_id=int(CHAT_ID),
+                    text=f"{agent_data['project']} ({agent_data['agent']}) finished."
+                )
+            except Exception as e:
+                log.warning("Failed to send completion notification: %s", scrub(e))
+        prev_statuses[pane_id] = new_status
+
+
 async def relay_listener(app: Application):
     """Persistent WebSocket connection to relay."""
     import websockets
@@ -509,38 +692,14 @@ async def relay_listener(app: Application):
 
                     if msg.get("type") == "agents":
                         new_agents = msg.get("agents", [])
-                        # Detect status transitions
-                        if CHAT_ID:
-                            import time
-                            now = time.time()
-                            for a in new_agents:
-                                pid = a["pane_id"]
-                                new_status = a.get("status", "unknown")
-                                old_status = prev_statuses.get(pid)
+                        await track_agent_updates(app, new_agents)
+                        agents = apply_agent_message(agents, msg)
 
-                                # Update daily stats
-                                if pid not in daily_stats:
-                                    daily_stats[pid] = {"agent": a.get("agent",""), "project": a.get("project",""), "blocked_count": 0, "working_mins": 0, "last_change": now}
-                                ds = daily_stats[pid]
-                                if old_status == "working" and old_status != new_status:
-                                    elapsed = (now - ds["last_change"]) / 60
-                                    ds["working_mins"] += int(elapsed)
-                                if new_status == "blocked" and old_status != "blocked":
-                                    ds["blocked_count"] += 1
-                                if old_status != new_status:
-                                    ds["last_change"] = now
-
-                                if old_status and old_status != new_status:
-                                    if new_status == "idle" and old_status in ("working", "blocked"):
-                                        try:
-                                            await app.bot.send_message(
-                                                chat_id=int(CHAT_ID),
-                                                text=f"{a['project']} ({a['agent']}) finished."
-                                            )
-                                        except Exception:
-                                            pass
-                                prev_statuses[pid] = new_status
-                        agents = new_agents
+                    elif msg.get("type") == "agent_update":
+                        updated_agent = msg.get("agent") or {}
+                        if updated_agent.get("pane_id"):
+                            await track_agent_updates(app, [updated_agent])
+                            agents = apply_agent_message(agents, msg)
 
                     elif msg.get("type") == "blocked":
                         await notify_blocked(
@@ -553,6 +712,7 @@ async def relay_listener(app: Application):
                         )
         except Exception as e:
             relay_connected = False
+            agents = []
             log.warning(f"Relay connection lost: {e}, reconnecting in 5s...")
             await asyncio.sleep(5)
 
@@ -561,12 +721,12 @@ async def relay_listener(app: Application):
 
 def main():
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
     if CHAT_ID:
         auth_filter = filters.Chat(chat_id=int(CHAT_ID))
     else:
         auth_filter = filters.ALL  # No restriction in discovery mode
 
+    app.add_handler(CommandHandler("start", cmd_start, filters=auth_filter))
     app.add_handler(CommandHandler("agents", cmd_agents, filters=auth_filter))
     app.add_handler(CommandHandler("status", cmd_status, filters=auth_filter))
     app.add_handler(CommandHandler("read", cmd_read, filters=auth_filter))

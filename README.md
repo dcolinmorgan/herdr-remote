@@ -56,6 +56,7 @@ uv run relay/herdr_telegram.py
 
 | Command | Action |
 |---------|--------|
+| `/start` | Show the clickable agent dashboard |
 | `/agents` | List all with status |
 | `/read` | Read agent output |
 | `/reply` | Read + respond in one flow |
@@ -63,6 +64,8 @@ uv run relay/herdr_telegram.py
 | `/trust` | Trust all tools for blocked agent |
 | `/interrupt` | Send Ctrl+C |
 | `/digest` | Today's activity summary |
+
+The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent from `/start` reads its recent output and sends your next message to that agent.
 
 ## Architecture
 

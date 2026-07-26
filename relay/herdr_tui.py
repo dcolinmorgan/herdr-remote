@@ -13,6 +13,8 @@ from textual.reactive import reactive
 from textual.message import Message
 from textual import work
 
+from agent_state import apply_agent_message
+
 RELAY_WS = os.environ.get("HERDR_RELAY", "ws://127.0.0.1:8375")
 
 
@@ -157,10 +159,17 @@ class HerdrRemoteTUI(App):
 
     def _handle_msg(self, msg: dict):
         if msg.get("type") == "agents":
-            self._agents_data = msg.get("agents", [])
+            self._agents_data = apply_agent_message(self._agents_data, msg)
             # Clear blocked data for agents no longer blocked
             blocked_ids = {a["pane_id"] for a in self._agents_data if a.get("status") == "blocked"}
             self._blocked_data = [b for b in self._blocked_data if b["pane_id"] in blocked_ids]
+            self.recompose()
+        elif msg.get("type") == "agent_update":
+            self._agents_data = apply_agent_message(self._agents_data, msg)
+            update = msg.get("agent") or {}
+            if update.get("status") != "blocked":
+                pane_id = update.get("pane_id")
+                self._blocked_data = [b for b in self._blocked_data if b.get("pane_id") != pane_id]
             self.recompose()
         elif msg.get("type") == "blocked":
             # Update or add

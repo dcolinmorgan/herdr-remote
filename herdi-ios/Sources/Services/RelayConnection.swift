@@ -158,29 +158,17 @@ final class RelayConnection {
             case "agents":
                 guard let list = msg.agents else { return }
                 for a in list {
-                    if let existing = agents.first(where: { $0.id == a.pane_id }) {
-                        existing.status = AgentStatus(rawValue: a.status) ?? .unknown
-                        existing.project = a.project
-                        existing.host = a.host ?? "local"
-                    } else {
-                        agents.append(Agent(
-                            id: a.pane_id, name: a.agent,
-                            status: AgentStatus(rawValue: a.status) ?? .unknown,
-                            project: a.project, cwd: a.cwd, host: a.host ?? "local"
-                        ))
-                    }
+                    upsertAgent(a)
                 }
                 let activeIds = Set(list.map(\.pane_id))
                 agents.removeAll { !activeIds.contains($0.id) }
-                // Update live activity + widget
-                let b = agents.filter { $0.status == .blocked }.count
-                let w = agents.filter { $0.status == .working }.count
-                let i = agents.filter { $0.status == .idle || $0.status == .unknown }.count
-                LiveActivityManager.shared.update(blocked: b, working: w, idle: i)
-                let defaults = UserDefaults(suiteName: "group.com.dcolinmorgan.herdi")
-                defaults?.set(b, forKey: "blocked_count")
-                defaults?.set(w, forKey: "working_count")
-                defaults?.set(i, forKey: "idle_count")
+                updateAgentCounts()
+
+            case "agent_update":
+                if let update = msg.agentData {
+                    upsertAgent(update)
+                    updateAgentCounts()
+                }
 
             case "blocked":
                 if let pid = msg.pane_id,
@@ -201,5 +189,32 @@ final class RelayConnection {
                 break
             }
         }
+    }
+
+    private func upsertAgent(_ data: AgentMessage.AgentData) {
+        if let existing = agents.first(where: { $0.id == data.pane_id }) {
+            existing.name = data.agent
+            existing.status = AgentStatus(rawValue: data.status) ?? .unknown
+            existing.project = data.project
+            existing.cwd = data.cwd
+            existing.host = data.host ?? "local"
+            return
+        }
+        agents.append(Agent(
+            id: data.pane_id, name: data.agent,
+            status: AgentStatus(rawValue: data.status) ?? .unknown,
+            project: data.project, cwd: data.cwd, host: data.host ?? "local"
+        ))
+    }
+
+    private func updateAgentCounts() {
+        let blocked = agents.filter { $0.status == .blocked }.count
+        let working = agents.filter { $0.status == .working }.count
+        let idle = agents.filter { $0.status == .idle || $0.status == .unknown }.count
+        LiveActivityManager.shared.update(blocked: blocked, working: working, idle: idle)
+        let defaults = UserDefaults(suiteName: "group.com.dcolinmorgan.herdi")
+        defaults?.set(blocked, forKey: "blocked_count")
+        defaults?.set(working, forKey: "working_count")
+        defaults?.set(idle, forKey: "idle_count")
     }
 }
