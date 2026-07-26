@@ -2,44 +2,49 @@
 
 Get mobile notifications + approval for your herdr agents in 60 seconds.
 
-## 1. Start the relay (on your Mac)
+## 1. Install persistent local services
 
 ```bash
 git clone https://github.com/dcolinmorgan/herdr-remote
 cd herdr-remote/relay
-uv run herdr_relay.py
+./install-service.sh
 ```
 
-## 2. Expose it (pick one)
+The installer creates restartable user services for the relay and, optionally, Telegram. Choose `none` for the Cloudflare tunnel when you only need Telegram; the bot connects to the relay over localhost.
+
+## 2. Configure Telegram
+
+1. Open `@BotFather` in Telegram and send `/newbot`.
+2. Choose Telegram setup in the installer and paste the token when prompted.
+3. Open the new bot and send `/start`. For a private group, add the bot and send `/start@your_bot`.
+4. Select the discovered chat and accept the test message.
+
+Credentials are stored in `~/.config/herdr-remote/secrets.env` with owner-only permissions. The machine needs outbound internet access to Telegram, but no public IP, webhook, or tunnel.
+
+## 3. Optional remote web and agent access
+
+Cloudflare is only needed when a browser or agent outside your local network must connect directly to the relay:
 
 ```bash
-# Cloudflare tunnel (free, instant):
 cloudflared tunnel --url http://localhost:8375
 # → gives you https://something.trycloudflare.com
 ```
 
-## 3. Install the plugin (on any machine with herdr)
+On a remote machine with herdr:
 
 ```bash
 herdr plugin install dcolinmorgan/herdr-push
 export HERDR_RELAY="https://your-tunnel.trycloudflare.com"
-launchctl setenv HERDR_RELAY "$HERDR_RELAY"
 herdr server reload-config
 ```
 
 ## 4. Monitor
 
-**Web app** (phone):
-Open [herdr-remote.pages.dev](https://herdr-remote.pages.dev), tap ⚙, paste your tunnel URL.
+**Telegram:** send `/status`, then `/agents`, `/read`, or `/reply` to your bot.
 
-**Menu bar app** (macOS):
-Download from [Releases](https://github.com/dcolinmorgan/herdr-remote/releases).
+**Web app** (phone): open [herdr-remote.pages.dev](https://herdr-remote.pages.dev), tap ⚙, and paste the tunnel URL.
 
-**Telegram bot**:
-```bash
-export HERDR_TG_TOKEN="your-token" HERDR_TG_CHAT_ID="your-id"
-uv run herdr_telegram.py
-```
+**Menu bar app** (macOS): download from [Releases](https://github.com/dcolinmorgan/herdr-remote/releases).
 
 **Terminal TUI**:
 ```bash
