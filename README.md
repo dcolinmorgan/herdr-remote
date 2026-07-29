@@ -46,7 +46,23 @@ Open [herdr-demo.pages.dev](https://herdr-demo.pages.dev) on your phone, paste t
 
 ## Telegram Bot
 
-Full agent interaction:
+For an automatically restarting relay and Telegram bot:
+
+```bash
+cd relay
+./install-service.sh
+```
+
+Choose Telegram setup when prompted. Create the bot with `@BotFather` using `/newbot`, send `/start` to the bot (or `/start@your_bot` in a private group), and select the discovered chat. Telegram connects to the relay over localhost, so this setup does **not** require Cloudflare Tunnel; the Mac only needs outbound internet access to Telegram.
+
+The installer creates user services on macOS or Linux, enables relay authentication for new installs, and stores credentials in `~/.config/herdr-remote/secrets.env` with mode `0600`. On macOS:
+
+```bash
+launchctl print "gui/$(id -u)/com.herdr-remote.relay"
+launchctl print "gui/$(id -u)/com.herdr-remote.telegram"
+```
+
+Manual foreground setup remains available:
 
 ```bash
 export HERDR_TG_TOKEN="your-token"
@@ -100,8 +116,10 @@ uv run relay/herdr_tui.py
 
 ## Token Auth
 
+`install-service.sh` generates and persists a relay token for new managed installs. For foreground use:
+
 ```bash
-export HERDR_RELAY_TOKEN="$(openssl rand -hex 16)"
+export HERDR_RELAY_TOKEN="$(openssl rand -hex 32)"
 uv run relay/herdr_relay.py
 ```
 

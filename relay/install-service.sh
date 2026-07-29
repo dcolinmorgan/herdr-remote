@@ -3,10 +3,11 @@ set -e
 
 LABEL_RELAY="com.herdr-remote.relay"
 LABEL_TUNNEL="com.herdr-remote.tunnel"
+LABEL_TELEGRAM="com.herdr-remote.telegram"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_DIR="$HOME/.config/herdr-remote"
 CONFIG_FILE="$CONFIG_DIR/config.env"
-WS_PORT="${HERDR_RELAY_PORT:-8375}"
+SECRETS_FILE="$CONFIG_DIR/secrets.env"
 
 # --- Detect OS ---
 
@@ -18,15 +19,32 @@ detect_os() {
     esac
 }
 
-OS="$(detect_os)"
+OS="${HERDR_INSTALL_OS:-$(detect_os)}"
 if [ "$OS" = "unsupported" ]; then
     echo "Error: Unsupported OS ($(uname -s)). Only macOS and Linux are supported."
     exit 1
 fi
 
+# --- Load existing configuration ---
+
+EXISTING_INSTALL=false
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    EXISTING_INSTALL=true
+fi
+if [ -f "$SECRETS_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$SECRETS_FILE"
+fi
+
+WS_PORT="${HERDR_RELAY_PORT:-8375}"
+
 # --- Log directory (matches relay's _get_log_dir) ---
 
-if [ "$OS" = "macos" ]; then
+if [ -n "${HERDR_LOG_DIR:-}" ]; then
+    LOG_DIR="$HERDR_LOG_DIR"
+elif [ "$OS" = "macos" ]; then
     LOG_DIR="$HOME/Library/Logs/herdr-remote"
 elif [ -d "/var/log" ] && [ -w "/var/log" ]; then
     LOG_DIR="/var/log/herdr-remote"
@@ -61,10 +79,139 @@ find_binary() {
     echo ""
 }
 
+telegram_service_file() {
+    if [ "$OS" = "macos" ]; then
+        printf '%s\n' "$HOME/Library/LaunchAgents/$LABEL_TELEGRAM.plist"
+    else
+        printf '%s\n' "$HOME/.config/systemd/user/herdr-telegram.service"
+    fi
+}
+
+telegram_service_exists() {
+    [ -f "$(telegram_service_file)" ]
+}
+
+stop_telegram_service() {
+    if [ "$OS" = "macos" ]; then
+        launchctl bootout "gui/$(id -u)/$LABEL_TELEGRAM" 2>/dev/null || true
+    else
+        systemctl --user stop herdr-telegram.service 2>/dev/null || true
+    fi
+}
+
+restart_existing_telegram_service() {
+    telegram_service_exists || return 0
+    if [ "$OS" = "macos" ]; then
+        launchctl bootstrap "gui/$(id -u)" "$(telegram_service_file)" 2>/dev/null || true
+    else
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user start herdr-telegram.service 2>/dev/null || true
+    fi
+}
+
+remove_telegram_service() {
+    stop_telegram_service
+    if [ "$OS" = "macos" ]; then
+        rm -f "$(telegram_service_file)"
+    else
+        systemctl --user disable herdr-telegram.service 2>/dev/null || true
+        rm -f "$(telegram_service_file)"
+        systemctl --user daemon-reload
+    fi
+}
+
+telegram_api() {
+    local method="$1"
+    shift
+    curl -fsS --max-time 20 -X POST \
+        "https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}" "$@"
+}
+
+validate_telegram_token() {
+    local response
+    response="$(telegram_api getMe 2>/dev/null)" || return 1
+    TELEGRAM_USERNAME="$(printf '%s' "$response" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+result = data.get("result", {}) if data.get("ok") else {}
+print(result.get("username", ""))
+' 2>/dev/null)"
+    [ -n "$TELEGRAM_USERNAME" ]
+}
+
+discover_telegram_chat() {
+    local response choices count pick selected
+    response="$(telegram_api getUpdates --data-urlencode "timeout=10" 2>/dev/null)" || return 1
+    choices="$(printf '%s' "$response" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+seen = set()
+for update in data.get("result", []):
+    message = update.get("message") or update.get("channel_post") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if chat_id is None or chat_id in seen:
+        continue
+    seen.add(chat_id)
+    kind = str(chat.get("type", "unknown"))
+    label = chat.get("title") or " ".join(
+        part for part in (chat.get("first_name", ""), chat.get("last_name", "")) if part
+    ) or str(chat_id)
+    label = str(label).replace("\t", " ").replace("\n", " ")
+    print(f"{chat_id}\t{kind}\t{label}")
+' 2>/dev/null)" || return 1
+    [ -n "$choices" ] || return 1
+
+    echo ""
+    echo "  Chats that recently contacted @$TELEGRAM_USERNAME:"
+    printf '%s\n' "$choices" | while IFS=$'\t' read -r chat_id chat_type chat_label; do
+        printf '    %s) %s (%s, %s)\n' "$(( ${chat_number:-0} + 1 ))" "$chat_label" "$chat_type" "$chat_id"
+        chat_number="$(( ${chat_number:-0} + 1 ))"
+    done
+
+    count="$(printf '%s\n' "$choices" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [ "$count" = "1" ]; then
+        pick=1
+    else
+        read -p "  Select chat [1-$count]: " pick
+    fi
+    [[ "$pick" =~ ^[0-9]+$ ]] || return 1
+    [ "$pick" -ge 1 ] && [ "$pick" -le "$count" ] || return 1
+    selected="$(printf '%s\n' "$choices" | sed -n "${pick}p")"
+    TELEGRAM_CHAT_ID="$(printf '%s' "$selected" | cut -f1)"
+    TELEGRAM_CHAT_TYPE="$(printf '%s' "$selected" | cut -f2)"
+}
+
+read_manual_chat_id() {
+    local entered
+    read -p "  Chat ID (private or negative group ID): " entered
+    [[ "$entered" =~ ^-?[0-9]+$ ]] || {
+        echo "  Error: Chat ID must be a signed integer."
+        return 1
+    }
+    TELEGRAM_CHAT_ID="$entered"
+    TELEGRAM_CHAT_TYPE="unknown"
+}
+
+send_telegram_test() {
+    telegram_api sendMessage \
+        --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+        --data-urlencode "text=herdr-remote Telegram service configured successfully." \
+        >/dev/null 2>&1
+}
+
+generate_relay_token() {
+    python3 -c 'import secrets; print(secrets.token_hex(32))'
+}
+
 UV_PATH="$(find_binary uv)"
 HERDR_PATH="$(find_binary herdr)"
 HERDR_PUSH_PATH="$(find_binary herdr-push)"
-CLOUDFLARED_PATH="$(find_binary cloudflared)"
+if [ "${HERDR_INSTALL_SKIP_CLOUDFLARED:-0}" = "1" ]; then
+    CLOUDFLARED_PATH=""
+else
+    CLOUDFLARED_PATH="$(find_binary cloudflared)"
+fi
 
 echo "herdr-remote relay installer"
 echo "============================"
@@ -105,19 +252,165 @@ if [ "$1" = "--uninstall" ]; then
     if [ "$OS" = "macos" ]; then
         launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
         launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)/$LABEL_TELEGRAM" 2>/dev/null || true
         rm -f "$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
         rm -f "$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_TELEGRAM.plist"
     else
         systemctl --user stop herdr-relay.service 2>/dev/null || true
         systemctl --user stop herdr-tunnel.service 2>/dev/null || true
+        systemctl --user stop herdr-telegram.service 2>/dev/null || true
         systemctl --user disable herdr-relay.service 2>/dev/null || true
         systemctl --user disable herdr-tunnel.service 2>/dev/null || true
+        systemctl --user disable herdr-telegram.service 2>/dev/null || true
         rm -f "$HOME/.config/systemd/user/herdr-relay.service"
         rm -f "$HOME/.config/systemd/user/herdr-tunnel.service"
+        rm -f "$HOME/.config/systemd/user/herdr-telegram.service"
         systemctl --user daemon-reload
     fi
-    echo "Done. Config preserved at $CONFIG_FILE"
+    echo "Done. Configuration and secrets preserved in $CONFIG_DIR"
     exit 0
+fi
+
+# --- Relay authentication ---
+
+RELAY_TOKEN="${HERDR_RELAY_TOKEN:-}"
+if [ -z "$RELAY_TOKEN" ]; then
+    echo "Relay authentication"
+    echo "--------------------"
+    if [ "$EXISTING_INSTALL" = true ]; then
+        read -p "  Secure the existing relay with a token? [y/N] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            RELAY_TOKEN="$(generate_relay_token)"
+        fi
+    else
+        read -p "  Secure the relay with an access token? [Y/n] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            RELAY_TOKEN="$(generate_relay_token)"
+        fi
+    fi
+fi
+
+if [ -n "$RELAY_TOKEN" ] && [[ ! "$RELAY_TOKEN" =~ ^[A-Za-z0-9_-]{16,128}$ ]]; then
+    echo "Error: Managed relay tokens must contain 16-128 URL-safe characters."
+    exit 1
+fi
+
+HERDR_RELAY_TOKEN="$RELAY_TOKEN"
+HERDR_RELAY="ws://127.0.0.1:$WS_PORT"
+[ -n "$HERDR_RELAY_TOKEN" ] && HERDR_RELAY="$HERDR_RELAY?token=$HERDR_RELAY_TOKEN"
+
+# --- Telegram configuration ---
+
+TELEGRAM_TOKEN="${HERDR_TG_TOKEN:-}"
+TELEGRAM_CHAT_ID="${HERDR_TG_CHAT_ID:-}"
+TELEGRAM_CHAT_TYPE="${HERDR_TG_CHAT_TYPE:-unknown}"
+TELEGRAM_USERNAME="${HERDR_TG_USERNAME:-}"
+TELEGRAM_ENABLED=false
+TELEGRAM_SERVICE_WAS_PRESENT=false
+telegram_service_exists && TELEGRAM_SERVICE_WAS_PRESENT=true
+TELEGRAM_WAS_ENABLED=false
+if [ "${HERDR_TG_ENABLED:-false}" = "true" ] || [ "$TELEGRAM_SERVICE_WAS_PRESENT" = true ]; then
+    TELEGRAM_WAS_ENABLED=true
+fi
+
+echo ""
+echo "Telegram bot setup"
+echo "------------------"
+if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+    [ -n "$TELEGRAM_USERNAME" ] && echo "  Existing bot: @$TELEGRAM_USERNAME"
+    echo "  Existing destination: $TELEGRAM_CHAT_ID"
+fi
+if [ "$TELEGRAM_WAS_ENABLED" = true ]; then
+    read -p "  Keep Telegram service enabled? [Y/n] " -n 1 -r
+    echo
+    [[ ! $REPLY =~ ^[Nn]$ ]] && TELEGRAM_ENABLED=true
+else
+    read -p "  Enable Telegram bot service? [y/N] " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]] && TELEGRAM_ENABLED=true
+fi
+
+if [ "$TELEGRAM_ENABLED" = true ]; then
+    ORIGINAL_TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
+    ORIGINAL_TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID"
+    TOKEN_CHANGED=false
+
+    if [ -n "$TELEGRAM_TOKEN" ]; then
+        read -p "  Keep the existing BotFather token? [Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            read -p "  BotFather token: " -s TELEGRAM_TOKEN
+            echo
+            TOKEN_CHANGED=true
+        fi
+    else
+        echo "  Create a bot with @BotFather using /newbot, then paste its token."
+        read -p "  BotFather token: " -s TELEGRAM_TOKEN
+        echo
+        TOKEN_CHANGED=true
+    fi
+
+    if [[ ! "$TELEGRAM_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
+        echo "  Error: Invalid BotFather token format."
+        exit 1
+    fi
+
+    echo "  Validating bot token..."
+    if ! validate_telegram_token; then
+        echo "  Error: Telegram rejected the bot token or is unreachable."
+        exit 1
+    fi
+    echo "  [ok] Connected as @$TELEGRAM_USERNAME"
+
+    KEEP_CHAT=false
+    if [ "$TOKEN_CHANGED" = false ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+        read -p "  Keep destination $TELEGRAM_CHAT_ID? [Y/n] " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Nn]$ ]] && KEEP_CHAT=true
+    fi
+
+    if [ "$KEEP_CHAT" = false ]; then
+        [ "$TELEGRAM_SERVICE_WAS_PRESENT" = true ] && stop_telegram_service
+        echo ""
+        echo "  Open @$TELEGRAM_USERNAME in Telegram and send /start."
+        echo "  For a group, add the bot and send /start@$TELEGRAM_USERNAME."
+        read -p "  Press Enter after sending /start... " -r
+        if ! discover_telegram_chat; then
+            echo "  No unambiguous recent chat found; enter the Chat ID manually."
+            if ! read_manual_chat_id; then
+                [ "$TELEGRAM_SERVICE_WAS_PRESENT" = true ] && restart_existing_telegram_service
+                exit 1
+            fi
+        fi
+    fi
+
+    [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]] || {
+        echo "  Error: Chat ID must be a signed integer."
+        [ "$TELEGRAM_SERVICE_WAS_PRESENT" = true ] && restart_existing_telegram_service
+        exit 1
+    }
+
+    read -p "  Send a test message to $TELEGRAM_CHAT_ID? [Y/n] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        if send_telegram_test; then
+            echo "  [ok] Test message delivered"
+        else
+            echo "  Error: Telegram could not deliver to that chat."
+            TELEGRAM_TOKEN="$ORIGINAL_TELEGRAM_TOKEN"
+            TELEGRAM_CHAT_ID="$ORIGINAL_TELEGRAM_CHAT_ID"
+            [ "$TELEGRAM_SERVICE_WAS_PRESENT" = true ] && restart_existing_telegram_service
+            exit 1
+        fi
+    fi
+
+    HERDR_TG_TOKEN="$TELEGRAM_TOKEN"
+    HERDR_TG_CHAT_ID="$TELEGRAM_CHAT_ID"
+    HERDR_TG_CHAT_TYPE="$TELEGRAM_CHAT_TYPE"
+    HERDR_TG_USERNAME="$TELEGRAM_USERNAME"
 fi
 
 # --- Cloudflared check and install ---
@@ -470,6 +763,20 @@ fi
 CONFIG_TUNNEL_MODE="$TUNNEL_MODE"
 [ "$CONFIG_TUNNEL_MODE" = "named-external" ] && CONFIG_TUNNEL_MODE="named"
 
+HERDR_TG_TOKEN="${HERDR_TG_TOKEN:-$TELEGRAM_TOKEN}"
+HERDR_TG_CHAT_ID="${HERDR_TG_CHAT_ID:-$TELEGRAM_CHAT_ID}"
+HERDR_TG_CHAT_TYPE="${HERDR_TG_CHAT_TYPE:-$TELEGRAM_CHAT_TYPE}"
+HERDR_TG_USERNAME="${HERDR_TG_USERNAME:-$TELEGRAM_USERNAME}"
+
+[ -z "$HERDR_TG_TOKEN" ] || [[ "$HERDR_TG_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || {
+    echo "Error: Refusing to persist an invalid Telegram token."
+    exit 1
+}
+[ -z "$HERDR_TG_CHAT_ID" ] || [[ "$HERDR_TG_CHAT_ID" =~ ^-?[0-9]+$ ]] || {
+    echo "Error: Refusing to persist an invalid Telegram chat ID."
+    exit 1
+}
+
 mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_FILE" <<EOF
 # herdr-remote configuration (generated by install-service.sh)
@@ -482,10 +789,28 @@ HERDR_TUNNEL_HOSTNAME=${TUNNEL_HOSTNAME:-}
 HERDR_RELAY_DIR=$SCRIPT_DIR
 HERDR_UV_PATH=$UV_PATH
 HERDR_CLOUDFLARED_PATH=${CLOUDFLARED_PATH:-}
+HERDR_TG_ENABLED=$TELEGRAM_ENABLED
+HERDR_TG_USERNAME=${HERDR_TG_USERNAME:-}
+HERDR_TG_CHAT_TYPE=${HERDR_TG_CHAT_TYPE:-unknown}
 EOF
+
+SECRETS_TMP="$SECRETS_FILE.tmp"
+(
+    umask 077
+    cat > "$SECRETS_TMP" <<EOF
+# herdr-remote secrets (generated by install-service.sh)
+HERDR_RELAY_TOKEN=${HERDR_RELAY_TOKEN:-}
+HERDR_TG_TOKEN=${HERDR_TG_TOKEN:-}
+HERDR_TG_CHAT_ID=${HERDR_TG_CHAT_ID:-}
+HERDR_RELAY=$HERDR_RELAY
+EOF
+)
+chmod 600 "$SECRETS_TMP"
+mv "$SECRETS_TMP" "$SECRETS_FILE"
 
 echo ""
 echo "Config saved to $CONFIG_FILE"
+echo "Secrets saved to $SECRETS_FILE (mode 0600)"
 echo ""
 
 # --- Build PATH for the service ---
@@ -542,9 +867,10 @@ echo "Installing relay service..."
 
 if [ "$OS" = "macos" ]; then
     PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
 
     launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
-    sleep 1
+    sleep "${HERDR_INSTALL_SERVICE_DELAY:-1}"
 
     cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -555,9 +881,9 @@ if [ "$OS" = "macos" ]; then
     <string>$LABEL_RELAY</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$UV_PATH</string>
-        <string>run</string>
-        <string>$SCRIPT_DIR/herdr_relay.py</string>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_relay.py"</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$SCRIPT_DIR</string>
@@ -575,12 +901,6 @@ if [ "$OS" = "macos" ]; then
     <dict>
         <key>PATH</key>
         <string>$SERVICE_PATH</string>
-        <key>HERDR_BIN</key>
-        <string>${HERDR_PATH:-herdr}</string>
-        <key>HERDR_LOG_DIR</key>
-        <string>$LOG_DIR</string>
-        <key>HERDR_RELAY_PORT</key>
-        <string>$WS_PORT</string>
     </dict>
 </dict>
 </plist>
@@ -605,9 +925,8 @@ WorkingDirectory=$SCRIPT_DIR
 Restart=always
 RestartSec=5
 Environment=PATH=$SERVICE_PATH
-Environment=HERDR_BIN=${HERDR_PATH:-herdr}
-Environment=HERDR_LOG_DIR=$LOG_DIR
-Environment=HERDR_RELAY_PORT=$WS_PORT
+EnvironmentFile=$CONFIG_FILE
+EnvironmentFile=-$SECRETS_FILE
 
 [Install]
 WantedBy=default.target
@@ -619,6 +938,92 @@ EOF
 fi
 
 echo "  Relay service installed."
+
+# --- Install Telegram service (if configured) ---
+
+if [ "$TELEGRAM_ENABLED" = true ]; then
+    echo "Installing Telegram service..."
+    stop_telegram_service
+    sleep "${HERDR_INSTALL_SERVICE_DELAY:-1}"
+    if command -v pgrep >/dev/null 2>&1; then
+        UNMANAGED_TELEGRAM_PIDS="$(pgrep -f 'herdr_telegram\.py' 2>/dev/null || true)"
+        if [ -n "$UNMANAGED_TELEGRAM_PIDS" ]; then
+            echo "  Error: Another Telegram bot process is already running."
+            echo "  Stop the foreground herdr_telegram.py process, then rerun this installer."
+            echo "  Conflicting process IDs: $(printf '%s' "$UNMANAGED_TELEGRAM_PIDS" | tr '\n' ' ')"
+            exit 1
+        fi
+    fi
+
+    if [ "$OS" = "macos" ]; then
+        PLIST_TELEGRAM="$(telegram_service_file)"
+        mkdir -p "$HOME/Library/LaunchAgents"
+        cat > "$PLIST_TELEGRAM" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL_TELEGRAM</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_telegram.py"</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$SCRIPT_DIR</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardOutPath</key>
+    <string>$LOG_DIR/telegram-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_DIR/telegram-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$SERVICE_PATH</string>
+    </dict>
+</dict>
+</plist>
+EOF
+        launchctl bootstrap "gui/$(id -u)" "$PLIST_TELEGRAM"
+    else
+        UNIT_TELEGRAM="$UNIT_DIR/herdr-telegram.service"
+        cat > "$UNIT_TELEGRAM" <<EOF
+[Unit]
+Description=herdr-remote Telegram bot
+After=network-online.target herdr-relay.service
+Wants=network-online.target herdr-relay.service
+
+[Service]
+ExecStart=$UV_PATH run $SCRIPT_DIR/herdr_telegram.py
+WorkingDirectory=$SCRIPT_DIR
+Restart=always
+RestartSec=5
+Environment=PATH=$SERVICE_PATH
+EnvironmentFile=$CONFIG_FILE
+EnvironmentFile=-$SECRETS_FILE
+
+[Install]
+WantedBy=default.target
+EOF
+        systemctl --user daemon-reload
+        systemctl --user enable herdr-telegram.service
+        systemctl --user start herdr-telegram.service
+    fi
+    echo "  Telegram service installed."
+else
+    if telegram_service_exists; then
+        echo "Removing disabled Telegram service..."
+        remove_telegram_service
+        echo "  Telegram service removed; credentials preserved."
+    fi
+fi
 
 # --- Install tunnel service (if configured) ---
 
@@ -736,7 +1141,7 @@ echo ""
 # --- Smoke test ---
 
 echo "Running smoke test..."
-sleep 3
+sleep "${HERDR_INSTALL_SETTLE_SECONDS:-3}"
 
 # 1. Check port is listening
 if ! lsof -iTCP:"$WS_PORT" -sTCP:LISTEN >/dev/null 2>&1 && \
@@ -749,17 +1154,24 @@ fi
 echo "  [ok] Port $WS_PORT is listening"
 
 # 2. WebSocket connect and receive agents broadcast
-SMOKE_RESULT=$(WS_PORT="$WS_PORT" python3 -c '
-import asyncio, json, sys, os
+if [ "${HERDR_INSTALL_SKIP_WEBSOCKET_SMOKE:-0}" = "1" ]; then
+    SMOKE_RESULT="ws_ok:skip"
+else
+    SMOKE_RESULT=$(WS_PORT="$WS_PORT" RELAY_TOKEN="${HERDR_RELAY_TOKEN:-}" python3 -c '
+import asyncio, json, os, urllib.parse
 async def test():
     port = os.environ["WS_PORT"]
+    token = os.environ.get("RELAY_TOKEN", "")
+    url = f"ws://127.0.0.1:{port}"
+    if token:
+        url += "?token=" + urllib.parse.quote(token, safe="")
     try:
         import websockets
     except ImportError:
         print("ws_ok:skip")
         return
     try:
-        async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=5) as ws:
+        async with websockets.connect(url, open_timeout=5) as ws:
             msg = await asyncio.wait_for(ws.recv(), timeout=10)
             data = json.loads(msg)
             if data.get("type") == "agents":
@@ -771,6 +1183,7 @@ async def test():
         print(f"ws_fail:{e}")
 asyncio.run(test())
 ' 2>/dev/null || echo "ws_fail:python_error")
+fi
 
 case "$SMOKE_RESULT" in
     ws_ok:agents:*)
@@ -786,8 +1199,9 @@ case "$SMOKE_RESULT" in
         ;;
     ws_fail:*)
         ERR="${SMOKE_RESULT#ws_fail:}"
-        echo "  [warn] WebSocket test failed: $ERR"
-        echo "         Port is listening — relay is running but handshake didn't complete."
+        echo "  FAIL: WebSocket test failed: $ERR"
+        echo "  Check logs: $LOG_DIR/relay.log"
+        exit 1
         ;;
 esac
 
@@ -800,7 +1214,30 @@ if [ -n "$HERDR_PATH" ]; then
     fi
 fi
 
-# 4. Check tunnel is up (for named tunnels)
+# 4. Check Telegram identity and managed service
+if [ "$TELEGRAM_ENABLED" = true ]; then
+    TELEGRAM_ACTIVE=false
+    if [ "$OS" = "macos" ]; then
+        launchctl print "gui/$(id -u)/$LABEL_TELEGRAM" >/dev/null 2>&1 && TELEGRAM_ACTIVE=true
+    else
+        systemctl --user is-active --quiet herdr-telegram.service && TELEGRAM_ACTIVE=true
+    fi
+    if [ "$TELEGRAM_ACTIVE" != true ]; then
+        echo "  FAIL: Telegram service is not active."
+        echo "  Check logs: $LOG_DIR/telegram-stderr.log"
+        exit 1
+    fi
+    echo "  [ok] Telegram service is active"
+
+    if ! validate_telegram_token; then
+        echo "  FAIL: Telegram bot identity could not be verified."
+        echo "  Check logs: $LOG_DIR/telegram-stderr.log"
+        exit 1
+    fi
+    echo "  [ok] Telegram bot verified as @$TELEGRAM_USERNAME"
+fi
+
+# 5. Check tunnel is up (for named tunnels)
 if [ "$TUNNEL_MODE" = "named" ] && [ -n "$TUNNEL_HOSTNAME" ]; then
     sleep 2
     if curl -s -o /dev/null -w "%{http_code}" "https://$TUNNEL_HOSTNAME" 2>/dev/null | grep -q "^[23]"; then
@@ -823,20 +1260,41 @@ echo ""
 echo "Smoke test complete."
 echo ""
 echo "=== Summary ==="
-echo "  Relay:   running on :$WS_PORT"
-[ "$TUNNEL_MODE" != "none" ] && echo "  Tunnel:  $TUNNEL_MODE"
-[ "$TUNNEL_MODE" = "named" ] && echo "  URL:     wss://$TUNNEL_HOSTNAME"
-echo "  Logs:    $LOG_DIR/"
-echo "  Config:  $CONFIG_FILE"
+if [ -n "${HERDR_RELAY_TOKEN:-}" ]; then
+    echo "  Relay:      running on :$WS_PORT, token protected"
+else
+    echo "  Relay:      running on :$WS_PORT, no token"
+fi
+if [ "$TELEGRAM_ENABLED" = true ]; then
+    echo "  Telegram:   running as @$TELEGRAM_USERNAME"
+    echo "  Destination: $TELEGRAM_CHAT_ID (${TELEGRAM_CHAT_TYPE:-unknown})"
+else
+    echo "  Telegram:   disabled"
+fi
+[ "$TUNNEL_MODE" != "none" ] && echo "  Tunnel:     $TUNNEL_MODE"
+[ "$TUNNEL_MODE" = "named" ] && echo "  URL:        wss://$TUNNEL_HOSTNAME"
+echo "  Logs:       $LOG_DIR/"
+echo "  Config:     $CONFIG_FILE"
+echo "  Secrets:    $SECRETS_FILE"
 echo ""
 echo "Commands:"
-echo "  View logs:  tail -f $LOG_DIR/relay.log"
+echo "  Relay log:    tail -f $LOG_DIR/relay.log"
+[ "$TELEGRAM_ENABLED" = true ] && echo "  Telegram log: tail -f $LOG_DIR/telegram-stderr.log"
 if [ "$OS" = "macos" ]; then
-    echo "  Stop:       launchctl bootout gui/$(id -u)/$LABEL_RELAY"
-    echo "  Start:      launchctl bootstrap gui/$(id -u) $HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
+    echo "  Relay status:    launchctl print gui/$(id -u)/$LABEL_RELAY"
+    echo "  Relay stop:      launchctl bootout gui/$(id -u)/$LABEL_RELAY"
+    echo "  Relay start:     launchctl bootstrap gui/$(id -u) $HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
+    if [ "$TELEGRAM_ENABLED" = true ]; then
+        echo "  Telegram status: launchctl print gui/$(id -u)/$LABEL_TELEGRAM"
+        echo "  Telegram stop:   launchctl bootout gui/$(id -u)/$LABEL_TELEGRAM"
+        echo "  Telegram start:  launchctl bootstrap gui/$(id -u) $HOME/Library/LaunchAgents/$LABEL_TELEGRAM.plist"
+    fi
 else
-    echo "  Stop:       systemctl --user stop herdr-relay"
-    echo "  Start:      systemctl --user start herdr-relay"
-    echo "  Status:     systemctl --user status herdr-relay"
+    echo "  Relay status:    systemctl --user status herdr-relay"
+    echo "  Relay restart:   systemctl --user restart herdr-relay"
+    if [ "$TELEGRAM_ENABLED" = true ]; then
+        echo "  Telegram status: systemctl --user status herdr-telegram"
+        echo "  Telegram restart: systemctl --user restart herdr-telegram"
+    fi
 fi
-echo "  Uninstall:  $0 --uninstall"
+echo "  Uninstall: $0 --uninstall"
