@@ -42,7 +42,7 @@ herdr server reload-config
 
 **Telegram:** send `/status`, then `/agents`, `/read`, or `/reply` to your bot.
 
-**Telegram:** send `/start` for a clickable dashboard of every running agent. Select an agent to read its recent output and send your next message; larger herds include Previous and Next buttons.
+**Telegram:** send `/start` for a clickable dashboard of every running agent. Select an agent, then reply to the generated output prompt. Finished and blocked notifications also provide **Open output & reply**, and larger herds include Previous and Next buttons.
 
 **Web app** (phone): open [herdr-remote.pages.dev](https://herdr-remote.pages.dev), tap ⚙, and paste the tunnel URL.
 

@@ -74,7 +74,9 @@ known_panes = set()
 agent_cache = {}
 
 SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
-SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"}
+SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
+    str(number) for number in range(10)
+}
 
 # --- Audit logging ---
 _audit_handler = RotatingFileHandler(AUDIT_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
@@ -156,14 +158,17 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
 _load_push_subs()
 
 
+def run_herdr_result(*args, remote=None):
+    if remote:
+        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, HERDR, *args]
+    else:
+        cmd = [HERDR, *args]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+
 def run_herdr(*args, remote=None):
     try:
-        if remote:
-            cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, HERDR, *args]
-        else:
-            cmd = [HERDR, *args]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        return r.stdout.strip()
+        return run_herdr_result(*args, remote=remote).stdout.strip()
     except Exception:
         return ""
 
@@ -490,7 +495,17 @@ async def handle_client(ws):
                 remote = pane_remote_map.get(pane_id)
                 log.info("Keys from %s (%s): pane=%s keys=%s", ip, device, pane_id, keys)
                 audit("send_keys", ip, device, pane_id, f"keys={keys}")
-                run_herdr("pane", "send-keys", pane_id, *keys, remote=remote)
+                try:
+                    result = run_herdr_result("pane", "send-keys", pane_id, *keys, remote=remote)
+                except Exception as e:
+                    log.warning("send_keys command failed for pane %s: %s", pane_id, e)
+                    await ws.send(json.dumps({"type": "error", "message": "send_keys command failed"}))
+                    continue
+                if result.returncode != 0:
+                    log.warning("send_keys command failed for pane %s with exit %s", pane_id, result.returncode)
+                    await ws.send(json.dumps({"type": "error", "message": "send_keys command failed"}))
+                    continue
+                await ws.send(json.dumps({"type": "command_result", "command": "send_keys", "ok": True}))
             elif msg_type == "send_text":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:

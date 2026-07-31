@@ -81,7 +81,9 @@ uv run relay/herdr_telegram.py
 | `/interrupt` | Send Ctrl+C |
 | `/digest` | Today's activity summary |
 
-The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent from `/start` reads its recent output and sends your next message to that agent.
+The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent opens a reply prompt containing its recent output; reply to that prompt to send text safely to the pane.
+
+Finished and blocked notifications include **Open output & reply**. You can also reply directly to the notification to send a follow-up without returning to the agent list. Blocked notifications retain their one-tap approval controls.
 
 ## Architecture
 
