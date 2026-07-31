@@ -114,7 +114,11 @@ echo "18. README links to herdr-push"
 grep -q "dcolinmorgan/herdr-push" "$DIR/README.md"
 assert_eq "$?" "0" "plugin link present"
 
-echo "19. LICENSE is AGPL"
+echo "19. installer service behavior"
+"$DIR/tests/install-service.sh"
+assert_eq "$?" "0" "installer handles Telegram service lifecycle"
+
+echo "20. LICENSE is AGPL"
 grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" "$DIR/LICENSE"
 assert_eq "$?" "0" "AGPL license"
 
