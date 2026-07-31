@@ -11,7 +11,7 @@ Download [Herdi.app](https://github.com/dcolinmorgan/herdr-remote/releases/lates
 Monitors all your local herdr agents automatically -- no relay, no config, no account.
 
 ```bash
-curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/Herdi-0.6.3.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
+curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/Herdi-0.7.0.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
 ```
 
 ## What you get
@@ -72,6 +72,7 @@ uv run relay/herdr_telegram.py
 
 | Command | Action |
 |---------|--------|
+| `/start` | Show the clickable agent dashboard |
 | `/agents` | List all with status |
 | `/read` | Read agent output |
 | `/reply` | Read + respond in one flow |
@@ -79,6 +80,8 @@ uv run relay/herdr_telegram.py
 | `/trust` | Trust all tools for blocked agent |
 | `/interrupt` | Send Ctrl+C |
 | `/digest` | Today's activity summary |
+
+The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers keep every eligible agent reachable. Normal herds appear in one list; larger herds include Previous and Next buttons. Selecting an agent from `/start` reads its recent output and sends your next message to that agent.
 
 ## Architecture
 
@@ -132,6 +135,10 @@ uv run relay/herdr_relay.py
 - Zero-dep plugin: [`herdr-push`](https://github.com/dcolinmorgan/herdr-push)
 
 ## Changelog
+
+### v0.7.0
+
+- **Notch panel** — Dynamic Island-style agent status in the MacBook notch; see working/waiting/blocked at a glance without switching windows
 
 ### v0.6.0
 

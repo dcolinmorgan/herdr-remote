@@ -288,20 +288,11 @@ final class RelayConnection {
                 var seen = Set<String>()
                 for a in list {
                     seen.insert(a.pane_id)
-                    if let existing = agents.first(where: { $0.id == a.pane_id }) {
-                        let s = AgentStatus(rawValue: a.status) ?? .unknown
-                        if existing.status != s { existing.status = s }
-                        if existing.project != a.project { existing.project = a.project }
-                        existing.host = a.host ?? "local"
-                    } else {
-                        agents.append(Agent(
-                            id: a.pane_id, name: a.agent,
-                            status: AgentStatus(rawValue: a.status) ?? .unknown,
-                            project: a.project, cwd: a.cwd, host: a.host ?? "local"
-                        ))
-                    }
+                    upsertAgent(a)
                 }
                 agents.removeAll { !seen.contains($0.id) }
+            case "agent_update":
+                if let update = msg.agentData { upsertAgent(update) }
             case "blocked":
                 if let pid = msg.pane_id, let agent = agents.first(where: { $0.id == pid }) {
                     agent.prompt = msg.prompt
@@ -312,6 +303,22 @@ final class RelayConnection {
             default: break
             }
         }
+    }
+
+    private func upsertAgent(_ data: AgentMessage.AgentData) {
+        if let existing = agents.first(where: { $0.id == data.pane_id }) {
+            existing.name = data.agent
+            existing.status = AgentStatus(rawValue: data.status) ?? .unknown
+            existing.project = data.project
+            existing.cwd = data.cwd
+            existing.host = data.host ?? "local"
+            return
+        }
+        agents.append(Agent(
+            id: data.pane_id, name: data.agent,
+            status: AgentStatus(rawValue: data.status) ?? .unknown,
+            project: data.project, cwd: data.cwd, host: data.host ?? "local"
+        ))
     }
 
     private func sendNotification(agent: String, project: String) {

@@ -387,6 +387,20 @@ function handleMessage(msg) {
     }
     agents = msg.agents; render();
   }
+  else if (msg.type === 'agent_update') {
+    const update = msg.agent;
+    if (!update || !update.pane_id) return;
+    const existing = agents.find(a => a.pane_id === update.pane_id);
+    const previousStatus = existing?.status || prevStatuses[update.pane_id];
+    if (existing) Object.assign(existing, update);
+    else agents.push({...update});
+    if (previousStatus && previousStatus !== update.status) {
+      timeline.unshift({project: update.project, agent: update.agent, status: update.status, time: new Date()});
+      if (timeline.length > 100) timeline.pop();
+    }
+    prevStatuses[update.pane_id] = update.status;
+    render();
+  }
   else if (msg.type === 'blocked') {
     const a = agents.find(x => x.pane_id === msg.pane_id);
     if (a) { a.status='blocked'; a.prompt=msg.prompt; a.options=msg.options; }

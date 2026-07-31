@@ -6,6 +6,8 @@
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
 import asyncio, json, logging, os, re, shutil, signal, socket, subprocess, time
 
+from agent_state import complete_agent_update_message
+
 try:
     from websockets.asyncio.server import serve
 except ImportError:
@@ -69,6 +71,7 @@ last_statuses = {}
 event_queue = asyncio.Queue()
 pane_remote_map = {}
 known_panes = set()
+agent_cache = {}
 
 SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
 SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"}
@@ -242,6 +245,7 @@ async def _poll_once():
         for a in agents:
             pane_remote_map[a["pane_id"]] = a.get("remote")
             known_panes.add(a["pane_id"])
+            agent_cache[a["pane_id"]] = a
         await broadcast({"type": "agents", "agents": agents})
         for a in agents:
             pid, status = a["pane_id"], a["status"]
@@ -273,14 +277,25 @@ async def _poll_once():
             for pid in stale:
                 pane_remote_map.pop(pid, None)
                 last_statuses.pop(pid, None)
+                agent_cache.pop(pid, None)
 
 
 async def event_push():
     while True:
         event = await event_queue.get()
         pane_id = event.get("pane_id", "")
-        status = event.get("status", "")
-        host = event.get("host", "local")
+        update = None
+        if pane_id and event.get("type") == "agent_event":
+            update = complete_agent_update_message(
+                event,
+                current=agent_cache.get(pane_id),
+                local_hostname=socket.gethostname(),
+            )
+            if update is None:
+                continue
+        agent_data = update["agent"] if update else event
+        status = agent_data.get("status", "")
+        host = agent_data.get("host", "local")
 
         if status == "blocked" and pane_id:
             remote = pane_remote_map.get(pane_id)
@@ -291,24 +306,18 @@ async def event_push():
             options = detect_options(content)
             await broadcast({
                 "type": "blocked", "pane_id": pane_id,
-                "agent": event.get("agent", ""),
-                "project": event.get("project", ""),
+                "agent": agent_data.get("agent", ""),
+                "project": agent_data.get("project", ""),
                 "host": host,
                 "prompt": content[:500],
                 "options": options or TOOL_OPTIONS
             })
 
-        if pane_id and event.get("type") == "agent_event":
-            await broadcast({
-                "type": "agents", "agents": [{
-                    "pane_id": pane_id,
-                    "agent": event.get("agent", ""),
-                    "status": status,
-                    "cwd": event.get("cwd", ""),
-                    "project": event.get("project", ""),
-                    "host": host,
-                }]
-            })
+        if update:
+            known_panes.add(pane_id)
+            pane_remote_map.setdefault(pane_id, None)
+            agent_cache[pane_id] = {**agent_cache.get(pane_id, {}), **update["agent"]}
+            await broadcast(update)
 
 
 async def process_request(connection, request):
