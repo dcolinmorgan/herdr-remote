@@ -363,6 +363,25 @@ async def process_request(connection, request):
         ])
         return Response(204, "No Content", headers, b"")
 
+    # ⚠ EVENT PUSH MUST BE HANDLED FIRST — ORDER IS LOAD-BEARING.
+    # A pushed event arrives as `?d=<urlencoded json>` on ANY path.
+    # The README shows POST to :8375 without naming a path, so `/` is common.
+    # Every static route below `return`s, so if reached first the event is
+    # dropped while caller still gets 200. Add new static routes BELOW, never above.
+    import urllib.parse
+    if "?" in (request.path or ""):
+        _, qs = (request.path or "").split("?", 1)
+        params = urllib.parse.parse_qs(qs)
+        if "d" in params:
+            try:
+                event = json.loads(params["d"][0])  # parse_qs already decodes
+                event_queue.put_nowait(event)
+                log.debug("push: received event type=%s", event.get("type", "unknown"))
+            except Exception as e:
+                log.warning("push: unparseable event payload (%d bytes): %s", len(params["d"][0]), e)
+            headers = Headers([("Access-Control-Allow-Origin", "*")])
+            return Response(200, "OK", headers, b"ok\n")
+
     # Serve web app for GET / or GET /index.html
     path = (request.path or "/").split("?")[0]
     if path in ("/", "/index.html"):
@@ -410,20 +429,9 @@ async def process_request(connection, request):
             headers = Headers([("Content-Type", "image/svg+xml")])
             return Response(200, "OK", headers, body)
 
-    # HTTP POST — parse event from URL query params as fallback
-    import urllib.parse
-    if "?" in (request.path or ""):
-        _, qs = request.path.split("?", 1)
-        params = urllib.parse.parse_qs(qs)
-        if "d" in params:
-            try:
-                event = json.loads(urllib.parse.unquote(params["d"][0]))
-                event_queue.put_nowait(event)
-            except Exception:
-                pass
-
+    # Fallback for unmatched paths
     headers = Headers([("Access-Control-Allow-Origin", "*")])
-    return Response(200, "OK", headers, b"ok\n")
+    return Response(404, "Not Found", headers, b"not found\n")
 
 
 async def handle_client(ws):
