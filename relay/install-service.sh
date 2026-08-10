@@ -25,15 +25,99 @@ if [ "$OS" = "unsupported" ]; then
     exit 1
 fi
 
+CURRENT_UID="$(id -u)"
+if [ "$CURRENT_UID" -eq 0 ]; then
+    echo "Error: Do not run install-service.sh with sudo or as root."
+    echo "The relay and Telegram run as user services and must own their configuration files."
+    exit 1
+fi
+
+if [ "${1:-}" = "--uninstall" ]; then
+    echo "Uninstalling herdr-remote services..."
+    if [ "$OS" = "macos" ]; then
+        launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)/$LABEL_TELEGRAM" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_TELEGRAM.plist"
+    else
+        systemctl --user stop herdr-relay.service 2>/dev/null || true
+        systemctl --user stop herdr-tunnel.service 2>/dev/null || true
+        systemctl --user stop herdr-telegram.service 2>/dev/null || true
+        systemctl --user disable herdr-relay.service 2>/dev/null || true
+        systemctl --user disable herdr-tunnel.service 2>/dev/null || true
+        systemctl --user disable herdr-telegram.service 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/herdr-relay.service"
+        rm -f "$HOME/.config/systemd/user/herdr-tunnel.service"
+        rm -f "$HOME/.config/systemd/user/herdr-telegram.service"
+        systemctl --user daemon-reload
+    fi
+    echo "Done. Configuration and secrets preserved in $CONFIG_DIR"
+    exit 0
+fi
+
+file_owner_uid() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        stat -f '%u' "$1"
+    else
+        stat -c '%u' "$1"
+    fi
+}
+
+file_mode() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        stat -f '%Lp' "$1"
+    else
+        stat -c '%a' "$1"
+    fi
+}
+
 # --- Load existing configuration ---
 
 EXISTING_INSTALL=false
 if [ -f "$CONFIG_FILE" ]; then
+    CONFIG_OWNER_UID="$(file_owner_uid "$CONFIG_FILE")"
+    if [ "$CONFIG_OWNER_UID" != "$CURRENT_UID" ]; then
+        echo "Error: $CONFIG_FILE is not owned by the current user."
+        echo "Repair it with: sudo chown \"$(id -un):$(id -gn)\" \"$CONFIG_FILE\""
+        exit 1
+    fi
+    CONFIG_MODE="$(file_mode "$CONFIG_FILE")"
+    case "$CONFIG_MODE" in
+        600|640|644) ;;
+        *)
+            echo "Error: $CONFIG_FILE must not be group/world writable, found mode 0$CONFIG_MODE."
+            echo "Repair it with: chmod 644 \"$CONFIG_FILE\""
+            exit 1
+            ;;
+    esac
+    if [ ! -r "$CONFIG_FILE" ]; then
+        echo "Error: $CONFIG_FILE is not readable by the current user."
+        exit 1
+    fi
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
     EXISTING_INSTALL=true
 fi
 if [ -f "$SECRETS_FILE" ]; then
+    SECRETS_OWNER_UID="$(file_owner_uid "$SECRETS_FILE")"
+    if [ "$SECRETS_OWNER_UID" != "$CURRENT_UID" ]; then
+        echo "Error: $SECRETS_FILE is not owned by the current user."
+        echo "Repair it with: sudo chown \"$(id -un):$(id -gn)\" \"$SECRETS_FILE\""
+        exit 1
+    fi
+    SECRETS_MODE="$(file_mode "$SECRETS_FILE")"
+    if [ "$SECRETS_MODE" != "600" ]; then
+        echo "Error: $SECRETS_FILE must have mode 0600, found 0$SECRETS_MODE."
+        echo "Repair it with: chmod 600 \"$SECRETS_FILE\""
+        exit 1
+    fi
+    if [ ! -r "$SECRETS_FILE" ]; then
+        echo "Error: $SECRETS_FILE is not readable by the current user."
+        echo "Repair it with: chmod 600 \"$SECRETS_FILE\""
+        exit 1
+    fi
     # shellcheck disable=SC1090
     source "$SECRETS_FILE"
 fi
@@ -120,11 +204,24 @@ remove_telegram_service() {
     fi
 }
 
+remove_managed_tunnel_service() {
+    if [ "$OS" = "macos" ]; then
+        launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
+    else
+        systemctl --user stop herdr-tunnel.service 2>/dev/null || true
+        systemctl --user disable herdr-tunnel.service 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/herdr-tunnel.service"
+        systemctl --user daemon-reload
+    fi
+}
+
 telegram_api() {
     local method="$1"
     shift
-    curl -fsS --max-time 20 -X POST \
-        "https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}" "$@"
+    curl -fsS --max-time 20 -X POST --config - "$@" <<EOF
+url = "https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}"
+EOF
 }
 
 validate_telegram_token() {
@@ -246,31 +343,6 @@ if [ -z "$HERDR_PATH" ]; then
 fi
 
 # --- Handle --uninstall ---
-
-if [ "$1" = "--uninstall" ]; then
-    echo "Uninstalling herdr-remote services..."
-    if [ "$OS" = "macos" ]; then
-        launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
-        launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
-        launchctl bootout "gui/$(id -u)/$LABEL_TELEGRAM" 2>/dev/null || true
-        rm -f "$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
-        rm -f "$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
-        rm -f "$HOME/Library/LaunchAgents/$LABEL_TELEGRAM.plist"
-    else
-        systemctl --user stop herdr-relay.service 2>/dev/null || true
-        systemctl --user stop herdr-tunnel.service 2>/dev/null || true
-        systemctl --user stop herdr-telegram.service 2>/dev/null || true
-        systemctl --user disable herdr-relay.service 2>/dev/null || true
-        systemctl --user disable herdr-tunnel.service 2>/dev/null || true
-        systemctl --user disable herdr-telegram.service 2>/dev/null || true
-        rm -f "$HOME/.config/systemd/user/herdr-relay.service"
-        rm -f "$HOME/.config/systemd/user/herdr-tunnel.service"
-        rm -f "$HOME/.config/systemd/user/herdr-telegram.service"
-        systemctl --user daemon-reload
-    fi
-    echo "Done. Configuration and secrets preserved in $CONFIG_DIR"
-    exit 0
-fi
 
 # --- Relay authentication ---
 
@@ -778,7 +850,16 @@ HERDR_TG_USERNAME="${HERDR_TG_USERNAME:-$TELEGRAM_USERNAME}"
 }
 
 mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_FILE" <<EOF
+CONFIG_TMP="$CONFIG_FILE.tmp.$$"
+SECRETS_TMP="$SECRETS_FILE.tmp.$$"
+cleanup_config_temps() {
+    rm -f "$CONFIG_TMP" "$SECRETS_TMP"
+}
+trap cleanup_config_temps EXIT
+
+(
+    umask 022
+    cat > "$CONFIG_TMP" <<EOF
 # herdr-remote configuration (generated by install-service.sh)
 HERDR_RELAY_PORT=$WS_PORT
 HERDR_BIN=${HERDR_PATH:-herdr}
@@ -793,8 +874,10 @@ HERDR_TG_ENABLED=$TELEGRAM_ENABLED
 HERDR_TG_USERNAME=${HERDR_TG_USERNAME:-}
 HERDR_TG_CHAT_TYPE=${HERDR_TG_CHAT_TYPE:-unknown}
 EOF
+)
+chmod 644 "$CONFIG_TMP"
+mv "$CONFIG_TMP" "$CONFIG_FILE"
 
-SECRETS_TMP="$SECRETS_FILE.tmp"
 (
     umask 077
     cat > "$SECRETS_TMP" <<EOF
@@ -807,6 +890,7 @@ EOF
 )
 chmod 600 "$SECRETS_TMP"
 mv "$SECRETS_TMP" "$SECRETS_FILE"
+trap - EXIT
 
 echo ""
 echo "Config saved to $CONFIG_FILE"
@@ -883,7 +967,7 @@ if [ "$OS" = "macos" ]; then
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_relay.py"</string>
+        <string>set -e; set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_relay.py"</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$SCRIPT_DIR</string>
@@ -926,7 +1010,7 @@ Restart=always
 RestartSec=5
 Environment=PATH=$SERVICE_PATH
 EnvironmentFile=$CONFIG_FILE
-EnvironmentFile=-$SECRETS_FILE
+EnvironmentFile=$SECRETS_FILE
 
 [Install]
 WantedBy=default.target
@@ -969,7 +1053,7 @@ if [ "$TELEGRAM_ENABLED" = true ]; then
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_telegram.py"</string>
+        <string>set -e; set -a; source "\$HOME/.config/herdr-remote/config.env"; source "\$HOME/.config/herdr-remote/secrets.env"; set +a; exec "\$HERDR_UV_PATH" run "\$HERDR_RELAY_DIR/herdr_telegram.py"</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$SCRIPT_DIR</string>
@@ -1007,7 +1091,7 @@ Restart=always
 RestartSec=5
 Environment=PATH=$SERVICE_PATH
 EnvironmentFile=$CONFIG_FILE
-EnvironmentFile=-$SECRETS_FILE
+EnvironmentFile=$SECRETS_FILE
 
 [Install]
 WantedBy=default.target
@@ -1027,9 +1111,12 @@ fi
 
 # --- Install tunnel service (if configured) ---
 
-if [ "$TUNNEL_MODE" = "named-external" ]; then
-    echo "  Tunnel: using existing cloudflared service (not managed by herdr-remote)."
-    echo "  Hostname: ${TUNNEL_HOSTNAME:-unknown}"
+if [ "$TUNNEL_MODE" = "none" ] || [ "$TUNNEL_MODE" = "named-external" ]; then
+    remove_managed_tunnel_service
+    if [ "$TUNNEL_MODE" = "named-external" ]; then
+        echo "  Tunnel: using existing cloudflared service (not managed by herdr-remote)."
+        echo "  Hostname: ${TUNNEL_HOSTNAME:-unknown}"
+    fi
 elif [ "$TUNNEL_MODE" != "none" ] && [ -n "$CLOUDFLARED_PATH" ]; then
     echo "Installing tunnel service (mode: $TUNNEL_MODE)..."
 
