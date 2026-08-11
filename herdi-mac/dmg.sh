@@ -4,16 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Herdi"
 DMG_NAME="Herdi"
-VERSION="0.7.0"
 APP_DIR="$SCRIPT_DIR/dist/$APP_NAME.app"
 DMG_DIR="$SCRIPT_DIR/dist/dmg"
-DMG_PATH="$SCRIPT_DIR/dist/$DMG_NAME-$VERSION.dmg"
 
-# Build first if needed
-if [ ! -d "$APP_DIR" ]; then
-    echo "▸ App not found, building..."
-    bash "$SCRIPT_DIR/build.sh"
-fi
+# Always rebuild so a stale app bundle cannot be shipped under a new DMG name.
+bash "$SCRIPT_DIR/build.sh"
+
+# Name the DMG from the version embedded in the app that will be shipped.
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist")
+DMG_PATH="$SCRIPT_DIR/dist/$DMG_NAME-$VERSION.dmg"
 
 echo "▸ Creating DMG..."
 rm -rf "$DMG_DIR"
