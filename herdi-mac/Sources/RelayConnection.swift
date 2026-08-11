@@ -85,6 +85,11 @@ final class RelayConnection {
         let id: String, name: String, status: AgentStatus, project: String, cwd: String, host: String
     }
 
+    private struct PaneLocation {
+        let workspaceId: String
+        let tabId: String
+    }
+
     private func parseAgents(from output: String, host: String) -> [ParsedAgent] {
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -98,6 +103,16 @@ final class RelayConnection {
             let cwd = p["cwd"] as? String ?? ""
             return ParsedAgent(id: paneId, name: agent, status: status, project: (cwd as NSString).lastPathComponent, cwd: cwd, host: host)
         }
+    }
+
+    private func parsePaneLocation(from output: String) -> PaneLocation? {
+        guard let data = output.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = json["result"] as? [String: Any],
+              let pane = result["pane"] as? [String: Any],
+              let workspaceId = pane["workspace_id"] as? String,
+              let tabId = pane["tab_id"] as? String else { return nil }
+        return PaneLocation(workspaceId: workspaceId, tabId: tabId)
     }
 
     private func runSSH(_ remote: String, _ args: String...) -> String {
@@ -235,7 +250,20 @@ final class RelayConnection {
 
     func focusPane(_ paneId: String) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            _ = runHerdr("pane", "focus", paneId)
+            if let agent = agents.first(where: { $0.id == paneId }), agent.host != "local" {
+                let prefix = agent.host + ":"
+                let remotePaneId = paneId.hasPrefix(prefix) ? String(paneId.dropFirst(prefix.count)) : paneId
+                let output = runSSH(agent.host, "herdr", "pane", "get", remotePaneId)
+                guard let location = parsePaneLocation(from: output) else { return }
+                _ = runSSH(agent.host, "herdr", "workspace", "focus", location.workspaceId)
+                _ = runSSH(agent.host, "herdr", "tab", "focus", location.tabId)
+                return
+            }
+
+            let output = runHerdr("pane", "get", paneId)
+            guard let location = parsePaneLocation(from: output) else { return }
+            _ = runHerdr("workspace", "focus", location.workspaceId)
+            _ = runHerdr("tab", "focus", location.tabId)
         }
     }
 

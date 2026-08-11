@@ -17,7 +17,7 @@ private enum HoverTiming {
 
 struct NotchPanelView: View {
     let relay: RelayConnection
-    let controller: PanelWindowController
+    @ObservedObject var controller: PanelWindowController
     let hasNotch: Bool
     let notchHeight: CGFloat
     let notchW: CGFloat
@@ -58,7 +58,12 @@ struct NotchPanelView: View {
                         expanded: shouldShowExpanded,
                         notchHeight: notchHeight,
                         blocked: blocked,
-                        working: working
+                        working: working,
+                        onShowUpdate: {
+                            withAnimation(NotchAnimation.open) {
+                                controller.surface = .sessionList
+                            }
+                        }
                     )
                     .frame(height: notchHeight)
                 } else {
@@ -177,6 +182,7 @@ private struct CompactBar: View {
     let notchHeight: CGFloat
     let blocked: [Agent]
     let working: [Agent]
+    let onShowUpdate: () -> Void
     private let updater = Updater.shared
 
     var body: some View {
@@ -223,9 +229,13 @@ private struct CompactBar: View {
             // Right wing: update badge + agent count
             HStack(spacing: 4) {
                 if updater.updateAvailable && !expanded {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.cyan)
+                    Button(action: onShowUpdate) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.cyan)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show update")
                 }
                 if !expanded {
                     Text("\(relay.agents.count)")

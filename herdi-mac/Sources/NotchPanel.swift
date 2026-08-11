@@ -110,11 +110,11 @@ enum ScreenDetector {
 // MARK: - Panel Window Controller
 
 @MainActor
-final class PanelWindowController: NSObject, NSWindowDelegate {
+final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject {
     private var panel: KeyablePanel?
     private var hostingView: NotchHostingView<NotchPanelView>?
     private let relay: RelayConnection
-    var surface: IslandSurface = .collapsed
+    @Published var surface: IslandSurface = .collapsed
     private var globalClickMonitor: Any?
     private var fullscreenLatch = false
 
