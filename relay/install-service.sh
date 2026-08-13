@@ -897,6 +897,38 @@ echo "Config saved to $CONFIG_FILE"
 echo "Secrets saved to $SECRETS_FILE (mode 0600)"
 echo ""
 
+# --- launchd helpers (macOS) ---
+
+# Wait until a launchd label is fully torn down. Bootstrapping a label that is
+# still unloading fails with the opaque "Bootstrap failed: 5: Input/output error".
+# HERDR_INSTALL_SERVICE_DELAY=0 skips the wait entirely (used by the test suite).
+wait_for_label_gone() {
+    label="$1"
+    [ "${HERDR_INSTALL_SERVICE_DELAY:-1}" = "0" ] && return 0
+    for _i in $(seq 1 25); do
+        launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || return 0
+        sleep 0.2
+    done
+    return 1
+}
+
+# Bootstrap with retries; launchd can still report the label as busy briefly
+# even after `launchctl print` stops seeing it.
+bootstrap_with_retry() {
+    plist="$1"
+    label="$2"
+    _err=""
+    for _i in 1 2 3 4 5; do
+        if _err=$(launchctl bootstrap "gui/$(id -u)" "$plist" 2>&1); then
+            return 0
+        fi
+        [ "${HERDR_INSTALL_SERVICE_DELAY:-1}" = "0" ] && break
+        sleep 1
+    done
+    echo "  launchctl bootstrap failed for $label: $_err" >&2
+    return 1
+}
+
 # --- Build PATH for the service ---
 
 SERVICE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -918,6 +950,15 @@ if [ -n "$EXISTING_PID" ]; then
         echo "  Aborting. Stop the existing process first."
         exit 1
     fi
+    # If the port holder is our own managed relay, bootout the job first.
+    # Killing the PID directly leaves launchd restarting it (KeepAlive) and
+    # racing the bootstrap below.
+    if [ "$OS" = "macos" ] && launchctl print "gui/$(id -u)/$LABEL_RELAY" >/dev/null 2>&1; then
+        echo "  Stopping managed relay service..."
+        launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
+        wait_for_label_gone "$LABEL_RELAY" || true
+    fi
+
     # Try graceful shutdown first (SIGTERM)
     kill "$EXISTING_PID" 2>/dev/null
     for i in 1 2 3 4 5; do
@@ -953,8 +994,16 @@ if [ "$OS" = "macos" ]; then
     PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL_RELAY.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
 
+    # Preserve the current plist so a failed install can be rolled back rather
+    # than leaving the machine with no relay at all.
+    PLIST_BACKUP=""
+    if [ -f "$PLIST_PATH" ]; then
+        PLIST_BACKUP="$PLIST_PATH.prev"
+        cp "$PLIST_PATH" "$PLIST_BACKUP"
+    fi
+
     launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
-    sleep "${HERDR_INSTALL_SERVICE_DELAY:-1}"
+    wait_for_label_gone "$LABEL_RELAY" || true
 
     cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -990,7 +1039,23 @@ if [ "$OS" = "macos" ]; then
 </plist>
 EOF
 
-    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+    if ! bootstrap_with_retry "$PLIST_PATH" "$LABEL_RELAY"; then
+        echo "  ERROR: could not start the relay service." >&2
+        if [ -n "$PLIST_BACKUP" ] && [ -f "$PLIST_BACKUP" ]; then
+            echo "  Restoring previous relay service..." >&2
+            cp "$PLIST_BACKUP" "$PLIST_PATH"
+            wait_for_label_gone "$LABEL_RELAY" || true
+            if bootstrap_with_retry "$PLIST_PATH" "$LABEL_RELAY"; then
+                echo "  Previous relay restored and running." >&2
+            else
+                echo "  Could not restore the previous relay either." >&2
+                echo "  Start it manually with:" >&2
+                echo "    launchctl bootstrap gui/$(id -u) $PLIST_PATH" >&2
+            fi
+        fi
+        exit 1
+    fi
+    rm -f "$PLIST_PATH.prev"
 
 else
     UNIT_DIR="$HOME/.config/systemd/user"
@@ -1075,7 +1140,8 @@ if [ "$TELEGRAM_ENABLED" = true ]; then
 </dict>
 </plist>
 EOF
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_TELEGRAM"
+        wait_for_label_gone "$LABEL_TELEGRAM" || true
+        bootstrap_with_retry "$PLIST_TELEGRAM" "$LABEL_TELEGRAM" || true
     else
         UNIT_TELEGRAM="$UNIT_DIR/herdr-telegram.service"
         cat > "$UNIT_TELEGRAM" <<EOF
@@ -1205,7 +1271,8 @@ $ARGS_XML    </array>
 </plist>
 EOF
 
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_TUNNEL"
+        wait_for_label_gone "$LABEL_TUNNEL" || true
+        bootstrap_with_retry "$PLIST_TUNNEL" "$LABEL_TUNNEL" || true
 
     else
         systemctl --user stop herdr-tunnel.service 2>/dev/null || true
