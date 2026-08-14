@@ -91,6 +91,20 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-header .back { background: none; border: none; color: var(--blue); font-size: 1.4rem; cursor: pointer; padding: 4px 8px; }
 .term-header .title { flex: 1; font-size: 0.8rem; font-weight: 500; }
 .term-header .refresh-btn { background: none; border: none; color: var(--muted); font-size: 1.1rem; cursor: pointer; }
+.term-header .search-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
+.term-header .search-btn:hover, .term-header .refresh-btn:hover { color: var(--text); }
+.term-search { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.term-search input { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
+.term-search input:focus { outline: none; border-color: var(--blue); }
+.term-search span { font-size: 0.7rem; color: var(--muted); min-width: 40px; text-align: center; }
+.term-search button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
+.term-search button:hover { color: var(--text); }
+.search-highlight { background: var(--orange); color: #000; border-radius: 2px; }
+.search-current { background: var(--blue); color: #fff; }
+.ctx-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 8px; cursor: pointer; color: var(--text); font-size: 0.85rem; }
+.ctx-item:hover { background: var(--border); }
+.ctx-item.danger { color: var(--red); }
+.ctx-item svg { flex-shrink: 0; }
 .term-content { flex: 1; min-width: 0; overflow: auto; padding: 10px 12px; background: var(--term-bg); font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', 'SFMono-Regular', Consolas, monospace; font-size: clamp(0.68rem, 2.7vw, 0.8rem); line-height: 1.35; white-space: pre; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .quick-actions { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
 .quick-actions button { padding: 10px 14px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
@@ -190,7 +204,15 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   <div class="term-header">
     <button class="back" onclick="closeTerminal()" aria-label="Back to agent list"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
     <span class="title" id="termTitle"></span>
+    <button class="search-btn" onclick="toggleSearch()" aria-label="Find in output"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></button>
     <button class="refresh-btn" onclick="refreshPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
+  </div>
+  <div class="term-search" id="termSearch" style="display:none">
+    <input id="searchInput" type="text" placeholder="Find in output..." autocomplete="off" oninput="doSearch()" />
+    <span id="searchCount"></span>
+    <button onclick="searchNav(-1)" aria-label="Previous"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m18 15-6-6-6 6"/></svg></button>
+    <button onclick="searchNav(1)" aria-label="Next"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></button>
+    <button onclick="toggleSearch()" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
   <div class="term-content" id="termContent">Loading…</div>
   <div class="quick-actions" id="quickActions"></div>
@@ -262,6 +284,11 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 </div>
 
 <!-- Command palette -->
+<!-- Context Menu -->
+<div id="contextMenu" style="display:none;position:fixed;z-index:200;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);min-width:160px;padding:4px;">
+  <div id="contextMenuItems"></div>
+</div>
+
 <div id="cmdPalette" style="display:none;position:fixed;inset:0;z-index:100;">
   <div onclick="closePalette()" style="position:absolute;inset:0;background:rgba(0,0,0,0.5)"></div>
   <div style="position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:420px;max-height:50dvh;background:var(--surface);border-top-left-radius:16px;border-top-right-radius:16px;border-top:1px solid var(--border);display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,8px)">
@@ -572,7 +599,7 @@ function renderWorkspaces(workspaces) {
       const tabAgents = agents.filter(a => a.tab_id === tid);
       const hasBlocked = tabAgents.some(a => a.status === 'blocked');
       const tabLabel = tabAgents[0]?.label || 'Tab '+(i+1);
-      html += `<button class="chip${activeTab===tid?' active':''}${hasBlocked?' alert':''}" onclick="selectTab('${tid}')">${tabLabel}</button>`;
+      html += `<button class="chip${activeTab===tid?' active':''}${hasBlocked?' alert':''}" id="tab-${tid}" onclick="selectTab('${tid}')" data-tab-id="${tid}" data-tab-name="${tabLabel}">${tabLabel}</button>`;
     });
     html += `<button class="chip chip-add" onclick="createTab('${activeWorkspace}')">+</button>`;
     html += `</div>`;
@@ -604,6 +631,22 @@ function renderAgentList(list) {
   if (idle.length) html += section('Idle', 'var(--muted)', idle);
   if (!list.length) html = '<div class="empty">Waiting for agents…</div>';
   document.getElementById('agents').innerHTML = html;
+  bindLongPressHandlers();
+}
+
+function bindLongPressHandlers() {
+  // Bind to tabs
+  document.querySelectorAll('[data-tab-id]').forEach(el => {
+    const id = el.dataset.tabId;
+    const name = el.dataset.tabName;
+    setupLongPress(el, 'tab', id, name);
+  });
+  // Bind to agents
+  document.querySelectorAll('[data-pane-id]').forEach(el => {
+    const id = el.dataset.paneId;
+    const name = el.dataset.agentName;
+    setupLongPress(el, 'agent', id, name);
+  });
 }
 
 function selectWorkspace(id) { activeWorkspace = id; activeTab = null; render(); }
@@ -623,7 +666,7 @@ function agentCard(a) {
   const host = a.host&&a.host!=='local'?` <span style="color:var(--orange);font-size:0.6rem">@${a.host}</span>`:'';
   const cwd = a.cwd ? `<span style="font-family:monospace;opacity:0.7">${a.cwd.split('/').slice(-2).join('/')}</span>` : '';
   const label = a.label||a.project||a.agent;
-  return `<div class="agent${a.status==='blocked'?' blocked':''}" role="button" tabindex="0" aria-label="${label}, ${a.status}" onclick="openTerminal('${a.pane_id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${a.pane_id}')}">
+  return `<div class="agent${a.status==='blocked'?' blocked':''}" role="button" tabindex="0" aria-label="${label}, ${a.status}" data-pane-id="${a.pane_id}" data-agent-name="${label}" onclick="openTerminal('${a.pane_id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${a.pane_id}')}">
     <span class="dot${pulseClass}" style="background:${color}" aria-hidden="true"></span>
     <div class="info"><div class="project">${label}${host}</div><div class="meta">${a.agent} · ${cwd}</div></div>
     <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
@@ -702,6 +745,215 @@ function closeTerminal() {
 let paneLines = 200;
 function refreshPane() { if(ws&&ws.readyState===WebSocket.OPEN&&activePane) ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines,format:'ansi'})); }
 function loadMore() { paneLines = Math.min(paneLines + 500, 5000); refreshPane(); }
+
+// Find in output
+let searchMatches = [];
+let searchIndex = 0;
+let originalContent = '';
+
+function toggleSearch() {
+  const bar = document.getElementById('termSearch');
+  const input = document.getElementById('searchInput');
+  if (bar.style.display === 'none') {
+    bar.style.display = 'flex';
+    input.focus();
+  } else {
+    bar.style.display = 'none';
+    input.value = '';
+    clearSearch();
+  }
+}
+
+function doSearch() {
+  const query = document.getElementById('searchInput').value.toLowerCase();
+  const el = document.getElementById('termContent');
+  const countEl = document.getElementById('searchCount');
+  
+  // Restore original content first
+  if (!originalContent) originalContent = el.innerHTML;
+  el.innerHTML = originalContent;
+  
+  if (!query || query.length < 2) {
+    countEl.textContent = '';
+    searchMatches = [];
+    return;
+  }
+  
+  // Find and highlight matches
+  const text = el.textContent;
+  const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  let match;
+  searchMatches = [];
+  
+  while ((match = regex.exec(text)) !== null) {
+    searchMatches.push(match.index);
+  }
+  
+  if (searchMatches.length === 0) {
+    countEl.textContent = '0/0';
+    return;
+  }
+  
+  // Highlight all matches in HTML
+  let html = originalContent;
+  const tempDiv = document.createElement('div');
+  tempDiv.innerHTML = html;
+  const walker = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+  
+  let matchIdx = 0;
+  textNodes.forEach(node => {
+    const nodeText = node.textContent;
+    const parts = nodeText.split(regex);
+    if (parts.length > 1) {
+      const frag = document.createDocumentFragment();
+      const matches = nodeText.match(regex) || [];
+      parts.forEach((part, i) => {
+        frag.appendChild(document.createTextNode(part));
+        if (matches[i]) {
+          const mark = document.createElement('mark');
+          mark.className = matchIdx === searchIndex ? 'search-current' : 'search-highlight';
+          mark.textContent = matches[i];
+          mark.dataset.matchIndex = matchIdx++;
+          frag.appendChild(mark);
+        }
+      });
+      node.parentNode.replaceChild(frag, node);
+    }
+  });
+  
+  el.innerHTML = tempDiv.innerHTML;
+  searchIndex = 0;
+  countEl.textContent = `1/${searchMatches.length}`;
+  scrollToMatch();
+}
+
+function searchNav(dir) {
+  if (!searchMatches.length) return;
+  searchIndex = (searchIndex + dir + searchMatches.length) % searchMatches.length;
+  document.getElementById('searchCount').textContent = `${searchIndex + 1}/${searchMatches.length}`;
+  
+  // Update highlight classes
+  document.querySelectorAll('.search-highlight, .search-current').forEach((el, i) => {
+    el.className = i === searchIndex ? 'search-current' : 'search-highlight';
+  });
+  scrollToMatch();
+}
+
+function scrollToMatch() {
+  const current = document.querySelector('.search-current');
+  if (current) current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function clearSearch() {
+  const el = document.getElementById('termContent');
+  if (originalContent) {
+    el.innerHTML = originalContent;
+    originalContent = '';
+  }
+  searchMatches = [];
+  searchIndex = 0;
+  document.getElementById('searchCount').textContent = '';
+}
+
+// Long-press context menu
+let longPressTimer = null;
+let contextTarget = null;
+
+function showContextMenu(e, type, id, name) {
+  e.preventDefault();
+  const menu = document.getElementById('contextMenu');
+  const items = document.getElementById('contextMenuItems');
+  contextTarget = { type, id, name };
+  
+  let html = '';
+  if (type === 'tab') {
+    html = `
+      <div class="ctx-item" onclick="renameItem()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+        Rename Tab
+      </div>
+      <div class="ctx-item danger" onclick="closeItem()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        Close Tab
+      </div>
+    `;
+  } else if (type === 'agent') {
+    html = `
+      <div class="ctx-item" onclick="renameItem()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+        Rename Agent
+      </div>
+      <div class="ctx-item" onclick="interruptAgent()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        Interrupt (Esc)
+      </div>
+    `;
+  }
+  items.innerHTML = html;
+  
+  // Position menu
+  const x = Math.min(e.clientX || e.touches?.[0]?.clientX || 100, window.innerWidth - 180);
+  const y = Math.min(e.clientY || e.touches?.[0]?.clientY || 100, window.innerHeight - 120);
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  menu.style.display = 'block';
+  
+  if (window.cue) cue('tick');
+}
+
+function hideContextMenu() {
+  document.getElementById('contextMenu').style.display = 'none';
+  contextTarget = null;
+}
+
+function renameItem() {
+  if (!contextTarget) return;
+  const newName = prompt(`Rename ${contextTarget.type}:`, contextTarget.name || '');
+  if (newName && ws) {
+    if (contextTarget.type === 'tab') {
+      ws.send(JSON.stringify({ type: 'rename_tab', tab_id: contextTarget.id, label: newName }));
+    } else if (contextTarget.type === 'agent') {
+      ws.send(JSON.stringify({ type: 'send_text', pane_id: contextTarget.id, text: `/rename ${newName}` }));
+    }
+    if (window.cue) cue('success');
+  }
+  hideContextMenu();
+}
+
+function closeItem() {
+  if (!contextTarget || contextTarget.type !== 'tab') return;
+  if (confirm(`Close tab "${contextTarget.name || contextTarget.id}"?`)) {
+    if (ws) ws.send(JSON.stringify({ type: 'close_tab', tab_id: contextTarget.id }));
+    if (window.cue) cue('droplet');
+  }
+  hideContextMenu();
+}
+
+function interruptAgent() {
+  if (!contextTarget || contextTarget.type !== 'agent') return;
+  if (ws) ws.send(JSON.stringify({ type: 'send_keys', pane_id: contextTarget.id, keys: ['Escape'] }));
+  if (window.cue) cue('toggle');
+  hideContextMenu();
+}
+
+// Close context menu on click outside
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#contextMenu')) hideContextMenu();
+});
+
+// Long press handler for touch
+function setupLongPress(el, type, id, name) {
+  el.addEventListener('touchstart', (e) => {
+    longPressTimer = setTimeout(() => showContextMenu(e, type, id, name), 500);
+  }, { passive: true });
+  el.addEventListener('touchend', () => clearTimeout(longPressTimer));
+  el.addEventListener('touchmove', () => clearTimeout(longPressTimer));
+  // Right-click for desktop
+  el.addEventListener('contextmenu', (e) => showContextMenu(e, type, id, name));
+}
+
 function sendText() {
   const i=document.getElementById('termInput');
   if(!i.value||!ws||!activePane)return;
