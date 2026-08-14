@@ -144,13 +144,19 @@ async def read_pane(pane_id: str, lines: int = 15) -> str:
 
 
 async def send_text_to_relay(pane_id: str, text: str):
-    """Send text followed by Enter to a pane."""
-    if not text or len(text) > 1000:
-        raise ValueError("text must contain 1-1000 characters")
+    """Send text to an agent using 'herdr agent prompt' for proper submission."""
+    if not text or len(text) > 10000:
+        raise ValueError("text must contain 1-10000 characters")
     import websockets
     async with websockets.connect(RELAY_WS) as ws:
-        await ws.send(json.dumps({"type": "send_text", "pane_id": pane_id, "text": text}))
-        await ws.send(json.dumps({"type": "send_keys", "pane_id": pane_id, "keys": ["Enter"]}))
+        request_id = secrets.token_hex(8)
+        await ws.send(json.dumps({
+            "type": "agent_prompt",
+            "pane_id": pane_id,
+            "text": text,
+            "request_id": request_id,
+        }))
+        await await_command_result(ws, request_id, "agent_prompt")
 
 
 # --- Auth guard ---

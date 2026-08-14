@@ -587,6 +587,21 @@ async def handle_client(ws):
                 log.info("Text from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("send_text", ip, device, pane_id, f"text={text!r}")
                 run_herdr("pane", "send-text", pane_id, text, remote=remote)
+            elif msg_type == "agent_prompt":
+                # Use 'herdr agent prompt' for proper submission (works with Codex, Claude, etc.)
+                pane_id = msg["pane_id"]
+                if pane_id not in known_panes:
+                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    continue
+                text = msg.get("text", "")
+                if not text or len(text) > 10000:
+                    await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
+                    continue
+                remote = pane_remote_map.get(pane_id)
+                log.info("Agent prompt from %s (%s): pane=%s text=%r", ip, device, pane_id, text[:100])
+                audit("agent_prompt", ip, device, pane_id, f"text={text[:100]!r}")
+                run_herdr("agent", "prompt", pane_id, text, remote=remote)
+                await ws.send(json.dumps({"type": "command_result", "command": "agent_prompt", "ok": True}))
             elif msg_type == "create_tab":
                 workspace_id = msg.get("workspace_id", "")
                 if workspace_id:

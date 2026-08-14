@@ -723,11 +723,11 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         tg.register_pending(42, 77, "w0:p1")
         message = FakeMessage()
         message.reply_to_message = SimpleNamespace(message_id=77)
-        message.text = "x" * 1001
+        message.text = "x" * 10001
 
         await tg.handle_text(make_update(message=message), SimpleNamespace())
 
-        self.assertIn("1-1000", message.replies[0][0])
+        self.assertIn("1-10000", message.replies[0][0])
 
 
 if __name__ == "__main__":
