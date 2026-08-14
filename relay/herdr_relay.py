@@ -551,6 +551,21 @@ async def handle_client(ws):
                     "--format", read_format, remote=remote
                 )
                 await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content}))
+            elif msg_type == "get_history":
+                pane_id = msg["pane_id"]
+                if pane_id not in known_panes:
+                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    continue
+                remote = pane_remote_map.get(pane_id)
+                # Try to read conversation history from agent's session log
+                history = run_herdr("agent", "history", pane_id, "--format", "json", remote=remote)
+                messages = []
+                try:
+                    data = json.loads(history) if history else {}
+                    messages = data.get("messages", data.get("history", []))
+                except Exception:
+                    pass
+                await ws.send(json.dumps({"type": "history", "pane_id": pane_id, "messages": messages}))
             elif msg_type == "send_keys":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
