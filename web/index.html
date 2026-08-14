@@ -12,6 +12,15 @@ import { play, bind } from 'https://esm.sh/cuelume@0.1.2';
 window.cue = play;
 document.addEventListener('DOMContentLoaded', () => bind());
 </script>
+<style data-font-face>
+@font-face {
+  font-family: 'Hack Nerd Font';
+  src: url('./HackNerdFont-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+</style>
 <style>
 :root {
   --bg: #e1e2e7; --surface: #d8d9e0; --border: #b6bbd1; --text: #1f2f66; --muted: #68709a;
@@ -82,12 +91,12 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-header .back { background: none; border: none; color: var(--blue); font-size: 1.4rem; cursor: pointer; padding: 4px 8px; }
 .term-header .title { flex: 1; font-size: 0.8rem; font-weight: 500; }
 .term-header .refresh-btn { background: none; border: none; color: var(--muted); font-size: 1.1rem; cursor: pointer; }
-.term-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px; background: var(--term-bg); font-family: 'SF Mono', 'Menlo', monospace; font-size: 0.8rem; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; word-break: break-all; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.term-content { flex: 1; min-width: 0; overflow: auto; padding: 10px 12px; background: var(--term-bg); font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', 'SFMono-Regular', Consolas, monospace; font-size: clamp(0.68rem, 2.7vw, 0.8rem); line-height: 1.35; white-space: pre; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .quick-actions { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
 .quick-actions button { padding: 10px 14px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
 .btn-yes { background: var(--green); color: #fff; } .btn-trust { background: var(--blue); color: #fff; } .btn-no { background: var(--red); color: #fff; }
 .term-input { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; gap: 6px; background: var(--surface); flex-shrink: 0; }
-.term-input input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: monospace; min-width: 0; }
+.term-input input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', Consolas, monospace; min-width: 0; }
 .term-input button:last-child { padding: 10px 14px; border-radius: 6px; border: none; background: var(--blue); color: #fff; font-weight: 700; font-size: 16px; flex-shrink: 0; }
 .term-keys { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 8px); }
 .nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
@@ -374,6 +383,77 @@ function tryDemo() {
   connect();
 }
 
+const ANSI_COLORS = ['#000000','#cd3131','#0dbc79','#e5e510','#2472c8','#bc3fbc','#11a8cd','#e5e5e5','#666666','#f14c4c','#23d18b','#f5f543','#3b8eea','#d670d6','#29b8db','#ffffff'];
+
+function ansiFragment(input) {
+  const fragment=document.createDocumentFragment();
+  let state={fg:null,bg:null,inverse:false,hidden:false,fontWeight:'',opacity:'',fontStyle:'',textDecoration:'',textDecorationStyle:''};
+  let cursor=0;
+  const control=/\x1b\]([^\x07\x1b]*)(?:\x07|\x1b\\)|\x1b\[([0-?]*)([ -/]*[@-~])/g;
+  const append=text=>{
+    if(!text)return;
+    const span=document.createElement('span');
+    span.textContent=text;
+    if(state.hidden)span.style.visibility='hidden';
+    const defaultFg='#ccc';
+    const defaultBg='#000';
+    const fg=state.inverse?(state.bg||defaultBg):state.fg;
+    const bg=state.inverse?(state.fg||defaultFg):state.bg;
+    if(fg)span.style.color=fg;
+    if(bg)span.style.backgroundColor=bg;
+    if(state.fontWeight)span.style.fontWeight=state.fontWeight;
+    if(state.opacity)span.style.opacity=state.opacity;
+    if(state.fontStyle)span.style.fontStyle=state.fontStyle;
+    if(state.textDecoration)span.style.textDecoration=state.textDecoration;
+    if(state.textDecorationStyle)span.style.textDecorationStyle=state.textDecorationStyle;
+    fragment.appendChild(span);
+  };
+  for(const match of input.matchAll(control)){
+    append(input.slice(cursor,match.index));
+    cursor=match.index+match[0].length;
+    if(match[3]!=='m')continue;
+    const fields=(match[2]||'0').split(';');
+    const params=fields.map(value=>Number((value.split(':',1)[0])||0));
+    for(let i=0;i<params.length;i++){
+      const code=params[i];
+      if(code===0){state={fg:null,bg:null,inverse:false,hidden:false,fontWeight:'',opacity:'',fontStyle:'',textDecoration:'',textDecorationStyle:''};continue;}
+      if(code===1){state.fontWeight='700';continue;}
+      if(code===2){state.opacity='0.7';continue;}
+      if(code===3){state.fontStyle='italic';continue;}
+      if(code===4){state.textDecoration='underline';continue;}
+      if(code===7){state.inverse=true;continue;}
+      if(code===8){state.hidden=true;continue;}
+      if(code===22){state.fontWeight='';state.opacity='';continue;}
+      if(code===23){state.fontStyle='';continue;}
+      if(typeof fields[i]==='string'&&fields[i].startsWith('4:')){
+        const underlineStyle=fields[i].split(':')[1];
+        state.textDecoration='underline';
+        state.textDecorationStyle=underlineStyle==='2'?'double':underlineStyle==='3'?'wavy':underlineStyle==='4'?'dotted':underlineStyle==='5'?'dashed':'solid';
+        continue;
+      }
+      if(code===24){state.textDecoration='';state.textDecorationStyle='';continue;}
+      if(code===27){state.inverse=false;continue;}
+      if(code===28){state.hidden=false;continue;}
+      if(code===39){state.fg=null;continue;}
+      if(code===49){state.bg=null;continue;}
+      if(code>=30&&code<=37){state.fg=ANSI_COLORS[code-30];continue;}
+      if(code>=90&&code<=97){state.fg=ANSI_COLORS[code-82];continue;}
+      if(code>=40&&code<=47){state.bg=ANSI_COLORS[code-40];continue;}
+      if(code>=100&&code<=107){state.bg=ANSI_COLORS[code-92];continue;}
+      if((code===38||code===48)&&params[i+1]===5&&Number.isInteger(params[i+2])){
+        const n=params[i+2];
+        const color=n<16?ANSI_COLORS[n]:n<232?`rgb(${[0,1,2].map(axis=>{const v=Math.floor((n-16)/Math.pow(6,2-axis))%6;return v?55+v*40:0}).join(',')})`:`rgb(${8+(n-232)*10},${8+(n-232)*10},${8+(n-232)*10})`;
+        state[code===38?'fg':'bg']=color;i+=2;continue;
+      }
+      if((code===38||code===48)&&params[i+1]===2&&params.slice(i+2,i+5).every(Number.isFinite)){
+        state[code===38?'fg':'bg']=`rgb(${params[i+2]},${params[i+3]},${params[i+4]})`;i+=4;
+      }
+    }
+  }
+  append(input.slice(cursor));
+  return fragment;
+}
+
 function handleMessage(msg) {
   if (msg.type === 'agents') {
     // Track timeline on status changes
@@ -440,7 +520,7 @@ function handleMessage(msg) {
     const el = document.getElementById('termContent');
     const prevHeight = el.scrollHeight;
     const prevScroll = el.scrollTop;
-    el.textContent = msg.content || '(empty)';
+    el.replaceChildren(ansiFragment(msg.content || '(empty)'));
     if (userScrolledUp) {
       // Keep scroll position relative to bottom (content may have grown at top)
       const growth = el.scrollHeight - prevHeight;
@@ -620,7 +700,7 @@ function closeTerminal() {
 }
 
 let paneLines = 200;
-function refreshPane() { if(ws&&ws.readyState===WebSocket.OPEN&&activePane) ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines})); }
+function refreshPane() { if(ws&&ws.readyState===WebSocket.OPEN&&activePane) ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines,format:'ansi'})); }
 function loadMore() { paneLines = Math.min(paneLines + 500, 5000); refreshPane(); }
 function sendText() {
   const i=document.getElementById('termInput');
