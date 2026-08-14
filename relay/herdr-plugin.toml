@@ -3,8 +3,8 @@ name = "Herdr Remote Relay"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Push agent events to the local herdr-remote relay via UDP"
-platforms = ["macos", "linux"]
+platforms = ["macos", "linux", "windows"]
 
 [[events]]
 on = "pane.agent_status_changed"
-command = ["python3", "on_event.py"]
+command = ["uv", "run", "--script", "on_event.py"]

@@ -51,6 +51,11 @@ def loaded_relay(*, herdr_bin=None):
     websockets_logger = logging.getLogger("websockets")
     original_websockets_level = websockets_logger.level
 
+    relay_dir = str(RELAY_PATH.parent)
+    added_relay_dir = relay_dir not in sys.path
+    if added_relay_dir:
+        sys.path.insert(0, relay_dir)
+
     with tempfile.TemporaryDirectory() as log_dir:
         environment = {"HERDR_LOG_DIR": log_dir}
         if herdr_bin is not None:
@@ -58,7 +63,7 @@ def loaded_relay(*, herdr_bin=None):
 
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.dict(
             sys.modules, _websockets_stubs(), clear=False
-        ), mock.patch.object(sys, "path", [str(RELAY_PATH.parent), *sys.path]):
+        ):
             if herdr_bin is None:
                 os.environ.pop("HERDR_BIN", None)
 
@@ -71,6 +76,8 @@ def loaded_relay(*, herdr_bin=None):
                 yield module
             finally:
                 sys.modules.pop(module_name, None)
+                if added_relay_dir:
+                    sys.path.remove(relay_dir)
                 for handler in tuple(logger.handlers):
                     if handler not in original_handlers:
                         logger.removeHandler(handler)
@@ -106,321 +113,181 @@ class _FakeWebSocket:
         self.sent.append(message)
 
 
-class RelayQuestionTests(unittest.TestCase):
-    ASK_SCREEN = """
-╭─ Ask ─╮
-│ Which color? │
-│   Red │
-│    Blue │
-│    Green │
-│    Other (type your own) │
-│ Enter select · ↑/↓ move · Esc cancel │
-╰───────╯
-"""
-    MULTI_SCREEN = """
-╭─ Ask ─╮
-│ Which capabilities? │
-│   Color output │
-│    Nerd Font │
-│    Mobile layout │
-│    Other (type your own) │
-╰───────╯
-"""
-
-    MULTI_SELECTED_SCREEN = """
-╭─ Ask ─╮
-│ capabilities    Submit │
-│ Which capabilities? │
-│    Color output │
-│   Nerd Font │
-│    Mobile layout │
-│    Other (type your own) │
-╰───────╯
-"""
-
-
-    def test_detects_live_omp_question_options_and_cursor(self):
+class RelayConfigurationTests(unittest.TestCase):
+    def test_herdr_defaults_to_path_lookup(self):
         with loaded_relay() as relay:
-            question = relay.detect_question(self.ASK_SCREEN)
+            expected = relay.shutil.which("herdr")
+            if expected is None:
+                expected = "herdr" if relay.sys.platform == "win32" else "/opt/homebrew/bin/herdr"
+            self.assertEqual(relay.HERDR, expected)
 
-            self.assertIsNotNone(question)
+    def test_herdr_bin_override_is_honored(self):
+        configured_path = os.path.join("custom", "bin", "herdr")
+        with loaded_relay(herdr_bin=configured_path) as relay:
+            self.assertEqual(relay.HERDR, configured_path)
+
+    def test_herdr_output_uses_utf8_decoding(self):
+        with loaded_relay() as relay:
+            completed = subprocess.CompletedProcess([], 0, stdout="ready\n", stderr="")
+            with mock.patch.object(relay.subprocess, "run", return_value=completed) as run:
+                for remote in (None, "agent-host"):
+                    with self.subTest(remote=remote):
+                        self.assertEqual(relay.run_herdr("pane", "list", remote=remote), "ready")
+                        kwargs = run.call_args.kwargs
+                        self.assertEqual(kwargs["encoding"], "utf-8")
+                        self.assertEqual(kwargs["errors"], "replace")
+
+    def test_herdr_output_falls_back_to_empty_string_on_invocation_error(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay.subprocess, "run", side_effect=OSError("unavailable")):
+                self.assertEqual(relay.run_herdr("pane", "list"), "")
+
+
+class RelayResponseTests(unittest.TestCase):
+    def test_respond_strips_crlf_and_sends_canonical_text_before_enter(self):
+        with loaded_relay() as relay:
+            pane_id = "pane-1"
+            remote = "agent-host"
+            relay.known_panes.add(pane_id)
+            relay.pane_remote_map[pane_id] = remote
+            ws = _FakeWebSocket(
+                [json.dumps({"type": "respond", "pane_id": pane_id, "text": "  yes\r\n"})]
+            )
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(relay, "get_all_agents", return_value=[]),                  mock.patch.object(relay.subprocess, "run", return_value=completed) as run:
+                asyncio.run(relay.handle_client(ws))
+
+            prefix = [
+                "ssh",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "BatchMode=yes",
+                remote,
+                relay.REMOTE_HERDR,
+            ]
             self.assertEqual(
-                [option["label"] for option in question["options"]],
-                ["Red", "Blue", "Green", relay.QUESTION_OTHER],
-            )
-            self.assertEqual(question["selected_index"], 0)
-            self.assertEqual(relay.detect_options(self.ASK_SCREEN), ["Red", "Blue", "Green"])
-
-    def test_prompt_identity_includes_question_text(self):
-        first_prompt = self.ASK_SCREEN.replace("Which color?", "Which environment?")
-        second_prompt = self.ASK_SCREEN.replace("Which color?", "Delete all data?")
-
-        with loaded_relay() as relay:
-            self.assertNotEqual(
-                relay.question_prompt_id("pane-1", first_prompt),
-                relay.question_prompt_id("pane-1", second_prompt),
-            )
-
-    def test_long_questions_with_identical_options_have_distinct_identity(self):
-        first_prompt = "Which deployment target should receive this very long request?\n" + "\n".join(
-            f"detail line {index}" for index in range(35)
-        ) + "\n  staging\n   production\n   Other (type your own)"
-        second_prompt = first_prompt.replace(
-            "Which deployment target should receive this very long request?",
-            "Which database should receive this very long request?",
-        )
-
-        with loaded_relay() as relay:
-            self.assertNotEqual(
-                relay.question_prompt_id("pane-1", first_prompt),
-                relay.question_prompt_id("pane-1", second_prompt),
-            )
-
-    def test_long_option_lists_keep_question_text_in_identity(self):
-        options = "\n".join(
-            [f"   option {index}" for index in range(120)]
-            + ["   Other (type your own)"]
-        )
-        first_prompt = f"Which environment?\n{options}"
-        second_prompt = f"Which database?\n{options}"
-
-        with loaded_relay() as relay:
-            self.assertNotEqual(
-                relay.question_prompt_id("pane-1", first_prompt),
-                relay.question_prompt_id("pane-1", second_prompt),
-            )
-
-    def test_read_pane_preserves_long_question_for_prompt_identity(self):
-        def pane_output(question):
-            return "\n".join([
-                question,
-                *(f"detail line {index}" for index in range(35)),
-                "  staging",
-                "   production",
-                "   Other (type your own)",
-            ])
-
-        with loaded_relay() as relay:
-            with mock.patch.object(
-                relay,
-                "run_herdr",
-                side_effect=[
-                    pane_output("Which deployment target should receive this request?"),
-                    pane_output("Which database should receive this request?"),
-                ],
-            ):
-                first = relay.read_pane("pane-1")
-                second = relay.read_pane("pane-1")
-
-            self.assertNotEqual(
-                relay.question_prompt_id("pane-1", first),
-                relay.question_prompt_id("pane-1", second),
-            )
-
-    def test_prompt_identity_ignores_multi_selection_state(self):
-        with loaded_relay() as relay:
-            self.assertEqual(
-                relay.question_prompt_id("pane-1", self.MULTI_SCREEN),
-                relay.question_prompt_id("pane-1", self.MULTI_SELECTED_SCREEN),
-            )
-
-    def test_unknown_blocked_prompt_has_no_approval_fallback(self):
-        with loaded_relay() as relay:
-            message = relay.blocked_message("pane-1", "omp", "project", "local", "What name?")
-
-            self.assertEqual(message["options"], [])
-            self.assertEqual(message["interaction"], "prompt")
-
-    def test_question_choice_moves_from_live_cursor_before_enter(self):
-        with loaded_relay() as relay:
-            question = relay.detect_question(self.ASK_SCREEN)
-            with mock.patch.object(relay, "_mutate_herdr", return_value=True) as mutate:
-                delivered = relay.respond_to_question(
-                    "pane-1", "Blue", question, remote="agent-host"
-                )
-
-            self.assertTrue(delivered)
-            mutate.assert_called_once_with(
-                "pane", "send-keys", "pane-1", "Down", "Enter", remote="agent-host"
-            )
-
-    def test_custom_question_answer_waits_for_editor_then_submits(self):
-        with loaded_relay() as relay:
-            question = relay.detect_question(self.ASK_SCREEN)
-            with mock.patch.object(
-                relay,
-                "read_pane",
-                return_value="Custom answer: Which color?\n>\nenter or ctrl+q submit",
-            ), mock.patch.object(relay, "_mutate_herdr", return_value=True) as mutate:
-                delivered = relay.respond_to_question(
-                    "pane-1", "Purple", question, remote=None
-                )
-
-            self.assertTrue(delivered)
-            self.assertEqual(
-                mutate.call_args_list,
+                [call.args[0] for call in run.call_args_list],
                 [
-                    mock.call("pane", "send-keys", "pane-1", "Down", "Down", "Down", "Enter", remote=None),
-                    mock.call("pane", "send-text", "pane-1", "Purple", remote=None),
-                    mock.call("pane", "send-keys", "pane-1", "Enter", remote=None),
+                    [*prefix, "pane", "send-text", pane_id, "yes"],
+                    [*prefix, "pane", "send-keys", pane_id, "Enter"],
                 ],
             )
 
-
-
-    def test_multi_question_toggle_and_done_submission_use_live_cursor(self):
+    def test_respond_does_not_send_enter_when_send_text_fails(self):
         with loaded_relay() as relay:
-            with mock.patch.object(relay, "pane_is_omp", return_value=True), \
-                 mock.patch.object(
-                     relay,
-                     "read_pane",
-                     side_effect=[self.MULTI_SCREEN, self.MULTI_SELECTED_SCREEN],
-                 ), mock.patch.object(relay, "_mutate_herdr", return_value=True) as mutate:
-                toggled = relay.toggle_question_option("pane-1", "Nerd Font")
-                submitted = relay.submit_multi_question("pane-1")
+            pane_id = "pane-1"
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket(
+                [json.dumps({"type": "respond", "pane_id": pane_id, "text": "yes"})]
+            )
+            failed = subprocess.CompletedProcess([], 1, stdout="", stderr="failed")
+            with mock.patch.object(relay, "get_all_agents", return_value=[]),                  mock.patch.object(relay.subprocess, "run", return_value=failed) as run:
+                asyncio.run(relay.handle_client(ws))
 
-            self.assertTrue(toggled)
-            self.assertTrue(submitted)
+            run.assert_called_once()
             self.assertEqual(
-                mutate.call_args_list,
-                [
-                    mock.call("pane", "send-keys", "pane-1", "Down", remote=None),
-                    mock.call("pane", "send-keys", "pane-1", "Enter", remote=None),
-                    mock.call("pane", "send-keys", "pane-1", "Tab", "Enter", remote=None),
-                ],
+                run.call_args.args[0], [relay.HERDR, "pane", "send-text", pane_id, "yes"]
             )
 
-    def test_non_omp_checkbox_prompt_never_uses_question_navigation(self):
+
+class RelaySubprocessConcurrencyTests(unittest.TestCase):
+    def test_calls_to_the_same_remote_are_serialized(self):
         with loaded_relay() as relay:
-            message = relay.blocked_message("pane-1", "claude", "project", "local", self.MULTI_SCREEN)
+            first_entered = threading.Event()
+            second_started = threading.Event()
+            second_entered = threading.Event()
+            release_first = threading.Event()
+            invocation_count = 0
+            count_lock = threading.Lock()
 
-            self.assertEqual(message["interaction"], "prompt")
-            self.assertEqual(message["options"], [])
+            def fake_subprocess_run(command, **kwargs):
+                nonlocal invocation_count
+                with count_lock:
+                    invocation_count += 1
+                    invocation = invocation_count
+                if invocation == 1:
+                    first_entered.set()
+                    if not release_first.wait(5):
+                        raise AssertionError("test did not release the first subprocess")
+                else:
+                    second_entered.set()
+                return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-    def test_arbitrary_response_is_rejected_for_non_question_prompt(self):
+            def run_second_call():
+                second_started.set()
+                return relay.run_herdr("pane", "read", "second", remote="same-host")
+
+            with mock.patch.object(relay.subprocess, "run", side_effect=fake_subprocess_run):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(
+                        relay.run_herdr, "pane", "read", "first", remote="same-host"
+                    )
+                    self.assertTrue(first_entered.wait(2), "first subprocess did not start")
+                    second = executor.submit(run_second_call)
+                    self.assertTrue(second_started.wait(2), "second call did not start")
+                    try:
+                        self.assertFalse(
+                            second_entered.wait(0.5),
+                            "second subprocess entered before the first completed",
+                        )
+                    finally:
+                        release_first.set()
+                    self.assertEqual(first.result(timeout=2), "ok")
+                    self.assertEqual(second.result(timeout=2), "ok")
+
+            self.assertTrue(second_entered.is_set())
+            self.assertEqual(invocation_count, 2)
+
+    def test_other_remotes_and_local_calls_do_not_share_a_lock(self):
         with loaded_relay() as relay:
-            pane_id = "pane-1"
-            content = "Approve this tool?"
-            relay.known_panes.add(pane_id)
-            ws = _FakeWebSocket([
-                json.dumps({
-                    "type": "respond",
-                    "pane_id": pane_id,
-                    "prompt_id": relay.question_prompt_id(pane_id, content),
-                    "text": "run arbitrary command",
-                })
-            ])
-            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
-                 mock.patch.object(relay, "read_pane", return_value=content), \
-                 mock.patch.object(relay, "_mutate_herdr") as mutate:
-                asyncio.run(relay.handle_client(ws))
+            entered = {
+                "blocked-host": threading.Event(),
+                "other-host": threading.Event(),
+                "local": threading.Event(),
+            }
+            release_blocked = threading.Event()
 
-            mutate.assert_not_called()
-            self.assertIn("detected question", json.loads(ws.sent[-1])["message"])
+            def command_target(command):
+                if command[0] != "ssh":
+                    return "local"
+                batch_mode_index = command.index("BatchMode=yes")
+                return command[batch_mode_index + 1]
 
-    def test_non_omp_custom_editor_text_is_rejected(self):
-        with loaded_relay() as relay:
-            pane_id = "pane-1"
-            content = "Custom answer: prompt\nenter or ctrl+q submit"
-            relay.known_panes.add(pane_id)
-            ws = _FakeWebSocket([
-                json.dumps({
-                    "type": "respond",
-                    "pane_id": pane_id,
-                    "prompt_id": relay.question_prompt_id(pane_id, content),
-                    "text": "arbitrary",
-                })
-            ])
-            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
-                 mock.patch.object(
-                     relay,
-                     "read_pane",
-                     return_value=content,
-                 ), mock.patch.object(relay, "pane_is_omp", return_value=False), \
-                 mock.patch.object(relay, "_mutate_herdr") as mutate:
-                asyncio.run(relay.handle_client(ws))
+            def fake_subprocess_run(command, **kwargs):
+                target = command_target(command)
+                entered[target].set()
+                if target == "blocked-host" and not release_blocked.wait(5):
+                    raise AssertionError("test did not release blocked-host")
+                return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
-            mutate.assert_not_called()
-            self.assertIn("detected question", json.loads(ws.sent[-1])["message"])
-
-
-    def test_stale_question_response_is_rejected_before_input(self):
-        with loaded_relay() as relay:
-            pane_id = "pane-1"
-            relay.known_panes.add(pane_id)
-            current_prompt_id = relay.question_prompt_id(pane_id, self.ASK_SCREEN)
-            ws = _FakeWebSocket([
-                json.dumps({
-                    "type": "respond",
-                    "pane_id": pane_id,
-                    "prompt_id": "stale-prompt",
-                    "text": "Blue",
-                })
-            ])
-            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
-                 mock.patch.object(relay, "read_pane", return_value=self.ASK_SCREEN), \
-                 mock.patch.object(relay, "pane_is_omp", return_value=True), \
-                 mock.patch.object(relay, "_mutate_herdr") as mutate:
-                asyncio.run(relay.handle_client(ws))
-
-            self.assertNotEqual(current_prompt_id, "stale-prompt")
-            mutate.assert_not_called()
-            self.assertIn("prompt changed", json.loads(ws.sent[-1])["message"])
-
-    def test_stale_standard_approval_is_rejected_before_input(self):
-        with loaded_relay() as relay:
-            pane_id = "pane-1"
-            old_content = "Run read-only status command?\nyes, single permission"
-            current_content = "Delete production data?\nyes, single permission"
-            relay.known_panes.add(pane_id)
-            ws = _FakeWebSocket([
-                json.dumps({
-                    "type": "respond",
-                    "pane_id": pane_id,
-                    "prompt_id": relay.question_prompt_id(pane_id, old_content),
-                    "text": "yes, single permission",
-                })
-            ])
-
-            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
-                 mock.patch.object(relay, "read_pane", return_value=current_content), \
-                 mock.patch.object(relay, "_mutate_herdr") as mutate:
-                asyncio.run(relay.handle_client(ws))
-
-            mutate.assert_not_called()
-            self.assertIn("prompt changed", json.loads(ws.sent[-1])["message"])
-
-    def test_respond_sends_correlated_acknowledgement(self):
-        with loaded_relay() as relay:
-            pane_id = "pane-1"
-            content = "yes, single permission"
-            relay.known_panes.add(pane_id)
-            ws = _FakeWebSocket([
-                json.dumps({
-                    "type": "respond",
-                    "pane_id": pane_id,
-                    "prompt_id": relay.question_prompt_id(pane_id, content),
-                    "text": "yes",
-                    "request_id": "request-123",
-                })
-            ])
-
-            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
-                 mock.patch.object(relay, "read_pane", return_value=content), \
-                 mock.patch.object(relay, "pane_is_omp", return_value=False), \
-                 mock.patch.object(relay, "_mutate_herdr", return_value=True):
-                asyncio.run(relay.handle_client(ws))
-
-            self.assertEqual(
-                json.loads(ws.sent[-1]),
-                {
-                    "type": "command_result",
-                    "command": "respond",
-                    "ok": True,
-                    "request_id": "request-123",
-                },
-            )
-
+            with mock.patch.object(relay.subprocess, "run", side_effect=fake_subprocess_run):
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    blocked = executor.submit(
+                        relay.run_herdr, "pane", "read", "one", remote="blocked-host"
+                    )
+                    self.assertTrue(
+                        entered["blocked-host"].wait(2),
+                        "blocked remote subprocess did not start",
+                    )
+                    other = executor.submit(
+                        relay.run_herdr, "pane", "read", "two", remote="other-host"
+                    )
+                    local = executor.submit(relay.run_herdr, "pane", "read", "three")
+                    try:
+                        self.assertTrue(
+                            entered["other-host"].wait(2),
+                            "different remote was blocked by the first remote",
+                        )
+                        self.assertTrue(
+                            entered["local"].wait(2),
+                            "local execution was blocked by a remote",
+                        )
+                    finally:
+                        release_blocked.set()
+                    self.assertEqual(blocked.result(timeout=2), "ok")
+                    self.assertEqual(other.result(timeout=2), "ok")
+                    self.assertEqual(local.result(timeout=2), "ok")
 
 
 if __name__ == "__main__":

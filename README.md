@@ -35,6 +35,10 @@ curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/H
 
 ## Remote monitoring (phone/Telegram)
 
+The Python relay, web dashboard, TUI, and Telegram client run on macOS, Linux, and Windows.
+
+### macOS/Linux
+
 For monitoring agents across machines or from your phone:
 
 ```bash
@@ -43,6 +47,25 @@ cd herdr-remote/relay && ./start.sh
 ```
 
 Open [herdr-demo.pages.dev](https://herdr-demo.pages.dev) on your phone, paste the tunnel URL.
+
+### Windows
+
+With Git, [uv](https://docs.astral.sh/uv/), and `herdr` installed:
+
+```powershell
+git clone https://github.com/dcolinmorgan/herdr-remote
+Set-Location herdr-remote
+
+herdr plugin link .
+herdr plugin list
+
+./relay/start.ps1
+```
+
+The launcher starts a local-only relay on `127.0.0.1:8375` by default. Set
+`HERDR_RELAY_TOKEN` before enabling a tunnel or binding beyond loopback. Use
+`HERDR_REMOTES` for a comma-separated list of SSH targets and `HERDR_BIN` only
+when `herdr` is not available on `PATH`.
 
 ## Telegram Bot
 
@@ -128,9 +151,17 @@ export HERDR_RELAY_TOKEN="$(openssl rand -hex 32)"
 uv run relay/herdr_relay.py
 ```
 
+On Windows PowerShell:
+
+```powershell
+$env:HERDR_RELAY_TOKEN = [guid]::NewGuid().ToString("N")
+uv run relay/herdr_relay.py
+```
+
 ## Requirements
 
 - macOS 14+ (menu bar app)
+- Windows 10+ (relay/web/TUI/Telegram; no tray app)
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
 - `cloudflared` (for remote access)
 - herdr 0.7+
