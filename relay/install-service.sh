@@ -1126,9 +1126,30 @@ elif [ "$TUNNEL_MODE" != "none" ] && [ -n "$CLOUDFLARED_PATH" ]; then
         CF_CONFIG_DIR="$HOME/.cloudflared"
         mkdir -p "$CF_CONFIG_DIR"
         CF_CONFIG="$CF_CONFIG_DIR/config-herdr.yml"
+        # cloudflared writes credentials to <UUID>.json, not <name>.json —
+        # resolve the tunnel's UUID so the config points at a file that exists.
+        TUNNEL_UUID=$("$CLOUDFLARED_PATH" tunnel list --output json 2>/dev/null \
+            | NAME="$TUNNEL_NAME" python3 -c '
+import json, os, sys
+name = os.environ["NAME"]
+try:
+    for t in json.load(sys.stdin):
+        if t.get("name") == name:
+            print(t.get("id", ""))
+            break
+except Exception:
+    pass
+')
+        if [ -n "$TUNNEL_UUID" ] && [ -f "$CF_CONFIG_DIR/${TUNNEL_UUID}.json" ]; then
+            CF_CREDS="$CF_CONFIG_DIR/${TUNNEL_UUID}.json"
+        else
+            CF_CREDS="$CF_CONFIG_DIR/${TUNNEL_NAME}.json"
+            echo "  WARNING: could not resolve credentials file for tunnel '$TUNNEL_NAME'." >&2
+            echo "           Falling back to $CF_CREDS (tunnel may fail to start)." >&2
+        fi
         cat > "$CF_CONFIG" <<EOF
 tunnel: $TUNNEL_NAME
-credentials-file: $CF_CONFIG_DIR/${TUNNEL_NAME}.json
+credentials-file: $CF_CREDS
 
 ingress:
   - hostname: $TUNNEL_HOSTNAME
