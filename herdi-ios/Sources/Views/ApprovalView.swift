@@ -17,7 +17,27 @@ struct ApprovalView: View {
                 }
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
 
-                if let options = agent.options {
+                if agent.isMultiSelect, let promptId = agent.promptId {
+                    VStack(spacing: 10) {
+                        ForEach(agent.multiOptions, id: \.self) { option in
+                            Button {
+                                toggle(option, promptId: promptId)
+                            } label: {
+                                Label(
+                                    option,
+                                    systemImage: agent.selectedOptions.contains(option)
+                                        ? "checkmark.square.fill" : "square"
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 12)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        Button("Submit") { submit(promptId: promptId) }
+                            .buttonStyle(.borderedProminent)
+                            .frame(maxWidth: .infinity)
+                    }
+                } else if let options = agent.options {
                     VStack(spacing: 10) {
                         ForEach(options, id: \.self) { option in
                             Button {
@@ -55,10 +75,31 @@ struct ApprovalView: View {
 
     private func respond(_ text: String) {
         HapticManager.shared.sent()
-        relay.send(response: ResponseMessage(pane_id: agent.id, text: text))
+        relay.send(response: ResponseMessage(pane_id: agent.id, prompt_id: agent.promptId, text: text))
         agent.status = .working
         agent.prompt = nil
+        agent.promptId = nil
         agent.options = nil
+        dismiss()
+    }
+
+    private func toggle(_ option: String, promptId: String) {
+        relay.toggleQuestionOption(paneId: agent.id, promptId: promptId, option: option)
+        if let index = agent.selectedOptions.firstIndex(of: option) {
+            agent.selectedOptions.remove(at: index)
+        } else {
+            agent.selectedOptions.append(option)
+        }
+    }
+
+    private func submit(promptId: String) {
+        HapticManager.shared.sent()
+        relay.submitQuestion(paneId: agent.id, promptId: promptId)
+        agent.status = .working
+        agent.prompt = nil
+        agent.promptId = nil
+        agent.multiOptions = []
+        agent.selectedOptions = []
         dismiss()
     }
 
