@@ -4,9 +4,7 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, json, logging, os, re, shutil, signal, socket, subprocess, threading, time
-
-from agent_state import complete_agent_update_message
+import asyncio, hashlib, json, logging, os, re, shutil, signal, socket, subprocess, threading, time
 
 try:
     from websockets.asyncio.server import serve
@@ -16,6 +14,19 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from logging.handlers import RotatingFileHandler
 import sys
+
+try:
+    from agent_state import complete_agent_update_message
+except ModuleNotFoundError:
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    _agent_state_spec = spec_from_file_location(
+        "herdr_remote_agent_state",
+        os.path.join(os.path.dirname(__file__), "agent_state.py"),
+    )
+    _agent_state_module = module_from_spec(_agent_state_spec)
+    _agent_state_spec.loader.exec_module(_agent_state_module)
+    complete_agent_update_message = _agent_state_module.complete_agent_update_message
 
 def _get_log_dir():
     if sys.platform == "darwin":
@@ -71,15 +82,23 @@ REMOTES = [r.strip() for r in os.environ.get("HERDR_REMOTES", "").split(",") if 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
 CHROME_RE = re.compile(
-    r"^[\s─━═_—│|◔◑◕●\s]+$"
-    r"|Kiro\s[·•]"
+    r"^[\s\u2500\u2501\u2550_\u2014\u2502|\u25d4\u25d1\u25d5\u25cf\s]+$"
+    r"|Kiro\s[\u00b7\u2022]"
     r"|esc to cancel"
     r"|type to queue"
-    r"|^\s*[◔◑◕●]\s+(Shell|Bash)"
+    r"|^\s*[\u25d4\u25d1\u25d5\u25cf]\s+(Shell|Bash)"
 )
+QUESTION_OPTION_RE = re.compile(
+    r"^(?P<cursor>[\uf054>\u203a\u276f\u25b8\u2192])?\s*"
+    r"(?P<marker>[\uf046\uf10c\uf192\uf096\uf14a\u25cb\u25c9\u2610\u2611]|\([ o]\)|\[[ xX]\])\s+"
+    r"(?P<label>.+?)\s*$"
+)
+QUESTION_OTHER = "Other (type your own)"
+
 
 clients = set()
 last_statuses = {}
+last_blocked_prompts = {}
 event_queue = asyncio.Queue()
 pane_remote_map = {}
 known_panes = set()
@@ -87,10 +106,16 @@ agent_cache = {}
 _remote_locks = {}
 _remote_locks_guard = threading.Lock()
 
-SAFE_RESPONSES = {"y", "n", "a", "yes", "no", "trust", "yes, single permission", "trust, always allow", "no (tab to edit)", "approve all pending", "configure individually", "exit (cancel subagents)"}
+
+SAFE_RESPONSES = {
+    "y", "n", "a", "yes", "no", "trust",
+    "yes, single permission", "trust, always allow", "no (tab to edit)",
+    "approve all pending", "configure individually", "exit (cancel subagents)",
+}
 SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
     str(number) for number in range(10)
 }
+
 
 # --- Audit logging ---
 _audit_handler = RotatingFileHandler(AUDIT_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
@@ -172,46 +197,28 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
 _load_push_subs()
 
 
-def run_herdr_result(*args, remote=None):
+def _invoke_herdr(*args, remote=None):
     if remote:
-        cmd = [
-            "ssh",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "BatchMode=yes",
-            remote,
-            REMOTE_HERDR,
-            *args,
-        ]
+        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, REMOTE_HERDR, *args]
         with _remote_locks_guard:
             remote_lock = _remote_locks.get(remote)
             if remote_lock is None:
                 remote_lock = threading.Lock()
                 _remote_locks[remote] = remote_lock
         with remote_lock:
-            return subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-            )
+            return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+
     cmd = [HERDR, *args]
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=15,
-    )
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+
+
+def run_herdr_result(*args, remote=None):
+    return _invoke_herdr(*args, remote=remote)
 
 
 def run_herdr(*args, remote=None):
     try:
-        return run_herdr_result(*args, remote=remote).stdout.strip()
+        return _invoke_herdr(*args, remote=remote).stdout.strip()
     except Exception:
         return ""
 
@@ -269,22 +276,260 @@ def update_pane_maps(agents):
         for pane_id in stale:
             pane_remote_map.pop(pane_id, None)
             last_statuses.pop(pane_id, None)
+            last_blocked_prompts.pop(pane_id, None)
             agent_cache.pop(pane_id, None)
 
 
 def read_pane(pane_id, remote=None):
-    raw = run_herdr("pane", "read", pane_id, "--lines", "50", "--source", "recent", remote=remote)
+    raw = run_herdr("pane", "read", pane_id, "--lines", "100", "--source", "recent", remote=remote)
     lines = [l for l in raw.splitlines() if l.strip() and not CHROME_RE.search(l)]
-    return "\n".join(lines[-20:])
+    display_lines = lines[-50:]
+    question = detect_question("\n".join(lines))
+    if question and question["text"] and question["text"] not in display_lines:
+        option_start = next(
+            (
+                index for index in range(len(display_lines) - 1, -1, -1)
+                if QUESTION_OPTION_RE.match(display_lines[index].strip().strip("\u2502|").strip())
+            ),
+            None,
+        )
+        if option_start is not None:
+            while option_start > 0 and QUESTION_OPTION_RE.match(
+                display_lines[option_start - 1].strip().strip("\u2502|").strip()
+            ):
+                option_start -= 1
+        else:
+            option_start = 0
+        display_lines.insert(option_start, question["text"])
+    return "\n".join(display_lines)
 
 
-def detect_options(text):
+def detect_question(text):
+    blocks = []
+    current = []
+    current_start = None
+    lines = text.splitlines()
+    for line_index, raw_line in enumerate(lines):
+        line = raw_line.strip().strip("\u2502|").strip()
+        match = QUESTION_OPTION_RE.match(line)
+        if not match:
+            if current:
+                blocks.append((current_start, current))
+                current = []
+                current_start = None
+            continue
+        if current_start is None:
+            current_start = line_index
+        marker = match.group("marker")
+        current.append({
+            "label": match.group("label").strip(),
+            "selected": bool(match.group("cursor")),
+            "multi": marker in {"\uf046", "\uf096", "\uf14a", "\u2610", "\u2611", "[ ]", "[x]", "[X]"},
+            "checked": marker in {"\uf046", "\uf14a", "\u2611", "[x]", "[X]"},
+        })
+    if current:
+        blocks.append((current_start, current))
+
+    for block_start, block in reversed(blocks):
+        has_other = any(option["label"] == QUESTION_OTHER for option in block)
+        has_done = any("Done selecting" in option["label"] for option in block)
+        if has_other or has_done:
+            question_lines = []
+            for raw_line in reversed(lines[:block_start]):
+                line = raw_line.strip().strip("\u2502|").strip()
+                if not line:
+                    if question_lines:
+                        break
+                    continue
+                if (
+                    "submit" in line.casefold()
+                    or re.fullmatch(r"[\W_]*ask[\W_]*", line, re.IGNORECASE)
+                    or not any(character.isalnum() for character in line)
+                ):
+                    if question_lines:
+                        break
+                    continue
+                question_lines.append(line)
+            question_text = " ".join(reversed(question_lines))
+            return {
+                "options": block,
+                "selected_index": next(
+                    (index for index, option in enumerate(block) if option["selected"]),
+                    0,
+                ),
+                "multi": any(option["multi"] for option in block) or has_done,
+                "text": question_text,
+            }
+    return None
+
+
+def detect_approval_options(text):
     lower = text.lower()
     if "yes, single permission" in lower:
         return TOOL_OPTIONS
     if "approve all pending" in lower:
         return SUBAGENT_OPTIONS
-    return None
+    return []
+
+
+def detect_options(text):
+    approval_options = detect_approval_options(text)
+    if approval_options:
+        return approval_options
+    question = detect_question(text)
+    if not question:
+        return []
+    return [
+        option["label"]
+        for option in question["options"]
+        if option["label"] != QUESTION_OTHER and "Done selecting" not in option["label"]
+    ]
+
+
+def custom_editor_active(text):
+    return "Enter your response:" in text or (
+        "Custom answer:" in text and "submit" in text.lower()
+    )
+
+def question_prompt_id(pane_id, content):
+    question = detect_question(content)
+    if not question:
+        normalized = " ".join(content.split())
+        return hashlib.sha256(f"{pane_id}\n{normalized}".encode("utf-8")).hexdigest()[:20]
+    labels = [
+        option["label"] for option in question["options"]
+        if option["label"] != QUESTION_OTHER and "Done selecting" not in option["label"]
+    ]
+    signature = json.dumps(
+        {
+            "pane_id": pane_id,
+            "question": question["text"],
+            "multi": question["multi"],
+            "labels": labels,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:20]
+
+
+def prompt_matches(pane_id, prompt_id, remote=None):
+    if not prompt_id:
+        return False
+    return question_prompt_id(pane_id, read_pane(pane_id, remote=remote)) == prompt_id
+
+
+def blocked_message(pane_id, agent, project, host, content):
+    question = detect_question(content) if agent == "omp" else None
+    options = detect_options(content) if agent == "omp" else detect_approval_options(content)
+    return {
+        "type": "blocked",
+        "pane_id": pane_id,
+        "agent": agent,
+        "project": project,
+        "host": host,
+        "prompt": content[-500:],
+        "prompt_id": question_prompt_id(pane_id, content),
+        "options": [] if question and question["multi"] else options,
+        "multi_options": options if question and question["multi"] else [],
+        "selected_options": [
+            option["label"] for option in question["options"]
+            if option["multi"] and option["label"] != QUESTION_OTHER
+            and "Done selecting" not in option["label"] and option["checked"]
+        ] if question else [],
+        "interaction": "omp_question" if question else "prompt",
+        "multi": bool(question and question["multi"]),
+        "update": False,
+    }
+
+
+def pane_is_omp(pane_id, remote=None):
+    return any(
+        agent["pane_id"] == pane_id and agent["agent"] == "omp" and agent.get("remote") == remote
+        for agent in get_all_agents()
+    )
+
+
+def move_question_cursor(pane_id, question, target_index, remote=None):
+    selected_index = question["selected_index"]
+    direction = "Down" if target_index >= selected_index else "Up"
+    keys = [direction] * abs(target_index - selected_index)
+    return not keys or _mutate_herdr("pane", "send-keys", pane_id, *keys, remote=remote)
+
+
+def toggle_question_option(pane_id, option_label, remote=None):
+    if not pane_is_omp(pane_id, remote=remote):
+        return False
+    question = detect_question(read_pane(pane_id, remote=remote))
+    if not question or not question["multi"]:
+        return False
+    target_index = next((
+        index
+        for index, option in enumerate(question["options"])
+        if option["label"].casefold() == option_label.casefold()
+    ), None)
+    if target_index is None or not move_question_cursor(pane_id, question, target_index, remote=remote):
+        return False
+    return _mutate_herdr("pane", "send-keys", pane_id, "Enter", remote=remote)
+
+
+def submit_multi_question(pane_id, remote=None):
+    if not pane_is_omp(pane_id, remote=remote):
+        return False
+    content = read_pane(pane_id, remote=remote)
+    question = detect_question(content)
+    if not question or not question["multi"]:
+        return False
+    done_index = next((
+        index
+        for index, option in enumerate(question["options"])
+        if "Done selecting" in option["label"]
+    ), None)
+    if done_index is not None:
+        if not move_question_cursor(pane_id, question, done_index, remote=remote):
+            return False
+        return _mutate_herdr("pane", "send-keys", pane_id, "Enter", remote=remote)
+    if "Submit" in content and any(
+        marker in content for marker in ("\uf14a", "\uf046", "\u2611", "[x]", "[X]")
+    ):
+        return _mutate_herdr("pane", "send-keys", pane_id, "Tab", "Enter", remote=remote)
+    return False
+
+
+def respond_to_question(pane_id, text, question, remote=None):
+    options = question["options"]
+    target_index = next(
+        (index for index, option in enumerate(options) if option["label"].casefold() == text.casefold()),
+        None,
+    )
+    custom_response = target_index is None
+    if custom_response:
+        target_index = next(
+            (index for index, option in enumerate(options) if option["label"] == QUESTION_OTHER),
+            None,
+        )
+    if target_index is None:
+        return False
+
+    selected_index = question["selected_index"]
+    direction = "Down" if target_index >= selected_index else "Up"
+    keys = [direction] * abs(target_index - selected_index) + ["Enter"]
+    if not _mutate_herdr("pane", "send-keys", pane_id, *keys, remote=remote):
+        return False
+    if not custom_response:
+        return True
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:
+        editor_content = read_pane(pane_id, remote=remote)
+        if "Enter your response:" in editor_content or (
+            "Custom answer:" in editor_content and "submit" in editor_content.lower()
+        ):
+            break
+        time.sleep(0.05)
+    else:
+        return False
+    return _mutate_herdr("pane", "send-text", pane_id, text, remote=remote) and _mutate_herdr(
+        "pane", "send-keys", pane_id, "Enter", remote=remote
+    )
 
 
 async def broadcast(msg):
@@ -301,6 +546,22 @@ async def broadcast(msg):
         log.debug("Removed %d dead client(s)", len(dead))
     clients.difference_update(dead)
 
+async def send_current_snapshot(ws):
+    agents = get_all_agents()
+    update_pane_maps(agents)
+    await ws.send(json.dumps({"type": "agents", "agents": agents}))
+    for agent in agents:
+        if agent["status"] != "blocked":
+            continue
+        content = read_pane(agent["pane_id"], remote=agent.get("remote"))
+        await ws.send(json.dumps(blocked_message(
+            agent["pane_id"],
+            agent["agent"],
+            agent["project"],
+            agent.get("host", "local"),
+            content,
+        )))
+
 
 async def poll_loop():
     while True:
@@ -314,28 +575,38 @@ async def poll_loop():
 async def _poll_once():
         agents = get_all_agents()
         update_pane_maps(agents)
+        # Always broadcast (even empty list) so clients stay in sync
         await broadcast({"type": "agents", "agents": agents})
         for a in agents:
             pid, status = a["pane_id"], a["status"]
-            if status == "blocked" and last_statuses.get(pid) != "blocked":
+            if status == "blocked":
                 content = read_pane(pid, remote=a.get("remote"))
-                options = detect_options(content)
-                await broadcast({
-                    "type": "blocked", "pane_id": pid,
-                    "agent": a["agent"], "project": a["project"],
-                    "host": a.get("host", "local"),
-                    "prompt": content[:500],
-                    "options": options or TOOL_OPTIONS
-                })
-                # Web Push notification
-                await send_web_push(
-                    title=f"🐑 {a['project']} blocked",
-                    body=content[:120],
-                    url=f"/?pane={pid}",
+                message = blocked_message(
+                    pid,
+                    a["agent"],
+                    a["project"],
+                    a.get("host", "local"),
+                    content,
                 )
-            # Send clear push when agent unblocks
-            if status != "blocked" and last_statuses.get(pid) == "blocked":
-                await send_web_push("", "", clear=True)
+                fingerprint = (
+                    message["prompt_id"],
+                    tuple(message["selected_options"]),
+                    message["prompt"],
+                )
+                previous = last_blocked_prompts.get(pid)
+                if previous != fingerprint:
+                    message["update"] = previous is not None and previous[0] == message["prompt_id"]
+                    last_blocked_prompts[pid] = fingerprint
+                    await broadcast(message)
+                    await send_web_push(
+                        title=f"\U0001f411 {a['project']} blocked",
+                        body=content[:120],
+                        url=f"/?pane={pid}",
+                    )
+            else:
+                if last_statuses.get(pid) == "blocked":
+                    await send_web_push("", "", clear=True)
+                last_blocked_prompts.pop(pid, None)
             last_statuses[pid] = status
 async def event_push():
     while True:
@@ -353,6 +624,27 @@ async def event_push():
         agent_data = update["agent"] if update else event
         status = agent_data.get("status", "")
         host = agent_data.get("host", "local")
+        event_remote = pane_remote_map.get(pane_id)
+
+        if pane_id and event.get("type") == "agent_event":
+            agents = get_all_agents()
+            if status == "blocked" and not any(
+                agent["pane_id"] == pane_id for agent in agents
+            ):
+                agents.append({
+                    "pane_id": pane_id,
+                    "agent": agent_data.get("agent", ""),
+                    "status": status,
+                    "cwd": agent_data.get("cwd", ""),
+                    "project": agent_data.get("project", ""),
+                    "host": host,
+                    "remote": event_remote,
+                })
+            update_pane_maps(agents)
+            await broadcast({"type": "agents", "agents": agents})
+            agent_cache[pane_id] = {**agent_cache.get(pane_id, {}), **agent_data}
+            if status != "blocked":
+                await broadcast(update)
 
         if status == "blocked" and pane_id:
             remote = pane_remote_map.get(pane_id)
@@ -360,21 +652,19 @@ async def event_push():
                 content = read_pane(pane_id, remote=remote)
             else:
                 content = event.get("prompt", "Agent is blocked")
-            options = detect_options(content)
-            await broadcast({
-                "type": "blocked", "pane_id": pane_id,
-                "agent": agent_data.get("agent", ""),
-                "project": agent_data.get("project", ""),
-                "host": host,
-                "prompt": content[:500],
-                "options": options or TOOL_OPTIONS
-            })
-
-        if update:
-            known_panes.add(pane_id)
-            pane_remote_map.setdefault(pane_id, None)
-            agent_cache[pane_id] = {**agent_cache.get(pane_id, {}), **update["agent"]}
-            await broadcast(update)
+            message = blocked_message(
+                pane_id,
+                agent_data.get("agent", ""),
+                agent_data.get("project", ""),
+                host,
+                content or agent_data.get("prompt", "Agent is blocked"),
+            )
+            last_blocked_prompts[pane_id] = (
+                message["prompt_id"],
+                tuple(message["selected_options"]),
+                message["prompt"],
+            )
+            await broadcast(message)
 
 
 async def process_request(connection, request):
@@ -382,8 +672,14 @@ async def process_request(connection, request):
     from websockets.http11 import Response
     from websockets.datastructures import Headers
 
+    public_paths = {
+        "/sw.js", "/logo.svg", "/api/vapid-public-key",
+        "/HackNerdFont-Regular.woff2", "/HackNerdFont-LICENSE.txt",
+    }
+    request_path = (request.path or "/").split("?", 1)[0]
+
     # Token auth (if configured)
-    if AUTH_TOKEN:
+    if AUTH_TOKEN and request_path not in public_paths:
         token = None
         for key, value in request.headers.raw_items():
             if key.lower() == "authorization":
@@ -481,6 +777,24 @@ async def process_request(connection, request):
             headers = Headers([("Content-Type", "image/svg+xml")])
             return Response(200, "OK", headers, body)
 
+    static_files = {
+        "/HackNerdFont-Regular.woff2": ("HackNerdFont-Regular.woff2", "font/woff2"),
+        "/HackNerdFont-LICENSE.txt": ("HackNerdFont-LICENSE.txt", "text/plain; charset=utf-8"),
+    }
+    if path in static_files:
+        filename, content_type = static_files[path]
+        asset_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "web", filename
+        )
+        if os.path.isfile(asset_path):
+            with open(asset_path, "rb") as f:
+                body = f.read()
+            headers = Headers([
+                ("Content-Type", content_type),
+                ("Cache-Control", "public, max-age=31536000, immutable"),
+            ])
+            return Response(200, "OK", headers, body)
+
     # Fallback for unmatched paths
     headers = Headers([("Access-Control-Allow-Origin", "*")])
     return Response(404, "Not Found", headers, b"not found\n")
@@ -491,6 +805,11 @@ async def handle_client(ws):
     ip = remote_addr[0] if remote_addr else "unknown"
     ua = ws.request.headers.get("User-Agent", "unknown") if ws.request else "unknown"
     origin = ws.request.headers.get("Origin", "") if ws.request else ""
+    command_connection = (
+        ws.request.headers.get("X-Herdr-Remote-Command") == "1"
+        if ws.request
+        else False
+    )
 
     device = "unknown"
     ua_lower = ua.lower()
@@ -513,26 +832,82 @@ async def handle_client(ws):
     clients.add(ws)
     connected_at = time.monotonic()
     try:
+        if not command_connection:
+            await send_current_snapshot(ws)
         async for raw in ws:
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
             msg_type = msg.get("type")
-            if msg_type == "respond":
+            if msg_type == "question_toggle":
+                pane_id = msg["pane_id"]
+                option = msg.get("option", "")
+                if pane_id not in known_panes or not option:
+                    await ws.send(json.dumps({"type": "error", "message": "invalid question option"}))
+                    continue
+                remote = pane_remote_map.get(pane_id)
+                if not prompt_matches(pane_id, msg.get("prompt_id", ""), remote=remote):
+                    await ws.send(json.dumps({"type": "error", "message": "question changed; refresh and try again"}))
+                    continue
+                if not toggle_question_option(pane_id, option, remote=remote):
+                    await ws.send(json.dumps({"type": "error", "message": "question option toggle failed"}))
+            elif msg_type == "question_submit":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
+                remote = pane_remote_map.get(pane_id)
+                if not prompt_matches(pane_id, msg.get("prompt_id", ""), remote=remote):
+                    await ws.send(json.dumps({"type": "error", "message": "question changed; refresh and try again"}))
+                    continue
+                if not submit_multi_question(pane_id, remote=remote):
+                    await ws.send(json.dumps({"type": "error", "message": "question submission failed"}))
+            elif msg_type == "respond":
+                pane_id = msg["pane_id"]
+                request_id = msg.get("request_id")
+
+                def command_error(message):
+                    response = {"type": "error", "message": message}
+                    if request_id:
+                        response["request_id"] = request_id
+                    return response
+
+                if pane_id not in known_panes:
+                    await ws.send(json.dumps(command_error("unknown pane_id")))
+                    continue
                 text = msg.get("text", "").strip()
-                if text.lower() not in SAFE_RESPONSES:
-                    await ws.send(json.dumps({"type": "error", "message": "response not in allowlist"}))
+                if not text or len(text) > 1000:
+                    await ws.send(json.dumps(command_error("response empty or too long")))
                     continue
                 remote = pane_remote_map.get(pane_id)
+                content = read_pane(pane_id, remote=remote)
+                if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
+                    await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
+                    continue
+                question = detect_question(content) if pane_is_omp(pane_id, remote=remote) else None
                 log.info("Response from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("respond", ip, device, pane_id, f"text={text!r}")
-                if _mutate_herdr("pane", "send-text", pane_id, text, remote=remote):
-                    _mutate_herdr("pane", "send-keys", pane_id, "Enter", remote=remote)
+                if question:
+                    delivered = respond_to_question(pane_id, text, question, remote=remote)
+                elif custom_editor_active(content) or text.lower() in SAFE_RESPONSES:
+                    delivered = _mutate_herdr(
+                        "pane", "send-text", pane_id, text, remote=remote
+                    ) and _mutate_herdr(
+                        "pane", "send-keys", pane_id, "Enter", remote=remote
+                    )
+                else:
+                    await ws.send(json.dumps({
+                        **command_error("free-text response requires a detected question"),
+                    }))
+                    continue
+                if not delivered:
+                    await ws.send(json.dumps(command_error("response delivery failed")))
+                    continue
+                response = {"type": "command_result", "command": "respond", "ok": True}
+                if request_id:
+                    response["request_id"] = request_id
+                await ws.send(json.dumps(response))
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
             elif msg_type == "read_pane":
@@ -568,27 +943,43 @@ async def handle_client(ws):
                 await ws.send(json.dumps({"type": "history", "pane_id": pane_id, "messages": messages}))
             elif msg_type == "send_keys":
                 pane_id = msg["pane_id"]
+                request_id = msg.get("request_id")
+
+                def command_error(message):
+                    response = {"type": "error", "message": message}
+                    if request_id:
+                        response["request_id"] = request_id
+                    return response
+
                 if pane_id not in known_panes:
-                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    await ws.send(json.dumps(command_error("unknown pane_id")))
                     continue
                 keys = msg.get("keys", [])
                 if not all(k in SAFE_KEYS for k in keys):
-                    await ws.send(json.dumps({"type": "error", "message": "keys contain disallowed values"}))
+                    await ws.send(json.dumps(command_error("keys contain disallowed values")))
                     continue
                 remote = pane_remote_map.get(pane_id)
+                content = read_pane(pane_id, remote=remote)
+                if detect_approval_options(content) and any(key.isdigit() for key in keys):
+                    if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
+                        await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
+                        continue
                 log.info("Keys from %s (%s): pane=%s keys=%s", ip, device, pane_id, keys)
                 audit("send_keys", ip, device, pane_id, f"keys={keys}")
                 try:
                     result = run_herdr_result("pane", "send-keys", pane_id, *keys, remote=remote)
-                except Exception as e:
-                    log.warning("send_keys command failed for pane %s: %s", pane_id, e)
-                    await ws.send(json.dumps({"type": "error", "message": "send_keys command failed"}))
+                except Exception as exc:
+                    log.warning("send_keys command failed for pane %s: %s", pane_id, exc)
+                    await ws.send(json.dumps(command_error("send_keys command failed")))
                     continue
                 if result.returncode != 0:
                     log.warning("send_keys command failed for pane %s with exit %s", pane_id, result.returncode)
-                    await ws.send(json.dumps({"type": "error", "message": "send_keys command failed"}))
+                    await ws.send(json.dumps(command_error("send_keys command failed")))
                     continue
-                await ws.send(json.dumps({"type": "command_result", "command": "send_keys", "ok": True}))
+                response = {"type": "command_result", "command": "send_keys", "ok": True}
+                if request_id:
+                    response["request_id"] = request_id
+                await ws.send(json.dumps(response))
             elif msg_type == "send_text":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
@@ -675,11 +1066,11 @@ def start_mdns():
 
 async def main():
     loop = asyncio.get_running_loop()
-    stop = loop.create_future()
     zc = info = udp_transport = server = None
     tasks = []
     loop_signal_handlers = []
     fallback_signal_handlers = {}
+    stop = loop.create_future()
 
     def resolve_stop():
         if not stop.done():
