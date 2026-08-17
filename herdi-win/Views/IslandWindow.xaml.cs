@@ -46,6 +46,10 @@ public partial class IslandWindow : Window
         InitializeComponent();
         DataContext = vm;
 
+        // Seed the collapsed width so the first frame is already island-shaped rather than
+        // shrink-wrapped around the content, and so Width never starts out Auto.
+        Root.Width = TargetWidth();
+
         _vm.SurfaceChanged += ApplySurface;
         _hoverTimer.Tick += OnHoverTimerTick;
 
@@ -189,7 +193,15 @@ public partial class IslandWindow : Window
 
     private void AnimateWidth(double target, IEasingFunction easing)
     {
-        var animation = new DoubleAnimation(target, Duration(easing))
+        // From is always explicit: a To-only DoubleAnimation reads the base value, and WPF
+        // rejects NaN there ("'NaN' is not a valid 'Double' value for class ..."), which is
+        // what Width reads as whenever it is Auto. Root.Width sees the in-flight animated
+        // value, so retargeting mid-animation stays continuous.
+        var from = Root.Width;
+        if (double.IsNaN(from) || double.IsInfinity(from))
+            from = Root.ActualWidth > 0 ? Root.ActualWidth : target;
+
+        var animation = new DoubleAnimation(from, target, Duration(easing))
         {
             EasingFunction = easing,
             FillBehavior = FillBehavior.HoldEnd,

@@ -101,9 +101,15 @@ public partial class App : Application
 
     private void OnUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        // A tray app with no window would otherwise die silently.
+        // A tray app with no window would otherwise die silently. Inner exceptions are
+        // included because WPF's own messages (animation failures especially) push the
+        // actual cause down there and say so.
+        var detail = e.Exception.Message;
+        for (var inner = e.Exception.InnerException; inner is not null; inner = inner.InnerException)
+            detail += $"\n\n{inner.GetType().Name}: {inner.Message}";
+
         MessageBox.Show(
-            e.Exception.Message,
+            detail,
             "Herdi — unexpected error",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
