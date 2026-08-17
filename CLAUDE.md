@@ -31,6 +31,7 @@ The relay (`relay/herdr_relay.py`) is the central hub: it polls herdr for agent 
 | `demo-worker/` | Cloudflare Worker mock relay for demos | JS |
 | `herdi-mac/` | macOS menu bar app | Swift (SPM) |
 | `herdi-ios/` | iOS app with widgets + Live Activities | Swift (XcodeGen) |
+| `herdi-win/` | Windows tray app + top-edge island | C# (.NET 8 / WPF) |
 
 ## Running Components
 
@@ -57,6 +58,10 @@ cd herdi-mac && ./build.sh
 
 # iOS app (generate Xcode project)
 cd herdi-ios && xcodegen generate
+
+# Windows app (needs the .NET 8 SDK; `dotnet build` also works off-Windows
+# for compile checking thanks to EnableWindowsTargeting)
+cd herdi-win && ./build.ps1
 ```
 
 ## Key Environment Variables
@@ -79,7 +84,15 @@ Messages are JSON with a `type` field:
 
 **Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read)
 
-**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline)
+**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `get_history`, `create_tab`, `push_subscribe`/`push_unsubscribe`
+
+### Relay-side constraints clients must respect
+
+Easy to get wrong — three of the existing clients do:
+
+- **`respond` is allowlisted.** Only the 12 values in `SAFE_RESPONSES` (`herdr_relay.py:90`) are accepted; anything else returns `response not in allowlist`. Free-form replies must use `agent_prompt` (≤10000 chars) or `send_text` (≤1000). The mac/iOS approval cards send custom text as `respond`, so their custom-reply box does not work against the relay.
+- **Interrupt is `C-c`.** `SAFE_KEYS` (`herdr_relay.py:91`) accepts `C-c`, not `Ctrl+c`, and `keys` must be an array. The mac app's `Ctrl+c` only works because it invokes the local CLI rather than the relay.
+- **`question_toggle`/`question_submit` have no relay handler.** The web app, TUI, mac and iOS clients all send them; the relay ignores both, so multi-select questions cannot be answered from any client until it grows support.
 
 ## Deployment
 
