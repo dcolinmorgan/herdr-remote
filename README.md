@@ -67,6 +67,17 @@ The launcher starts a local-only relay on `127.0.0.1:8375` by default. Set
 `HERDR_REMOTES` for a comma-separated list of SSH targets and `HERDR_BIN` only
 when `herdr` is not available on `PATH`.
 
+### Security
+
+The relay validates WebSocket origins to prevent drive-by attacks from malicious
+webpages. On a tokenless loopback relay, only connections from `localhost` or
+`127.0.0.1` origins are accepted. To allow additional origins (e.g., a Cloudflare
+Access hostname), set `HERDR_TRUSTED_ORIGINS`:
+
+```bash
+export HERDR_TRUSTED_ORIGINS="https://herdr.example.com"
+```
+
 ## Telegram Bot
 
 For an automatically restarting relay and Telegram bot:

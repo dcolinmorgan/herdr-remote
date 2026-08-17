@@ -65,6 +65,7 @@ WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
 RELAY_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1")
 POLL_INTERVAL = 2
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Optional: shared secret for relay auth
+TRUSTED_ORIGINS = [o.strip().lower() for o in os.environ.get("HERDR_TRUSTED_ORIGINS", "").split(",") if o.strip()]
 
 # VAPID Web Push
 VAPID_PUBLIC_KEY = os.environ.get("HERDR_VAPID_PUBLIC", "")
@@ -124,6 +125,76 @@ audit_log = logging.getLogger("herdr-audit")
 audit_log.setLevel(logging.INFO)
 audit_log.addHandler(_audit_handler)
 audit_log.propagate = False
+
+
+# --- WebSocket Origin Validation (CVE mitigation) ---
+# Prevents drive-by attacks from malicious webpages when relay runs without token
+
+def relay_host_is_loopback(host: str) -> bool:
+    """Check if host is a loopback address."""
+    if not host:
+        return False
+    host = host.lower()
+    return host in {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+def normalized_origin(parsed) -> str:
+    """Normalize origin to scheme://host:port for comparison."""
+    scheme = (parsed.scheme or "http").lower()
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    # Default ports
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}:{port}"
+
+def trusted_websocket_origin(origin: str) -> bool:
+    """
+    Check if a WebSocket Origin header should be trusted.
+    
+    - No Origin (native clients like Telegram bot, macOS app): allowed
+    - Token authentication enabled: origin check skipped (token governs access)
+    - Origin 'null': rejected (opaque origins, sandboxed iframes)
+    - Non-HTTP schemes: allowed (file://, app://, etc. are local)
+    - Explicitly trusted origins (HERDR_TRUSTED_ORIGINS): allowed
+    - Loopback origins (localhost, 127.0.0.1): allowed on loopback relay
+    - Everything else: rejected
+    """
+    import urllib.parse as urlparse
+    
+    # Native clients don't send Origin
+    if not origin:
+        return True
+    
+    # Token auth takes precedence
+    if AUTH_TOKEN:
+        return True
+    
+    # Opaque origin (sandboxed iframe, etc.) - reject
+    if origin.lower() == "null":
+        return False
+    
+    try:
+        parsed = urlparse.urlsplit(origin)
+    except Exception:
+        return False
+    
+    scheme = (parsed.scheme or "").lower()
+    
+    # Non-HTTP schemes (file://, app://, etc.) are local apps
+    if scheme not in {"http", "https"}:
+        return True
+    
+    # Check explicit trusted origins
+    if TRUSTED_ORIGINS:
+        norm = normalized_origin(parsed)
+        if norm in TRUSTED_ORIGINS or origin.lower() in TRUSTED_ORIGINS:
+            return True
+    
+    # On loopback relay, allow loopback origins
+    if relay_host_is_loopback(RELAY_HOST):
+        return relay_host_is_loopback(parsed.hostname)
+    
+    return False
 
 
 def audit(action: str, ip: str, device: str, pane_id: str, detail: str = ""):
@@ -696,10 +767,18 @@ async def process_request(connection, request):
 
     # Check if this is a WebSocket upgrade
     upgrade = None
+    origin = None
     for key, value in request.headers.raw_items():
         if key.lower() == "upgrade":
             upgrade = value.lower()
+        if key.lower() == "origin":
+            origin = value
     if upgrade == "websocket":
+        # Validate origin to prevent drive-by attacks from malicious webpages
+        if not trusted_websocket_origin(origin):
+            log.warning("Rejected WebSocket from untrusted origin: %s", origin)
+            headers = Headers([("Content-Type", "text/plain")])
+            return Response(403, "Forbidden", headers, b"Untrusted WebSocket origin\n")
         return None  # proceed with WebSocket handshake
 
     # For CORS preflight
