@@ -146,6 +146,29 @@ class ClientPayloadTests(unittest.TestCase):
             self.assertIn(f"public bool {flag} =>", view_model)
             self.assertIn(f"OnPropertyChanged(nameof({flag}))", view_model)
 
+    def test_windows_island_paints_its_own_silhouette(self):
+        """A Shape here paints nothing, and an unpainted island cannot be hovered.
+
+        Shape seeds its rendered geometry to Geometry.Empty and only drops that cache from
+        its own ArrangeOverride, which a geometry derived from RenderSize must override —
+        so the island stayed fully transparent. Transparency also punches hit-test holes:
+        the pointer falls through to the window, which is not a descendant of Root, so WPF
+        raises MouseLeave and collapses the island mid-hover. Root's Background covers the
+        gaps its children leave.
+        """
+        shape = (ROOT / "herdi-win" / "Controls" / "IslandShape.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("class IslandShape : FrameworkElement", shape)
+        self.assertNotIn("class IslandShape : Shape", shape)
+        self.assertIn("override void OnRender(", shape)
+        self.assertIn("DrawGeometry(", shape)
+
+        island = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(island, r'x:Name="Root"[^>]*Background="Transparent"')
+
     def test_tui_sends_multi_selection_messages_with_prompt_identity(self):
         source = (ROOT / "relay" / "herdr_tui.py").read_text(encoding="utf-8")
 

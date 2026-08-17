@@ -29,9 +29,12 @@ public partial class IslandWindow : Window
     private const double PrehoverExtra = 6;
     private const double ExpandedWidth = 580;
 
-    // Hover timings, verbatim from HoverTiming (NotchContentView.swift:10).
+    // Hover timings from HoverTiming (NotchContentView.swift:10). The collapse delay is
+    // the one divergence: macOS trackpads glide, while a mouse at the very top edge of the
+    // screen jitters, and every twitch that clips the island's edge would otherwise start
+    // shutting it 500 ms later.
     private static readonly TimeSpan ExpandDelay = TimeSpan.FromMilliseconds(450);
-    private static readonly TimeSpan CollapseDelay = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan CollapseDelay = TimeSpan.FromMilliseconds(800);
 
     private readonly IslandViewModel _vm;
     private readonly DispatcherTimer _hoverTimer = new();
@@ -92,15 +95,34 @@ public partial class IslandWindow : Window
         var screen = System.Windows.Forms.Screen.PrimaryScreen;
         if (screen is null) return;
 
-        var source = PresentationSource.FromVisual(this);
-        var transform = source?.CompositionTarget?.TransformToDevice;
-        var scaleX = transform?.M11 is > 0 ? transform.Value.M11 : 1.0;
-        var scaleY = transform?.M22 is > 0 ? transform.Value.M22 : 1.0;
+        var (scaleX, scaleY) = DeviceScale();
 
         // Screen.Bounds is in physical pixels; Left/Top are DIPs.
         var bounds = screen.Bounds;
         Left = (bounds.Left + bounds.Width / 2.0) / scaleX - ActualWidth / 2.0;
         Top = bounds.Top / scaleY;
+    }
+
+    /// <summary>Physical pixels per DIP, for converting screen coordinates.</summary>
+    private (double X, double Y) DeviceScale()
+    {
+        var transform = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformToDevice;
+        return (transform?.M11 is > 0 ? transform.Value.M11 : 1.0,
+                transform?.M22 is > 0 ? transform.Value.M22 : 1.0);
+    }
+
+    /// <summary>
+    /// Is the pointer geometrically over the island? MouseLeave on its own is not enough to
+    /// decide: opening animates the width and re-centres the window, which sweeps its edges
+    /// past a pointer that never moved, and each such sweep reads as a departure. Checking
+    /// the cursor instead of the hit test keeps those from collapsing the island.
+    /// </summary>
+    private bool PointerOverIsland()
+    {
+        var (scaleX, scaleY) = DeviceScale();
+        var cursor = System.Windows.Forms.Control.MousePosition;
+        return new Rect(Left, Top, ActualWidth, ActualHeight)
+            .Contains(new Point(cursor.X / scaleX, cursor.Y / scaleY));
     }
 
     // --- Hover state machine (handleHover, NotchContentView.swift:140)
@@ -136,8 +158,21 @@ public partial class IslandWindow : Window
         _hoverTimer.Stop();
         if (_vm.Surface == IslandSurface.Approval) return;
 
-        if (_isHovered) _vm.ShowSessionList();
-        else _vm.Collapse();
+        if (_isHovered)
+        {
+            _vm.ShowSessionList();
+        }
+        else if (_vm.IsExpanded && PointerOverIsland())
+        {
+            // The pointer is still on the island, so the leave was the window moving rather
+            // than the user. WPF will not raise another leave from here, so keep watching
+            // for the real departure instead of shutting under a pointer that stayed put.
+            RestartHoverTimer(CollapseDelay);
+        }
+        else
+        {
+            _vm.Collapse();
+        }
     }
 
     /// <summary>Immediate acknowledgement of the pointer before the full expansion.</summary>
@@ -154,6 +189,10 @@ public partial class IslandWindow : Window
         // installed in showPanel() on macOS. An in-flight approval survives, matching
         // the `if case .approval` guard there.
         if (_vm.Surface == IslandSurface.Approval) return;
+        // Focus can also leave while the pointer is still on the island: pressing a button
+        // there activates the window, and whatever it was stolen from deactivates in turn.
+        // That is not a click elsewhere, so the island stays open.
+        if (PointerOverIsland()) return;
         _isHovered = false;
         _hoverTimer.Stop();
         _vm.Collapse();

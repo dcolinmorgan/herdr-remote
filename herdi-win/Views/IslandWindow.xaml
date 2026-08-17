@@ -21,8 +21,14 @@
         TextOptions.TextFormattingMode="Display">
 
     <!-- The island: silhouette behind, content in front, sized by the content so the
-         window has almost no transparent area to swallow clicks. -->
-    <Grid x:Name="Root" MouseEnter="OnRootMouseEnter" MouseLeave="OnRootMouseLeave">
+         window has almost no transparent area to swallow clicks.
+
+         The explicit Background is what makes hover usable: a null one leaves Root out of
+         hit testing, so every pixel its children do not cover routes the pointer to the
+         window's own background instead — which is not a descendant of Root, so WPF
+         raises MouseLeave and the island collapses while the pointer is still on it. -->
+    <Grid x:Name="Root" Background="Transparent"
+          MouseEnter="OnRootMouseEnter" MouseLeave="OnRootMouseLeave">
 
         <controls:IslandShape x:Name="Silhouette"
                               Fill="{StaticResource IslandFill}"

@@ -1,6 +1,5 @@
 using System.Windows;
 using System.Windows.Media;
-using System.Windows.Shapes;
 
 namespace Herdi.Controls;
 
@@ -12,11 +11,23 @@ namespace Herdi.Controls;
 /// including its k = 0.62 continuous-curvature factor. On macOS the shoulders let the
 /// panel melt into the physical notch; here they give the same Dynamic Island read of
 /// something growing out of the top edge of the display.
+///
+/// Deliberately not a <see cref="System.Windows.Shapes.Shape"/>. Shape caches whatever
+/// DefiningGeometry hands it and drops that cache from its own ArrangeOverride only — the
+/// one method a geometry derived from RenderSize has to override — so the cache never
+/// left its Geometry.Empty seed and the island painted nothing whatsoever. Drawing in
+/// OnRender keeps the geometry in step with the size instead: WPF re-runs OnRender on
+/// every size change and on every AffectsRender edit, which is exactly when the
+/// silhouette changes.
 /// </summary>
-public sealed class IslandShape : Shape
+public sealed class IslandShape : FrameworkElement
 {
     /// <summary>Apple-style continuous curvature factor for the bottom corners.</summary>
     private const double K = 0.62;
+
+    public static readonly DependencyProperty FillProperty = DependencyProperty.Register(
+        nameof(Fill), typeof(Brush), typeof(IslandShape),
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
 
     public static readonly DependencyProperty TopExtensionProperty = DependencyProperty.Register(
         nameof(TopExtension), typeof(double), typeof(IslandShape),
@@ -25,6 +36,13 @@ public sealed class IslandShape : Shape
     public static readonly DependencyProperty BottomRadiusProperty = DependencyProperty.Register(
         nameof(BottomRadius), typeof(double), typeof(IslandShape),
         new FrameworkPropertyMetadata(12.0, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    /// <summary>Paint for the silhouette. Nothing is drawn while it is null.</summary>
+    public Brush? Fill
+    {
+        get => (Brush?)GetValue(FillProperty);
+        set => SetValue(FillProperty, value);
+    }
 
     /// <summary>How far the shoulders flare past the body, in DIPs.</summary>
     public double TopExtension
@@ -39,13 +57,17 @@ public sealed class IslandShape : Shape
         set => SetValue(BottomRadiusProperty, value);
     }
 
-    protected override Geometry DefiningGeometry => BuildGeometry(RenderSize);
-
     // The silhouette is painted behind the content and sized by it, so it must not
-    // contribute to measurement (returning zero) and must fill whatever it is given.
+    // contribute to measurement. Its alignment stays Stretch, so the default arrange
+    // still hands it the whole cell to fill.
     protected override Size MeasureOverride(Size constraint) => new(0, 0);
 
-    protected override Size ArrangeOverride(Size finalSize) => finalSize;
+    protected override void OnRender(DrawingContext drawingContext)
+    {
+        if (Fill is not { } fill) return;
+        var geometry = BuildGeometry(RenderSize);
+        if (geometry != Geometry.Empty) drawingContext.DrawGeometry(fill, null, geometry);
+    }
 
     internal Geometry BuildGeometry(Size size)
     {
