@@ -67,6 +67,11 @@ public sealed class IslandViewModel : INotifyPropertyChanged
             {
                 OnPropertyChanged(nameof(IsConnected));
                 OnPropertyChanged(nameof(StatusSummary));
+                OnPropertyChanged(nameof(ConnectionError));
+            }
+            else if (e.PropertyName is nameof(RelayConnection.LastError))
+            {
+                OnPropertyChanged(nameof(ConnectionError));
             }
         };
         Rebuild();
@@ -87,6 +92,25 @@ public sealed class IslandViewModel : INotifyPropertyChanged
     public string StatusSummary => IsConnected
         ? $"● Connected · {AgentCount} agents"
         : "○ Disconnected";
+
+    /// <summary>
+    /// Why the relay is unreachable, for the tray menu; null while connected or when the
+    /// failure is unknown. A token-guarded relay refuses the handshake with a 401 and is
+    /// otherwise indistinguishable from an unreachable one, so that case gets named
+    /// outright instead of showing the bare WebSocket exception.
+    /// </summary>
+    public string? ConnectionError
+    {
+        get
+        {
+            if (IsConnected) return null;
+            var error = _relay.LastError;
+            if (string.IsNullOrWhiteSpace(error)) return null;
+            if (error.Contains("401") || error.Contains("403"))
+                return "Relay rejected the token — check Relay Settings";
+            return error.Length > 70 ? error[..70] + "…" : error;
+        }
+    }
 
     private IslandSurface _surface = IslandSurface.Collapsed;
     public IslandSurface Surface

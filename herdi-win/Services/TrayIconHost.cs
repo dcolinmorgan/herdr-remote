@@ -25,6 +25,7 @@ public sealed class TrayIconHost : IDisposable
 
     private readonly Forms.ToolStripMenuItem _statusItem = new() { Enabled = false };
     private readonly Forms.ToolStripMenuItem _relayItem = new() { Enabled = false };
+    private readonly Forms.ToolStripMenuItem _errorItem = new() { Enabled = false, Available = false };
     private readonly Forms.ToolStripMenuItem _launchItem = new("Launch at Login");
     private readonly Forms.ToolStripMenuItem _versionItem = new();
 
@@ -93,6 +94,7 @@ public sealed class TrayIconHost : IDisposable
 
         menu.Items.Add(_statusItem);
         menu.Items.Add(_relayItem);
+        menu.Items.Add(_errorItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
 
         var show = new Forms.ToolStripMenuItem("Show Island");
@@ -151,6 +153,12 @@ public sealed class TrayIconHost : IDisposable
         _statusItem.Text = _vm.StatusSummary;
         _relayItem.Text = "  " + _settings.RelayUrl;
         _launchItem.Checked = StartupManager.IsEnabled;
+
+        // Reconnects back off to 30s, so a silent "Disconnected" can sit there for a long
+        // time with the reason known but unsaid. Show it under the relay URL.
+        var error = _vm.ConnectionError;
+        _errorItem.Text = error is null ? string.Empty : "  ⚠ " + error;
+        _errorItem.Available = error is not null;
 
         _versionItem.Text = _updater.UpdateAvailable
             ? $"Update to v{_updater.LatestVersion}"
