@@ -66,6 +66,58 @@ class ClientPayloadTests(unittest.TestCase):
                     f"{method} must be declared at RelayConnection class scope",
                 )
 
+    def test_windows_client_carries_omp_question_state(self):
+        protocol = (ROOT / "herdi-win" / "Models" / "Protocol.cs").read_text(encoding="utf-8")
+        agent = (ROOT / "herdi-win" / "Models" / "Agent.cs").read_text(encoding="utf-8")
+
+        for field in (
+            "prompt_id",
+            "multi_options",
+            "selected_options",
+            "interaction",
+            "multi",
+        ):
+            self.assertIn(field, protocol)
+        self.assertIn('"question_toggle"', protocol)
+        self.assertIn('"question_submit"', protocol)
+
+        for member in ("MultiOptions", "SelectedOptions", "Interaction", "IsMultiSelect"):
+            self.assertIn(member, agent)
+
+    def test_windows_question_actions_are_connection_methods(self):
+        source = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        for method in ("ToggleQuestionOption", "SubmitQuestion"):
+            declaration = next(
+                line for line in source.splitlines() if f"public void {method}(" in line
+            )
+            self.assertTrue(
+                declaration.startswith("    public void "),
+                f"{method} must be declared at RelayConnection class scope",
+            )
+
+    def test_windows_client_respects_relay_allowlists(self):
+        """Free text must not go out as `respond`, and interrupt must spell C-c."""
+        protocol = (ROOT / "herdi-win" / "Models" / "Protocol.cs").read_text(encoding="utf-8")
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('InterruptKey = "C-c"', protocol)
+        self.assertIn("SafeResponses", protocol)
+        # Respond() picks agent_prompt for anything outside SAFE_RESPONSES.
+        self.assertIn("Protocol.SafeResponses.Contains", connection)
+        self.assertIn("Protocol.AgentPrompt", connection)
+
+    def test_windows_client_renders_multi_selection_state(self):
+        card = (ROOT / "herdi-win" / "Views" / "ApprovalCardView.xaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("MultiOptions", card)
+        self.assertIn("ToggleOptionCommand", card)
+        self.assertIn("SubmitQuestionCommand", card)
+
     def test_tui_sends_multi_selection_messages_with_prompt_identity(self):
         source = (ROOT / "relay" / "herdr_tui.py").read_text(encoding="utf-8")
 
