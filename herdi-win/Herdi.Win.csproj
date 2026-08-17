@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 10.0.19041 gives us the WinRT projection for Windows.UI.Notifications
+         with no NuGet dependency at all. Windows App SDK was rejected: its build
+         requires Windows-only native tools (mt.exe, makepri.exe) and it would force
+         users to install the Windows App Runtime. -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWPF>true</UseWPF>
+    <!-- WinForms is here only for NotifyIcon (tray) and Screen (multi-monitor bounds). -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>12.0</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Herdi</AssemblyName>
+    <RootNamespace>Herdi</RootNamespace>
+    <ApplicationIcon>Assets\herdi.ico</ApplicationIcon>
+    <Version>0.7.3</Version>
+    <AssemblyVersion>0.7.3.0</AssemblyVersion>
+    <FileVersion>0.7.3.0</FileVersion>
+    <!-- Lets `dotnet build` run on Linux/macOS for compile verification. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- WFAC010 tells WinForms apps to move DPI config out of the manifest. This is a
+         WPF app that only borrows NotifyIcon, so PerMonitorV2 belongs in the manifest. -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <!-- Per-monitor DPI v2: the island is positioned in physical pixels. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- UseWindowsForms adds System.Drawing/System.Windows.Forms to the implicit usings,
+         whose Color/Brush/Size/Point collide with the WPF types this app is built on.
+         The two files that touch WinForms import it explicitly instead. -->
+    <Using Remove="System.Drawing" />
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Embedded, not copied: PublishSingleFile does not carry loose content files into
+         the bundle, so a file-path lookup would find nothing in a released build. -->
+    <EmbeddedResource Include="Assets\herdi.ico" />
+    <EmbeddedResource Include="Assets\herdi-blocked.ico" />
+  </ItemGroup>
+
+</Project>

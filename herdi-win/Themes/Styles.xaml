@@ -1,0 +1,221 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:controls="clr-namespace:Herdi.Controls">
+
+    <!-- Converters -->
+    <controls:StatusToBrushConverter x:Key="StatusToBrush" />
+    <controls:BoolToVisibilityConverter x:Key="BoolToVis" />
+    <controls:BoolToVisibilityConverter x:Key="BoolToVisInverted" Invert="True" />
+    <controls:NonEmptyToVisibilityConverter x:Key="NonEmptyToVis" />
+    <controls:DiffLineBrushConverter x:Key="DiffFg" />
+    <controls:DiffLineBrushConverter x:Key="DiffBg" />
+
+    <!-- Palette. The island is deliberately always dark: it impersonates hardware
+         sitting at the top edge of the screen, so it does not follow the system theme
+         (herdi-mac fills the same shape with pure black). -->
+    <SolidColorBrush x:Key="IslandFill" Color="#FF000000" />
+    <SolidColorBrush x:Key="Red" Color="#FFFF453A" />
+    <SolidColorBrush x:Key="Green" Color="#FF32D74B" />
+    <SolidColorBrush x:Key="Gray" Color="#FF8E8E93" />
+    <SolidColorBrush x:Key="Blue" Color="#FF0A84FF" />
+    <SolidColorBrush x:Key="Cyan" Color="#FF64D2FF" />
+    <SolidColorBrush x:Key="Orange" Color="#FFFF9F0A" />
+
+    <SolidColorBrush x:Key="Text90" Color="White" Opacity="0.90" />
+    <SolidColorBrush x:Key="Text60" Color="White" Opacity="0.60" />
+    <SolidColorBrush x:Key="Text40" Color="White" Opacity="0.40" />
+    <SolidColorBrush x:Key="Text30" Color="White" Opacity="0.30" />
+    <SolidColorBrush x:Key="Text20" Color="White" Opacity="0.20" />
+    <SolidColorBrush x:Key="Fill03" Color="White" Opacity="0.03" />
+    <SolidColorBrush x:Key="Fill05" Color="White" Opacity="0.05" />
+    <SolidColorBrush x:Key="Fill06" Color="White" Opacity="0.06" />
+    <SolidColorBrush x:Key="Stroke06" Color="White" Opacity="0.06" />
+    <SolidColorBrush x:Key="Stroke10" Color="White" Opacity="0.10" />
+    <SolidColorBrush x:Key="Stroke15" Color="White" Opacity="0.15" />
+
+    <FontFamily x:Key="UiFont">Segoe UI Variable Display, Segoe UI</FontFamily>
+    <!-- Cascadia ships with Windows 11 / Terminal; Consolas covers Windows 10. -->
+    <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Courier New</FontFamily>
+
+    <!-- Scrollbar-less scroll viewer: herdi-mac uses showsIndicators: false. -->
+    <Style x:Key="QuietScroll" TargetType="ScrollViewer">
+        <Setter Property="VerticalScrollBarVisibility" Value="Hidden" />
+        <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
+        <Setter Property="PanningMode" Value="VerticalOnly" />
+        <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <!-- Flat, chrome-free button base. -->
+    <Style x:Key="PlainButton" TargetType="Button">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Foreground" Value="{StaticResource Text90}" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border Background="{TemplateBinding Background}"
+                            CornerRadius="6"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Icon-only affordance (jump, interrupt, back). -->
+    <Style x:Key="GlyphButton" TargetType="Button" BasedOn="{StaticResource PlainButton}">
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Padding" Value="4,1" />
+        <Setter Property="Opacity" Value="0.75" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Opacity" Value="1" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- Response button: tinted fill, brightening on hover, 0.95 press scale.
+         Matches ResponseButton in NotchContentView.swift:774. -->
+    <Style x:Key="ResponseButton" TargetType="Button">
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd"
+                            CornerRadius="8"
+                            BorderThickness="0.7"
+                            Padding="10,7"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}">
+                        <Border.RenderTransform>
+                            <ScaleTransform x:Name="Sc" ScaleX="1" ScaleY="1" />
+                        </Border.RenderTransform>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Sc"
+                                                         Storyboard.TargetProperty="ScaleX"
+                                                         To="0.95" Duration="0:0:0.08" />
+                                        <DoubleAnimation Storyboard.TargetName="Sc"
+                                                         Storyboard.TargetProperty="ScaleY"
+                                                         To="0.95" Duration="0:0:0.08" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Sc"
+                                                         Storyboard.TargetProperty="ScaleX"
+                                                         To="1" Duration="0:0:0.08" />
+                                        <DoubleAnimation Storyboard.TargetName="Sc"
+                                                         Storyboard.TargetProperty="ScaleY"
+                                                         To="1" Duration="0:0:0.08" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Custom-reply input. -->
+    <Style x:Key="ReplyBox" TargetType="TextBox">
+        <Setter Property="Background" Value="{StaticResource Fill05}" />
+        <Setter Property="Foreground" Value="White" />
+        <Setter Property="CaretBrush" Value="White" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Padding" Value="10,7" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TextBox">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{StaticResource Stroke10}"
+                            BorderThickness="0.7"
+                            CornerRadius="8">
+                        <Grid>
+                            <TextBlock x:Name="Placeholder"
+                                       Text="Custom reply…"
+                                       Margin="10,0"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource Text30}"
+                                       FontFamily="{StaticResource MonoFont}"
+                                       FontSize="11"
+                                       Visibility="Collapsed"
+                                       IsHitTestVisible="False" />
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center" />
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="Text" Value="" />
+                            </MultiTrigger.Conditions>
+                            <Setter TargetName="Placeholder" Property="Visibility" Value="Visible" />
+                        </MultiTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Working indicator: 1.2s breathing loop, as in PulsingDot (NotchContentView.swift:865). -->
+    <Style x:Key="PulsingDot" TargetType="Ellipse">
+        <Setter Property="Width" Value="6" />
+        <Setter Property="Height" Value="6" />
+        <Setter Property="Fill" Value="{StaticResource Green}" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+        <Setter Property="RenderTransform">
+            <Setter.Value>
+                <ScaleTransform ScaleX="1" ScaleY="1" />
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <EventTrigger RoutedEvent="Loaded">
+                <BeginStoryboard>
+                    <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleX"
+                                         To="1.3" Duration="0:0:1.2">
+                            <DoubleAnimation.EasingFunction>
+                                <SineEase EasingMode="EaseInOut" />
+                            </DoubleAnimation.EasingFunction>
+                        </DoubleAnimation>
+                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleY"
+                                         To="1.3" Duration="0:0:1.2">
+                            <DoubleAnimation.EasingFunction>
+                                <SineEase EasingMode="EaseInOut" />
+                            </DoubleAnimation.EasingFunction>
+                        </DoubleAnimation>
+                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                         To="0.7" Duration="0:0:1.2">
+                            <DoubleAnimation.EasingFunction>
+                                <SineEase EasingMode="EaseInOut" />
+                            </DoubleAnimation.EasingFunction>
+                        </DoubleAnimation>
+                    </Storyboard>
+                </BeginStoryboard>
+            </EventTrigger>
+        </Style.Triggers>
+    </Style>
+
+</ResourceDictionary>

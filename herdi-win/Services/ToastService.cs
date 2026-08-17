@@ -1,0 +1,333 @@
+using System.Collections.Specialized;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Web;
+using Herdi.Models;
+using Microsoft.Win32;
+using Windows.Data.Xml.Dom;
+using Windows.UI.Notifications;
+
+namespace Herdi.Services;
+
+/// <summary>What the user picked on a toast.</summary>
+public sealed record ToastAction(string Kind, string PaneId, string? Text);
+
+/// <summary>
+/// Windows toast notifications for blocked agents.
+///
+/// This goes beyond herdi-mac's sendNotification (Sources/RelayConnection.swift:433),
+/// which posts title + body + sound and nothing else: the toast here carries the
+/// permission buttons and a reply box, so a prompt can be answered without opening
+/// the island at all.
+/// </summary>
+public sealed class ToastService : IDisposable
+{
+    /// <summary>Identity backed by the Start Menu shortcut ShortcutHelper writes.</summary>
+    public const string Aumid = "dcolinmorgan.Herdi.Win";
+
+    /// <summary>COM class Windows instantiates when a toast button is pressed.</summary>
+    public static readonly Guid ActivatorClsid = new("B6B4B0C1-6E2A-4F1D-9A73-2C7E5D8F4A21");
+
+    private const string ToastTag = "herdr-blocked";
+    private const string ToastGroup = "herdr";
+
+    private readonly SettingsStore _settings;
+    private uint _comRegistration;
+    private bool _registered;
+
+    public ToastService(SettingsStore settings) => _settings = settings;
+
+    /// <summary>Raised on the UI thread when a toast button or reply is submitted.</summary>
+    public event Action<ToastAction>? ActionInvoked;
+
+    /// <summary>Non-null when notifications could not be set up (surfaced in the tray menu).</summary>
+    public string? SetupError { get; private set; }
+
+    public bool Initialize()
+    {
+        try
+        {
+            if (!ShortcutHelper.EnsureShortcut(Aumid, ActivatorClsid, "Herdi"))
+            {
+                SetupError = "Could not create the Start Menu shortcut; toasts are unavailable.";
+                return false;
+            }
+            _settings.ShortcutInstalled = true;
+
+            RegisterActivatorClsid();
+            RegisterClassObject();
+            NotificationActivator.Handler = OnActivated;
+            _registered = true;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            SetupError = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Point the activator CLSID at this exe. Windows requires the LocalServer32 entry
+    /// to exist even when the running process already handles activation in-proc.
+    /// </summary>
+    private static void RegisterActivatorClsid()
+    {
+        var exePath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exePath)) return;
+        var keyPath = $@"Software\Classes\CLSID\{{{ActivatorClsid}}}\LocalServer32";
+        using var key = Registry.CurrentUser.CreateSubKey(keyPath);
+        key?.SetValue(null, $"\"{exePath}\" --toast-activated");
+    }
+
+    /// <summary>
+    /// Keep activation inside this process so a button press reaches the live
+    /// WebSocket instead of spawning a second copy of the app.
+    /// </summary>
+    private void RegisterClassObject()
+    {
+        var factory = new ClassFactory();
+        var clsid = ActivatorClsid;
+        var hr = CoRegisterClassObject(
+            ref clsid, factory, ClsCtxLocalServer, RegClsMultipleUse | RegClsSuspended, out _comRegistration);
+        if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+        hr = CoResumeClassObjects();
+        if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+    }
+
+    private void OnActivated(string args, IReadOnlyDictionary<string, string> input)
+    {
+        var parsed = HttpUtility.ParseQueryString(args);
+        var kind = parsed["action"] ?? "open";
+        var paneId = parsed["pane"] ?? string.Empty;
+        var text = parsed["text"];
+
+        if (kind == "reply")
+        {
+            input.TryGetValue("reply", out var typed);
+            if (string.IsNullOrWhiteSpace(typed)) return;
+            text = typed;
+        }
+
+        ActionInvoked?.Invoke(new ToastAction(kind, paneId, text));
+    }
+
+    /// <summary>Post (or replace) the blocked-agent toast.</summary>
+    public void ShowBlocked(Agent agent)
+    {
+        if (!_registered) return;
+        try
+        {
+            var xml = BuildBlockedXml(agent);
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+            var toast = new ToastNotification(doc)
+            {
+                // Same tag for every blocked toast: a newer prompt replaces the older
+                // one rather than stacking, matching the relay's push collapse topic.
+                Tag = ToastTag,
+                Group = ToastGroup,
+            };
+            ToastNotificationManager.CreateToastNotifier(Aumid).Show(toast);
+        }
+        catch (Exception ex)
+        {
+            SetupError = ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Pull the toast once the agent is no longer blocked — the same courtesy the
+    /// relay's Web Push `clear` message provides to browser clients.
+    /// </summary>
+    public void ClearBlocked()
+    {
+        if (!_registered) return;
+        try
+        {
+            ToastNotificationManager.History.Remove(ToastTag, ToastGroup, Aumid);
+        }
+        catch (Exception)
+        {
+            // Nothing to retract.
+        }
+    }
+
+    internal static string BuildBlockedXml(Agent agent)
+    {
+        var body = $"{agent.Name} needs input in {agent.DisplayLocation}";
+        var pane = Uri.EscapeDataString(agent.Id);
+
+        var actions = new StringBuilder();
+        actions.Append($"<input id=\"reply\" type=\"text\" placeHolderContent=\"{Esc($"Reply to {agent.Name}…")}\"/>");
+
+        // Two option buttons at most: a toast allows five actions total and the reply
+        // Send button plus Windows' own dismiss control claim the rest.
+        var options = (agent.Options ?? Array.Empty<string>()).Take(2).ToList();
+        foreach (var option in options)
+        {
+            var label = ToastButtonLabel(option);
+            var args = $"action=respond&amp;pane={pane}&amp;text={Uri.EscapeDataString(option)}";
+            actions.Append(
+                $"<action content=\"{Esc(label)}\" arguments=\"{args}\" activationType=\"background\"/>");
+        }
+
+        actions.Append(
+            $"<action content=\"Send\" hint-inputId=\"reply\" arguments=\"action=reply&amp;pane={pane}\" activationType=\"background\"/>");
+
+        var attribution = agent.IsRemote ? $"{agent.Host} · herdr" : "herdr";
+        var launch = $"action=open&amp;pane={pane}";
+
+        return $"""
+            <toast launch="{launch}" activationType="background" scenario="urgentReminder">
+              <visual>
+                <binding template="ToastGeneric">
+                  <text>Agent Blocked</text>
+                  <text>{Esc(body)}</text>
+                  <text placement="attribution">{Esc(attribution)}</text>
+                </binding>
+              </visual>
+              <actions>
+                {actions}
+              </actions>
+              <audio src="ms-winsoundevent:Notification.Default"/>
+            </toast>
+            """;
+    }
+
+    /// <summary>
+    /// Shorten a raw herdr option into a button label, reusing the mapping
+    /// herdi-mac applies in ResponseButtonGrid.mapOption.
+    /// </summary>
+    internal static string ToastButtonLabel(string option)
+    {
+        var lower = option.ToLowerInvariant();
+        if (lower.Contains("single permission") || lower is "y" or "yes") return "Allow";
+        if (lower.Contains("always allow") || lower.Contains("trust")) return "Trust";
+        if (lower.Contains("tab to edit") || lower.StartsWith("no") || lower == "n") return "Deny";
+        if (lower.Contains("approve all")) return "Approve All";
+        if (lower.Contains("configure individually")) return "Configure";
+        if (lower.Contains("exit") || lower.Contains("cancel")) return "Cancel";
+        return option.Length > 16 ? option[..16] : option;
+    }
+
+    private static string Esc(string value) =>
+        value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+
+    public void Dispose()
+    {
+        if (_comRegistration != 0)
+        {
+            CoRevokeClassObject(_comRegistration);
+            _comRegistration = 0;
+        }
+    }
+
+    // --- COM plumbing for toast activation
+
+    private const uint ClsCtxLocalServer = 4;
+    private const uint RegClsMultipleUse = 1;
+    private const uint RegClsSuspended = 4;
+
+    [DllImport("ole32.dll")]
+    private static extern int CoRegisterClassObject(
+        ref Guid clsid,
+        [MarshalAs(UnmanagedType.IUnknown)] object factory,
+        uint context, uint flags, out uint register);
+
+    [DllImport("ole32.dll")]
+    private static extern int CoResumeClassObjects();
+
+    [DllImport("ole32.dll")]
+    private static extern int CoRevokeClassObject(uint register);
+
+    /// <summary>Hands Windows a NotificationActivator when a toast is acted on.</summary>
+    [ComVisible(true)]
+    [ClassInterface(ClassInterfaceType.None)]
+    private sealed class ClassFactory : IClassFactory
+    {
+        public int CreateInstance(IntPtr outer, ref Guid iid, out IntPtr instance)
+        {
+            instance = IntPtr.Zero;
+            if (outer != IntPtr.Zero) return unchecked((int)0x80040110); // CLASS_E_NOAGGREGATION
+
+            // Honour the requested interface: Windows may ask for IUnknown rather than
+            // INotificationActivationCallback, and hard-coding the latter would fail.
+            var unknown = Marshal.GetIUnknownForObject(new NotificationActivator());
+            try
+            {
+                return Marshal.QueryInterface(unknown, in iid, out instance);
+            }
+            finally
+            {
+                Marshal.Release(unknown);
+            }
+        }
+
+        public int LockServer(bool lockIt) => 0;
+    }
+
+    [ComImport, Guid("00000001-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IClassFactory
+    {
+        [PreserveSig] int CreateInstance(IntPtr outer, ref Guid iid, out IntPtr instance);
+        [PreserveSig] int LockServer([MarshalAs(UnmanagedType.Bool)] bool lockIt);
+    }
+}
+
+/// <summary>
+/// COM entry point Windows calls with the pressed button's arguments and any text the
+/// user typed into the toast's input box.
+/// </summary>
+[ComVisible(true)]
+[Guid("B6B4B0C1-6E2A-4F1D-9A73-2C7E5D8F4A21")]
+[ClassInterface(ClassInterfaceType.None)]
+public sealed class NotificationActivator : INotificationActivationCallback
+{
+    internal static Action<string, IReadOnlyDictionary<string, string>>? Handler;
+
+    public void Activate(
+        string appUserModelId,
+        string invokedArgs,
+        [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 3)] NotificationUserInputData[] data,
+        uint count)
+    {
+        var input = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (data is not null)
+        {
+            for (var i = 0; i < Math.Min(data.Length, (int)count); i++)
+            {
+                input[data[i].Key] = data[i].Value;
+            }
+        }
+
+        var handler = Handler;
+        if (handler is null) return;
+
+        // Windows calls this on a COM thread; hop to the UI thread before touching
+        // observable state.
+        var app = System.Windows.Application.Current;
+        if (app is not null) app.Dispatcher.Invoke(() => handler(invokedArgs ?? string.Empty, input));
+        else handler(invokedArgs ?? string.Empty, input);
+    }
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct NotificationUserInputData
+{
+    [MarshalAs(UnmanagedType.LPWStr)] public string Key;
+    [MarshalAs(UnmanagedType.LPWStr)] public string Value;
+}
+
+[ComImport, Guid("53E31837-6600-4A81-9395-75CFFE746F94"), ComVisible(true)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface INotificationActivationCallback
+{
+    void Activate(
+        [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+        [MarshalAs(UnmanagedType.LPWStr)] string invokedArgs,
+        [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 3)] NotificationUserInputData[] data,
+        uint count);
+}

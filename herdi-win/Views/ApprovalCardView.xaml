@@ -1,0 +1,212 @@
+<UserControl x:Class="Herdi.Views.ApprovalCardView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Herdi.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             d:DataContext="{d:DesignInstance Type=vm:IslandViewModel}"
+             mc:Ignorable="d">
+
+    <!-- Port of ApprovalCard (NotchContentView.swift:535). -->
+    <StackPanel>
+
+        <!-- Header: back, accent, agent · project, interrupt -->
+        <Grid Margin="14,10,14,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Style="{StaticResource GlyphButton}"
+                        Content="‹"
+                        FontSize="15"
+                        FontWeight="Bold"
+                        Foreground="{StaticResource Text60}"
+                        ToolTip="Back"
+                        Command="{Binding DismissCommand}" />
+                <Border Width="3" Height="14" CornerRadius="2" Margin="6,0,8,0"
+                        Background="{StaticResource Red}" />
+                <TextBlock Text="{Binding ActiveAgent.Name}"
+                           FontFamily="{StaticResource UiFont}"
+                           FontSize="11" FontWeight="SemiBold"
+                           Foreground="White" VerticalAlignment="Center" />
+                <TextBlock Text="·" Margin="5,0" Foreground="{StaticResource Text30}"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="{Binding ActiveAgent.DisplayLocation}"
+                           FontFamily="{StaticResource MonoFont}"
+                           FontSize="10"
+                           Foreground="{StaticResource Text60}"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"
+                           MaxWidth="220" />
+            </StackPanel>
+            <Button HorizontalAlignment="Right"
+                    Style="{StaticResource GlyphButton}"
+                    Content="⊘"
+                    FontSize="13"
+                    Foreground="{StaticResource Red}"
+                    Opacity="0.7"
+                    ToolTip="Interrupt (^C)"
+                    Command="{Binding InterruptCommand}"
+                    CommandParameter="{Binding ActiveAgent}" />
+        </Grid>
+
+        <!-- Prompt / diff -->
+        <Border Margin="12,10,12,0"
+                CornerRadius="8"
+                BorderThickness="0.7"
+                Background="{StaticResource Fill03}"
+                BorderBrush="{StaticResource Stroke06}">
+            <ScrollViewer Style="{StaticResource QuietScroll}" MaxHeight="160" Padding="6">
+                <Grid>
+                    <!-- Diff-highlighted prompt lines. Port of DiffLine (…:822). -->
+                    <ItemsControl ItemsSource="{Binding ActiveAgent.PromptLines}"
+                                  Visibility="{Binding ActiveAgent.Prompt, Converter={StaticResource NonEmptyToVis}}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="{Binding Converter={StaticResource DiffBg}, ConverterParameter=bg}"
+                                        Padding="4,0.5">
+                                    <TextBlock Text="{Binding}"
+                                               FontFamily="{StaticResource MonoFont}"
+                                               FontSize="10"
+                                               TextWrapping="NoWrap"
+                                               Foreground="{Binding Converter={StaticResource DiffFg}}" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Text="Waiting for input…"
+                               Margin="8"
+                               FontFamily="{StaticResource MonoFont}"
+                               FontSize="10"
+                               Foreground="{StaticResource Text30}">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Visible" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding ActiveAgent.Prompt, Converter={StaticResource NonEmptyToVis}}"
+                                                 Value="Visible">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+
+        <!-- Multi-select question: checkboxes + Submit.
+             NOTE: the current relay has no handler for question_toggle/question_submit,
+             so this path is inert until it grows one — same as on every other client. -->
+        <StackPanel Margin="12,10,12,0"
+                    Visibility="{Binding ActiveAgent.IsMultiSelect, Converter={StaticResource BoolToVis}}">
+            <ItemsControl ItemsSource="{Binding MultiOptions}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Button Style="{StaticResource PlainButton}"
+                                HorizontalContentAlignment="Left"
+                                Padding="2,4"
+                                Command="{Binding DataContext.ToggleOptionCommand,
+                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                CommandParameter="{Binding}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Glyph}" FontSize="12" Margin="0,0,6,0"
+                                           Foreground="{StaticResource Text60}" />
+                                <TextBlock Text="{Binding Option}"
+                                           FontFamily="{StaticResource UiFont}"
+                                           FontSize="11"
+                                           Foreground="{StaticResource Text90}" />
+                            </StackPanel>
+                        </Button>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Button Style="{StaticResource PlainButton}"
+                    Margin="0,6,0,0"
+                    Padding="10,7"
+                    Background="{StaticResource Blue}"
+                    Foreground="White"
+                    FontSize="11"
+                    FontWeight="SemiBold"
+                    Content="✓  Submit"
+                    Command="{Binding SubmitQuestionCommand}" />
+        </StackPanel>
+
+        <!-- Single-choice response buttons. Port of ResponseButtonGrid (…:702). -->
+        <ItemsControl Margin="12,10,12,0"
+                      ItemsSource="{Binding ResponseButtons}"
+                      Visibility="{Binding ActiveAgent.IsMultiSelect, Converter={StaticResource BoolToVisInverted}}">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <UniformGrid Rows="1" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <Button Margin="4,0"
+                            Background="{Binding FillNormal}"
+                            BorderBrush="{Binding StrokeNormal}"
+                            Foreground="{Binding Tint}"
+                            Command="{Binding DataContext.RespondCommand,
+                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                            CommandParameter="{Binding RawValue}">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource ResponseButton}">
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="{Binding FillHover}" />
+                                        <Setter Property="BorderBrush" Value="{Binding StrokeHover}" />
+                                        <Setter Property="Foreground" Value="White" />
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding Glyph}" FontSize="11" FontWeight="SemiBold"
+                                       Margin="0,0,5,0" />
+                            <TextBlock Text="{Binding Label}" FontSize="10" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding Shortcut}"
+                                       FontSize="8" FontWeight="Medium"
+                                       Margin="5,0,0,0"
+                                       VerticalAlignment="Center"
+                                       Foreground="{Binding ShortcutBrush}"
+                                       Visibility="{Binding Shortcut, Converter={StaticResource NonEmptyToVis}}" />
+                        </StackPanel>
+                    </Button>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- Custom reply. Routed via agent_prompt because free text is outside the
+             relay's SAFE_RESPONSES allowlist. -->
+        <Grid Margin="12,10,12,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="ReplyInput"
+                     Grid.Column="0"
+                     Style="{StaticResource ReplyBox}"
+                     Text="{Binding CustomReply, UpdateSourceTrigger=PropertyChanged}"
+                     KeyDown="OnReplyKeyDown" />
+            <Button Grid.Column="1"
+                    Margin="6,0,0,0"
+                    Content="↑"
+                    FontSize="18"
+                    FontWeight="Bold"
+                    ToolTip="Send (Enter)"
+                    Command="{Binding SendCustomReplyCommand}"
+                    IsEnabled="{Binding CanSendCustomReply}">
+                <Button.Style>
+                    <Style TargetType="Button" BasedOn="{StaticResource GlyphButton}">
+                        <Setter Property="Foreground" Value="{StaticResource Text20}" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding CanSendCustomReply}" Value="True">
+                                <Setter Property="Foreground" Value="{StaticResource Blue}" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
+            </Button>
+        </Grid>
+
+    </StackPanel>
+</UserControl>

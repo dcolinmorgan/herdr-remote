@@ -1,5 +1,7 @@
 .build/
 dist/
+herdi-win/bin/
+herdi-win/obj/
 *.dmg
 __pycache__/
 *.pyc
