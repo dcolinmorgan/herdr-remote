@@ -103,6 +103,14 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         : "○ Disconnected";
 
     /// <summary>
+    /// What state is being read from, shown under the status line: the relay URL, or the
+    /// hosts direct mode polls.
+    /// </summary>
+    public string SourceSummary => _relay.Mode == ConnectionMode.Direct
+        ? _relay.DescribeDirectSources()
+        : _relay.HostAddress;
+
+    /// <summary>
     /// Why the relay is unreachable, for the tray menu; null while connected or when the
     /// failure is unknown. A token-guarded relay refuses the handshake with a 401 and is
     /// otherwise indistinguishable from an unreachable one, so that case gets named
@@ -116,7 +124,7 @@ public sealed class IslandViewModel : INotifyPropertyChanged
             var error = _relay.LastError;
             if (string.IsNullOrWhiteSpace(error)) return null;
             if (error.Contains("401") || error.Contains("403"))
-                return "Relay rejected the token — check Relay Settings";
+                return "Relay rejected the token — check Settings";
             return error.Length > 70 ? error[..70] + "…" : error;
         }
     }

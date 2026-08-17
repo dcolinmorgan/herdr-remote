@@ -1,48 +1,88 @@
 <Window x:Class="Herdi.Views.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Herdi — Relay Settings"
-        Width="440"
+        Title="Herdi — Settings"
+        Width="460"
         SizeToContent="Height"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         ShowInTaskbar="True"
         Background="#FF17181A">
 
+    <Window.Resources>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource Text90}" />
+        </Style>
+        <Style x:Key="FieldHint" TargetType="TextBlock">
+            <Setter Property="Margin" Value="0,2,0,6" />
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="Foreground" Value="{StaticResource Text40}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="ModeChoice" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{StaticResource Text90}" />
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Margin" Value="0,0,16,0" />
+        </Style>
+    </Window.Resources>
+
     <StackPanel Margin="20">
 
-        <TextBlock Text="Relay URL"
-                   FontFamily="{StaticResource UiFont}"
-                   FontSize="12" FontWeight="SemiBold"
-                   Foreground="{StaticResource Text90}" />
-        <TextBlock Text="ws://127.0.0.1:8375 locally, or the wss:// tunnel URL."
-                   Margin="0,2,0,6"
-                   FontFamily="{StaticResource UiFont}"
-                   FontSize="10"
-                   Foreground="{StaticResource Text40}"
-                   TextWrapping="Wrap" />
-        <TextBox x:Name="UrlBox" Style="{StaticResource ReplyBox}" />
+        <TextBlock Text="Source" Style="{StaticResource FieldLabel}" />
+        <TextBlock Style="{StaticResource FieldHint}"
+                   Text="Relay reads state over a WebSocket. Direct runs the herdr CLI itself — here and over SSH — with no relay in between." />
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+            <RadioButton x:Name="RelayModeChoice" Style="{StaticResource ModeChoice}"
+                         Content="Relay (WebSocket)" GroupName="Mode"
+                         Checked="OnModeChanged" />
+            <RadioButton x:Name="DirectModeChoice" Style="{StaticResource ModeChoice}"
+                         Content="Direct (herdr CLI + SSH)" GroupName="Mode"
+                         Checked="OnModeChanged" />
+        </StackPanel>
 
-        <TextBlock Text="Relay Token"
-                   Margin="0,16,0,0"
-                   FontFamily="{StaticResource UiFont}"
-                   FontSize="12" FontWeight="SemiBold"
-                   Foreground="{StaticResource Text90}" />
-        <TextBlock Text="Required when the relay binds beyond loopback or runs behind a tunnel (HERDR_RELAY_TOKEN). Stored encrypted with DPAPI."
-                   Margin="0,2,0,6"
-                   FontFamily="{StaticResource UiFont}"
-                   FontSize="10"
-                   Foreground="{StaticResource Text40}"
-                   TextWrapping="Wrap" />
-        <PasswordBox x:Name="TokenBox"
-                     Background="{StaticResource Fill05}"
-                     Foreground="White"
-                     CaretBrush="White"
-                     BorderBrush="{StaticResource Stroke10}"
-                     BorderThickness="0.7"
-                     Padding="10,7"
-                     FontFamily="{StaticResource MonoFont}"
-                     FontSize="11" />
+        <!-- Relay fields -->
+        <StackPanel x:Name="RelayFields">
+            <TextBlock Text="Relay URL" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="ws://127.0.0.1:8375 locally, or the wss:// tunnel URL." />
+            <TextBox x:Name="UrlBox" Style="{StaticResource ReplyBox}" />
+
+            <TextBlock Text="Relay Token" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="Required when the relay binds beyond loopback or runs behind a tunnel (HERDR_RELAY_TOKEN). Stored encrypted with DPAPI." />
+            <PasswordBox x:Name="TokenBox"
+                         Background="{StaticResource Fill05}"
+                         Foreground="White"
+                         CaretBrush="White"
+                         BorderBrush="{StaticResource Stroke10}"
+                         BorderThickness="0.7"
+                         Padding="10,7"
+                         FontFamily="{StaticResource MonoFont}"
+                         FontSize="11" />
+        </StackPanel>
+
+        <!-- Direct fields -->
+        <StackPanel x:Name="DirectFields" Visibility="Collapsed">
+            <TextBlock Text="SSH Hosts" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="One target per line, e.g. user@devbox — the same list the relay takes as HERDR_REMOTES. Key or ssh-agent auth only: the connection runs with BatchMode=yes and never prompts. Stored in plaintext; hosts are not secrets." />
+            <TextBox x:Name="RemotesBox"
+                     Style="{StaticResource ReplyBox}"
+                     AcceptsReturn="True"
+                     TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto"
+                     Height="76" />
+
+            <TextBlock Text="Local herdr Path" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="Optional. Leave empty to use HERDR_BIN or PATH. Windows usually has no local herdr at all, in which case only the SSH hosts above are polled." />
+            <TextBox x:Name="HerdrPathBox" Style="{StaticResource ReplyBox}" />
+        </StackPanel>
 
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
             <Button Content="Cancel"

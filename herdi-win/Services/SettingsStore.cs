@@ -27,10 +27,52 @@ public sealed class SettingsStore
         Load();
     }
 
+    /// <summary>
+    /// Where agent state comes from. Stands in for the Direct/Relay toggle in herdi-mac's
+    /// status menu; unlike that one it is remembered across launches.
+    /// </summary>
+    public ConnectionMode Mode
+    {
+        get => string.Equals(_data.Mode, "direct", StringComparison.OrdinalIgnoreCase)
+            ? ConnectionMode.Direct
+            : ConnectionMode.Relay;
+        set
+        {
+            _data.Mode = value == ConnectionMode.Direct ? "direct" : "relay";
+            Save();
+        }
+    }
+
     public string RelayUrl
     {
         get => string.IsNullOrWhiteSpace(_data.RelayUrl) ? DefaultRelayUrl : _data.RelayUrl!;
         set { _data.RelayUrl = value; Save(); }
+    }
+
+    /// <summary>
+    /// SSH targets polled in direct mode, e.g. "user@host" — the client-side counterpart
+    /// of the relay's HERDR_REMOTES, and of herdi-mac's "herdi_remotes" UserDefaults key.
+    /// Plaintext, like both of those: a hostname is not a secret, and DPAPI is reserved
+    /// for the relay token.
+    /// </summary>
+    public IReadOnlyList<string> Remotes
+    {
+        get => _data.Remotes ?? (IReadOnlyList<string>)Array.Empty<string>();
+        set
+        {
+            _data.Remotes = Normalize(value);
+            Save();
+        }
+    }
+
+    /// <summary>
+    /// Override for the local herdr binary. Empty falls back to HERDR_BIN and then PATH,
+    /// the same chain herdi-mac's "herdi_herdr_path" sits at the head of.
+    /// </summary>
+    public string HerdrPath
+    {
+        get => _data.HerdrPath ?? string.Empty;
+        set { _data.HerdrPath = value.Trim(); Save(); }
     }
 
     /// <summary>Shared secret for relay auth (HERDR_RELAY_TOKEN). Empty when unset.</summary>
@@ -51,6 +93,19 @@ public sealed class SettingsStore
     {
         get => _data.ShortcutInstalled;
         set { _data.ShortcutInstalled = value; Save(); }
+    }
+
+    /// <summary>Trim, drop blanks, and keep the first of any duplicate host.</summary>
+    private static List<string> Normalize(IEnumerable<string> hosts)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var kept = new List<string>();
+        foreach (var host in hosts)
+        {
+            var trimmed = host.Trim();
+            if (trimmed.Length > 0 && seen.Add(trimmed)) kept.Add(trimmed);
+        }
+        return kept;
     }
 
     private void Load()
@@ -115,8 +170,11 @@ public sealed class SettingsStore
 
     private sealed class Data
     {
+        public string? Mode { get; set; }
         public string? RelayUrl { get; set; }
         public string? RelayTokenProtected { get; set; }
+        public List<string>? Remotes { get; set; }
+        public string? HerdrPath { get; set; }
         public bool LaunchAtLogin { get; set; }
         public bool ShortcutInstalled { get; set; }
     }

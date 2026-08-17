@@ -26,8 +26,12 @@ public sealed class TrayIconHost : IDisposable
     private readonly Forms.ToolStripMenuItem _statusItem = new() { Enabled = false };
     private readonly Forms.ToolStripMenuItem _relayItem = new() { Enabled = false };
     private readonly Forms.ToolStripMenuItem _errorItem = new() { Enabled = false, Available = false };
+    private readonly Forms.ToolStripMenuItem _remotesItem = new("Remote Hosts") { Available = false };
     private readonly Forms.ToolStripMenuItem _launchItem = new("Launch at Login");
     private readonly Forms.ToolStripMenuItem _versionItem = new();
+
+    /// <summary>Host list the submenu was last built from, so it is only rebuilt on change.</summary>
+    private string _remotesSignature = string.Empty;
 
     public TrayIconHost(IslandViewModel vm, SettingsStore settings, Updater updater)
     {
@@ -95,13 +99,16 @@ public sealed class TrayIconHost : IDisposable
         menu.Items.Add(_statusItem);
         menu.Items.Add(_relayItem);
         menu.Items.Add(_errorItem);
+        // Direct mode only: in relay mode the SSH targets are the relay's HERDR_REMOTES and
+        // nothing on the wire tells us what they are.
+        menu.Items.Add(_remotesItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
 
         var show = new Forms.ToolStripMenuItem("Show Island");
         show.Click += (_, _) => ShowIslandRequested?.Invoke();
         menu.Items.Add(show);
 
-        var configure = new Forms.ToolStripMenuItem("Relay Settings…");
+        var configure = new Forms.ToolStripMenuItem("Settings…");
         configure.Click += (_, _) => OpenSettings();
         menu.Items.Add(configure);
 
@@ -151,8 +158,9 @@ public sealed class TrayIconHost : IDisposable
     private void Refresh()
     {
         _statusItem.Text = _vm.StatusSummary;
-        _relayItem.Text = "  " + _settings.RelayUrl;
+        _relayItem.Text = "  " + _vm.SourceSummary;
         _launchItem.Checked = StartupManager.IsEnabled;
+        RefreshRemotes();
 
         // Reconnects back off to 30s, so a silent "Disconnected" can sit there for a long
         // time with the reason known but unsaid. Show it under the relay URL.
@@ -179,6 +187,34 @@ public sealed class TrayIconHost : IDisposable
             ? $"Herdi — {_vm.Blocked.Count} waiting on you"
             : $"Herdi — {_vm.StatusSummary}";
         _icon.Text = tooltip.Length > 63 ? tooltip[..63] : tooltip;
+    }
+
+    /// <summary>
+    /// Keep the Remote Hosts submenu in step with the settings — the counterpart of the
+    /// inline host list herdi-mac rebuilds into its menu (HerdiMacApp.swift:77). Rebuilt
+    /// only when the list actually changed, since Refresh runs every second.
+    /// </summary>
+    private void RefreshRemotes()
+    {
+        var direct = _settings.Mode == ConnectionMode.Direct;
+        _remotesItem.Available = direct;
+        if (!direct) return;
+
+        var remotes = _settings.Remotes;
+        var signature = string.Join("\n", remotes);
+        if (signature == _remotesSignature && _remotesItem.DropDownItems.Count > 0) return;
+        _remotesSignature = signature;
+
+        _remotesItem.DropDownItems.Clear();
+        if (remotes.Count == 0)
+        {
+            _remotesItem.DropDownItems.Add(new Forms.ToolStripMenuItem("None configured") { Enabled = false });
+            return;
+        }
+        foreach (var remote in remotes)
+        {
+            _remotesItem.DropDownItems.Add(new Forms.ToolStripMenuItem(remote) { Enabled = false });
+        }
     }
 
     public void Dispose()

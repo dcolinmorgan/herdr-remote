@@ -169,6 +169,94 @@ class ClientPayloadTests(unittest.TestCase):
         )
         self.assertRegex(island, r'x:Name="Root"[^>]*Background="Transparent"')
 
+    def test_clients_offer_the_same_two_sources(self):
+        """Direct mode is the mac app's second half; the Windows client must have it too."""
+        mac = (ROOT / "herdi-mac" / "Sources" / "RelayConnection.swift").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("case direct", mac)
+        self.assertIn("case relay", mac)
+
+        modes = (ROOT / "herdi-win" / "Services" / "ConnectionMode.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Relay,", modes)
+        self.assertIn("Direct,", modes)
+
+        # Both persist the choice and the SSH host list across launches.
+        self.assertIn("herdi_remotes", mac)
+        store = (ROOT / "herdi-win" / "Services" / "SettingsStore.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("public ConnectionMode Mode", store)
+        self.assertIn("public IReadOnlyList<string> Remotes", store)
+
+        # And both route outbound commands by mode rather than always down the socket.
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Mode == ConnectionMode.Direct", connection)
+
+    def test_windows_direct_mode_reaches_hosts_on_the_relays_terms(self):
+        """A host the relay can poll must be reachable from the client unchanged.
+
+        The relay is the reference implementation for driving herdr over SSH
+        (herdr_relay.py:175). Diverging on the flags, the remote binary name or the prompt
+        window would make the same blocked pane read differently depending on which side
+        fetched it.
+        """
+        relay = (ROOT / "relay" / "herdr_relay.py").read_text(encoding="utf-8")
+        cli = (ROOT / "herdi-win" / "Services" / "HerdrCli.cs").read_text(encoding="utf-8")
+        poller = (ROOT / "herdi-win" / "Services" / "HerdrPoller.cs").read_text(
+            encoding="utf-8"
+        )
+
+        for flag in ("ConnectTimeout=5", "BatchMode=yes"):
+            self.assertIn(flag, relay)
+            self.assertIn(f'"{flag}"', cli)
+        self.assertIn("HERDR_REMOTE_BIN", relay)
+        self.assertIn("HERDR_REMOTE_BIN", cli)
+
+        self.assertIn('"pane", "list"', poller)
+        # read_pane(): 50 lines fetched, chrome dropped, last 20 kept, capped at 500 chars.
+        self.assertIn('"--lines", "50"', relay)
+        self.assertIn("PromptReadLines = 50", poller)
+        self.assertIn("lines[-20:]", relay)
+        self.assertIn("PromptKeepLines = 20", poller)
+        self.assertIn("content[:500]", relay)
+        self.assertIn("PromptMaxChars = 500", poller)
+
+    def test_windows_direct_mode_namespaces_remote_pane_ids(self):
+        """Two hosts can hand out the same pane id, so ids carry their host in direct mode.
+
+        The prefix is a client-side namespace and must be stripped again before the id goes
+        back to the host that issued it.
+        """
+        poller = (ROOT / "herdi-win" / "Services" / "HerdrPoller.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('host + ":" + paneId', poller)
+        self.assertIn("StartsWith(prefix", poller)
+        # Interrupt keeps the one spelling the relay proved the CLI accepts.
+        self.assertIn("Protocol.InterruptKey", poller)
+
+    def test_windows_direct_mode_keeps_panes_of_a_host_that_failed(self):
+        """A poll that failed says nothing about that host's panes.
+
+        Pruning them anyway would make a flapping SSH connection empty and refill the list
+        every couple of seconds, and every blocked agent on it would toast again each time
+        it came back.
+        """
+        poller = (ROOT / "herdi-win" / "Services" / "HerdrPoller.cs").read_text(
+            encoding="utf-8"
+        )
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("HostsAnswered", poller)
+        self.assertIn("ApplySnapshot(result.Agents, result.HostsAnswered)", connection)
+        self.assertIn("hostsCovered.Contains(agent.Host)", connection)
+
     def test_tui_sends_multi_selection_messages_with_prompt_identity(self):
         source = (ROOT / "relay" / "herdr_tui.py").read_text(encoding="utf-8")
 
