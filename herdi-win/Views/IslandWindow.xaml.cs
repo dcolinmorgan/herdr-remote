@@ -39,6 +39,8 @@ public partial class IslandWindow : Window
     private bool _isHovered;
     private bool _prehover;
     private bool _hiddenForFullscreen;
+    /// <summary>Width the last animation aimed at, so a regroup can skip a no-op animation.</summary>
+    private double _widthTarget = double.NaN;
 
     public IslandWindow(IslandViewModel vm)
     {
@@ -48,9 +50,12 @@ public partial class IslandWindow : Window
 
         // Seed the collapsed width so the first frame is already island-shaped rather than
         // shrink-wrapped around the content, and so Width never starts out Auto.
-        Root.Width = TargetWidth();
+        Root.Width = _widthTarget = TargetWidth();
 
         _vm.SurfaceChanged += ApplySurface;
+        // Agents appearing or changing group resizes the collapsed island and toggles the
+        // working indicator, neither of which is tied to a surface transition.
+        _vm.GroupingChanged += ApplyGrouping;
         _hoverTimer.Tick += OnHoverTimerTick;
 
         // Matches the 1s cadence of observeBlockedAgents on macOS.
@@ -164,9 +169,7 @@ public partial class IslandWindow : Window
         ExpandedHost.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         Wordmark.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         RightWing.Visibility = expanded ? Visibility.Collapsed : Visibility.Visible;
-        WorkingCount.Visibility = !expanded && _vm.Working.Count > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        ApplyWorkingCount();
 
         var easing = _vm.Surface == IslandSurface.Approval ? PopEase() : (expanded ? OpenEase() : CloseEase());
         AnimateWidth(TargetWidth(), easing);
@@ -181,6 +184,25 @@ public partial class IslandWindow : Window
         }
     }
 
+    /// <summary>
+    /// Re-apply the chrome that follows the agent list rather than the surface. Kept apart
+    /// from <see cref="ApplySurface"/> so a poll that merely regroups the agents cannot
+    /// replay the open/pop animation or steal focus back to an approval card.
+    /// </summary>
+    private void ApplyGrouping()
+    {
+        ApplyWorkingCount();
+        var target = TargetWidth();
+        if (Math.Abs(target - _widthTarget) < 0.5) return;
+        AnimateWidth(target, MicroEase());
+    }
+
+    /// <summary>The pulsing working count belongs to the collapsed island only.</summary>
+    private void ApplyWorkingCount() =>
+        WorkingCount.Visibility = !_vm.IsExpanded && _vm.Working.Count > 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
     private double TargetWidth()
     {
         if (!_vm.IsActive) return CapsuleWidth + 60;
@@ -193,6 +215,7 @@ public partial class IslandWindow : Window
 
     private void AnimateWidth(double target, IEasingFunction easing)
     {
+        _widthTarget = target;
         // From is always explicit: a To-only DoubleAnimation reads the base value, and WPF
         // rejects NaN there ("'NaN' is not a valid 'Double' value for class ..."), which is
         // what Width reads as whenever it is Auto. Root.Width sees the in-flight animated

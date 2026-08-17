@@ -163,7 +163,7 @@
             </Border>
 
             <!-- NEEDS YOU -->
-            <StackPanel Visibility="{Binding Blocked, Converter={StaticResource NonEmptyToVis}}">
+            <StackPanel Visibility="{Binding HasBlocked, Converter={StaticResource BoolToVis}}">
                 <Grid Margin="0,4,0,4">
                     <StackPanel Orientation="Horizontal">
                         <Border Width="3" Height="10" CornerRadius="1" Margin="0,0,5,0"
@@ -181,7 +181,7 @@
             </StackPanel>
 
             <!-- WORKING -->
-            <StackPanel Visibility="{Binding Working, Converter={StaticResource NonEmptyToVis}}">
+            <StackPanel Visibility="{Binding HasWorking, Converter={StaticResource BoolToVis}}">
                 <Grid Margin="0,4,0,4">
                     <StackPanel Orientation="Horizontal">
                         <Border Width="3" Height="10" CornerRadius="1" Margin="0,0,5,0"
@@ -198,7 +198,7 @@
             </StackPanel>
 
             <!-- IDLE -->
-            <StackPanel Visibility="{Binding Idle, Converter={StaticResource NonEmptyToVis}}">
+            <StackPanel Visibility="{Binding HasIdle, Converter={StaticResource BoolToVis}}">
                 <Grid Margin="0,4,0,4">
                     <StackPanel Orientation="Horizontal">
                         <Border Width="3" Height="10" CornerRadius="1" Margin="0,0,5,0"

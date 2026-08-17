@@ -118,6 +118,34 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("ToggleOptionCommand", card)
         self.assertIn("SubmitQuestionCommand", card)
 
+    def test_windows_sections_bind_to_notifying_flags(self):
+        """A section bound straight at its collection would never become visible.
+
+        IslandViewModel hands back the same ObservableCollection instance forever and
+        raises no PropertyChanged for it, so `{Binding Blocked, Converter=NonEmptyToVis}`
+        is evaluated once — while the list is still empty — and stays collapsed for the
+        rest of the run. Visibility has to ride a flag Rebuild() notifies.
+        """
+        for view in ("SessionListView.xaml", "IslandWindow.xaml"):
+            xaml = (ROOT / "herdi-win" / "Views" / view).read_text(encoding="utf-8")
+            for collection in ("Blocked", "Working", "Idle"):
+                self.assertNotIn(
+                    f"{{Binding {collection}, Converter",
+                    xaml,
+                    f"{view} binds {collection} itself; bind Has{collection} instead",
+                )
+
+        sections = (ROOT / "herdi-win" / "Views" / "SessionListView.xaml").read_text(
+            encoding="utf-8"
+        )
+        view_model = (ROOT / "herdi-win" / "ViewModels" / "IslandViewModel.cs").read_text(
+            encoding="utf-8"
+        )
+        for flag in ("HasBlocked", "HasWorking", "HasIdle"):
+            self.assertIn(f"Binding {flag}, Converter", sections)
+            self.assertIn(f"public bool {flag} =>", view_model)
+            self.assertIn(f"OnPropertyChanged(nameof({flag}))", view_model)
+
     def test_tui_sends_multi_selection_messages_with_prompt_identity(self):
         source = (ROOT / "relay" / "herdr_tui.py").read_text(encoding="utf-8")
 

@@ -88,6 +88,15 @@ public sealed class IslandViewModel : INotifyPropertyChanged
     public bool IsActive => _relay.Agents.Count > 0;
     public bool HasNoAgents => _relay.Agents.Count == 0;
 
+    // Section visibility goes through these rather than binding a converter straight at
+    // Blocked/Working/Idle: those properties hand back the same collection instance for
+    // the app's lifetime, so such a binding is evaluated once — while every list is still
+    // empty — and never again, leaving all three sections permanently collapsed.
+    // Rebuild() raises them alongside the grouping itself.
+    public bool HasBlocked => Blocked.Count > 0;
+    public bool HasWorking => Working.Count > 0;
+    public bool HasIdle => Idle.Count > 0;
+
     /// <summary>Tray tooltip / menu header text.</summary>
     public string StatusSummary => IsConnected
         ? $"● Connected · {AgentCount} agents"
@@ -174,6 +183,13 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     /// <summary>Raised when the surface changes so the window can resize and animate.</summary>
     public event Action? SurfaceChanged;
+
+    /// <summary>
+    /// Raised when the agent grouping changed. The collapsed island's width and its
+    /// working indicator depend on how many agents there are, which moves independently
+    /// of the surface, so the window has to re-apply them here too.
+    /// </summary>
+    public event Action? GroupingChanged;
 
     // --- Surface transitions
 
@@ -284,7 +300,11 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(AgentCount));
         OnPropertyChanged(nameof(IsActive));
         OnPropertyChanged(nameof(HasNoAgents));
+        OnPropertyChanged(nameof(HasBlocked));
+        OnPropertyChanged(nameof(HasWorking));
+        OnPropertyChanged(nameof(HasIdle));
         OnPropertyChanged(nameof(StatusSummary));
+        GroupingChanged?.Invoke();
     }
 
     /// <summary>Reconcile in place so WPF keeps row identity (and hover state) stable.</summary>

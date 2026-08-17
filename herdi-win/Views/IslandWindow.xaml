@@ -57,7 +57,7 @@
                     </Ellipse>
 
                     <StackPanel Orientation="Horizontal" Margin="5,0,0,0"
-                                Visibility="{Binding Blocked, Converter={StaticResource NonEmptyToVis}}">
+                                Visibility="{Binding HasBlocked, Converter={StaticResource BoolToVis}}">
                         <TextBlock Text="⚠" FontSize="10" FontWeight="Bold"
                                    VerticalAlignment="Center"
                                    Foreground="{StaticResource Red}" />
@@ -69,8 +69,11 @@
                                    Foreground="{StaticResource Red}" />
                     </StackPanel>
 
+                    <!-- Visibility comes from ApplyWorkingCount, not a binding: the pulsing
+                         count belongs to the collapsed island only, so it follows the
+                         surface as well as how many agents are working. -->
                     <StackPanel x:Name="WorkingCount" Orientation="Horizontal" Margin="5,0,0,0"
-                                Visibility="{Binding Working, Converter={StaticResource NonEmptyToVis}}">
+                                Visibility="Collapsed">
                         <Ellipse Style="{StaticResource PulsingDot}" VerticalAlignment="Center" />
                         <TextBlock Text="{Binding Working.Count}"
                                    Margin="2,0,0,0"
