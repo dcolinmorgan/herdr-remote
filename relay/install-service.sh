@@ -501,8 +501,27 @@ if [ -z "$CLOUDFLARED_PATH" ]; then
             echo "  Running: brew install cloudflared"
             brew install cloudflared
         else
-            echo "  Running: curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o /tmp/cloudflared"
-            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" -o /tmp/cloudflared
+            # cloudflared release assets use Go arch names (amd64/arm64/...),
+            # not uname -m output (x86_64/aarch64/...). Linux assets are bare
+            # binaries; macOS assets are .tgz archives.
+            case "$(uname -m)" in
+                x86_64)        CF_ARCH="amd64" ;;
+                aarch64|arm64) CF_ARCH="arm64" ;;
+                armv7l|armv6l) CF_ARCH="arm" ;;
+                i686|i386)     CF_ARCH="386" ;;
+                *)             CF_ARCH="$(uname -m)" ;;
+            esac
+            CF_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+            CF_ASSET="cloudflared-$CF_OS-$CF_ARCH"
+            [ "$CF_OS" = "darwin" ] && CF_ASSET="$CF_ASSET.tgz"
+            echo "  Running: curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/$CF_ASSET -o /tmp/$CF_ASSET"
+            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/$CF_ASSET" -o "/tmp/$CF_ASSET"
+            if [ "$CF_OS" = "darwin" ]; then
+                tar -xzf "/tmp/$CF_ASSET" -C /tmp
+                rm -f "/tmp/$CF_ASSET"
+            else
+                mv "/tmp/$CF_ASSET" /tmp/cloudflared
+            fi
             chmod +x /tmp/cloudflared
             if [ -w /usr/local/bin ]; then
                 mv /tmp/cloudflared /usr/local/bin/cloudflared
