@@ -179,8 +179,22 @@ public sealed class ToastService : IDisposable
         var attribution = agent.IsRemote ? $"{agent.Host} · herdr" : "herdr";
         var launch = $"action=open&amp;pane={pane}";
 
+        // scenario="reminder" holds the toast on screen until it is dismissed, which is the
+        // point: an approval prompt the user walked away from must still be there when they
+        // come back. Its documented precondition — at least one action that activates in
+        // background — is satisfied by the buttons above.
+        //
+        // Two things here were wrong and each one is enough for Windows to drop the toast
+        // without a word, which is exactly how this failed:
+        //   * scenario was "urgentReminder", which is not a value. The four that exist are
+        //     reminder, alarm, incomingCall and urgent.
+        //   * <audio> sat after <actions>. The toast element is an ordered sequence —
+        //     visual, audio?, commands?, actions?, header? — so audio has to come first.
+        // "urgent" was the other candidate and is deliberately not used: it exists to punch
+        // through Focus Assist, and PopForBlocked already declines to interrupt a game or a
+        // presentation, so breaking that restraint here would contradict it.
         return $"""
-            <toast launch="{launch}" activationType="background" scenario="urgentReminder">
+            <toast launch="{launch}" activationType="background" scenario="reminder">
               <visual>
                 <binding template="ToastGeneric">
                   <text>Agent Blocked</text>
@@ -188,10 +202,10 @@ public sealed class ToastService : IDisposable
                   <text placement="attribution">{Esc(attribution)}</text>
                 </binding>
               </visual>
+              <audio src="ms-winsoundevent:Notification.Default"/>
               <actions>
                 {actions}
               </actions>
-              <audio src="ms-winsoundevent:Notification.Default"/>
             </toast>
             """;
     }

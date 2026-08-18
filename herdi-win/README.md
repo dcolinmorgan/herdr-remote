@@ -255,6 +255,17 @@ onto a Start Menu shortcut, and [`ToastService`](Services/ToastService.cs) regis
 COM activator so button presses land in the running process instead of spawning a
 second copy.
 
+### When nothing appears
+
+A malformed payload is dropped by the platform without a word, and two bugs of exactly that
+kind were the reason no toast ever appeared on Windows: `scenario` was set to
+`urgentReminder`, which is not one of the four values that exist (`reminder`, `alarm`,
+`incomingCall`, `urgent`), and `<audio>` was placed after `<actions>` when the
+[`toast` element](https://learn.microsoft.com/en-us/uwp/schemas/tiles/toastschema/element-toast)
+is an ordered sequence of `visual, audio?, commands?, actions?, header?`. Either one alone is
+enough for the notification to be discarded silently — no exception, no event log, nothing on
+screen.
+
 ## Layout
 
 | Path | Corresponds to |
