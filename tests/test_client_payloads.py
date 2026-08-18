@@ -152,9 +152,8 @@ class ClientPayloadTests(unittest.TestCase):
         Shape seeds its rendered geometry to Geometry.Empty and only drops that cache from
         its own ArrangeOverride, which a geometry derived from RenderSize must override —
         so the island stayed fully transparent. Transparency also punches hit-test holes:
-        the pointer falls through to the window, which is not a descendant of Root, so WPF
-        raises MouseLeave and collapses the island mid-hover. Root's Background covers the
-        gaps its children leave.
+        every pixel Root's children do not cover routes the pointer straight past the
+        expanded panel to whatever is behind it. Root's Background covers those gaps.
         """
         shape = (ROOT / "herdi-win" / "Controls" / "IslandShape.cs").read_text(
             encoding="utf-8"
@@ -256,6 +255,103 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("HostsAnswered", poller)
         self.assertIn("ApplySnapshot(result.Agents, result.HostsAnswered)", connection)
         self.assertIn("hostsCovered.Contains(agent.Host)", connection)
+
+    def test_windows_every_expanded_row_opens_something(self):
+        """A row that swallows a click is why the expanded island read as inert.
+
+        Only NEEDS YOU was wired, and with no blocked agents that left a list where
+        nothing at all responded to a click. macOS taps every row — blocked ones open the
+        approval card, the rest jump to the pane in the terminal app.
+        """
+        sessions = (ROOT / "herdi-win" / "Views" / "SessionListView.xaml").read_text(
+            encoding="utf-8"
+        )
+        # One handler per section: Blocked, Working, Idle.
+        self.assertEqual(sessions.count('PreviewMouseLeftButtonUp="OnRowClicked"'), 3)
+
+        view_model = (ROOT / "herdi-win" / "ViewModels" / "IslandViewModel.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("public void OpenAgent(Agent agent)", view_model)
+        self.assertIn("if (agent.IsBlocked) ShowApproval(agent);", view_model)
+        self.assertIn("public void ShowPane(Agent agent)", view_model)
+
+        # The click must not also fire for the row's own action buttons, which sit under
+        # the same tunnelling handler.
+        code_behind = (ROOT / "herdi-win" / "Views" / "SessionListView.xaml.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("if (node is ButtonBase) return;", code_behind)
+
+    def test_windows_pane_view_reads_and_submits_over_both_transports(self):
+        """The pane view is this client's answer to macOS's "jump to terminal".
+
+        Focusing a window is meaningless for an agent an SSH hop away, so the row opens
+        the terminal here instead. Reading and submitting have to work identically from
+        the relay and from the CLI, or the surface is only half a feature.
+        """
+        pane = (ROOT / "herdi-win" / "Views" / "PaneView.xaml").read_text(encoding="utf-8")
+        self.assertIn("Binding PaneContent", pane)
+        self.assertIn("SendPaneInputCommand", pane)
+        self.assertIn("InterruptCommand", pane)
+
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("public void SendPrompt(Agent agent, string text)", connection)
+        self.assertIn("_direct.PromptAsync(agent, trimmed)", connection)
+        self.assertIn("Protocol.AgentPrompt(agent.Id, trimmed)", connection)
+
+        # Both sides submit with `herdr agent prompt`, the verb the relay's agent_prompt
+        # handler runs — not by typing into the pane and hoping Enter takes.
+        relay = (ROOT / "relay" / "herdr_relay.py").read_text(encoding="utf-8")
+        self.assertIn('run_herdr("agent", "prompt"', relay)
+        poller = (ROOT / "herdi-win" / "Services" / "HerdrPoller.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"agent", "prompt"', poller)
+
+    def test_windows_rows_answer_a_right_click(self):
+        sessions = (ROOT / "herdi-win" / "Views" / "SessionListView.xaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("<Border.ContextMenu>", sessions)
+        code_behind = (ROOT / "herdi-win" / "Views" / "SessionListView.xaml.cs").read_text(
+            encoding="utf-8"
+        )
+        for handler in ("OnMenuAnswer", "OnMenuOpenPane", "OnMenuInterrupt", "OnMenuCopyPaneId"):
+            self.assertIn(f'Click="{handler}"', sessions)
+            self.assertIn(f"private void {handler}(", code_behind)
+
+        # A menu takes focus into its own window and puts the pointer off the island —
+        # both of which otherwise collapse it out from under the open menu.
+        island = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("_menuOpen = true;", island)
+        self.assertIn("if (_vm.IsSticky || _menuOpen) return;", island)
+
+    def test_windows_collapsed_island_lets_clicks_through(self):
+        """Collapsed, the island covers the top-centre of somebody else's window.
+
+        macOS hides the collapsed panel in the notch, where there is nothing underneath to
+        click. Here it sits over tab strips and title bars, so it gives its input back
+        until it is expanded — which also means hover cannot come from MouseEnter, since a
+        click-through window receives no mouse messages at all.
+        """
+        island = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("WsExTransparent = 0x00000020", island)
+        self.assertIn(
+            "_vm.IsExpanded ? style & ~WsExTransparent : style | WsExTransparent", island
+        )
+        self.assertIn("_pointerTimer", island)
+        self.assertIn("var over = PointerOverIsland();", island)
+
+        xaml = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml").read_text(encoding="utf-8")
+        self.assertNotIn("MouseEnter=", xaml)
+        self.assertNotIn("MouseLeave=", xaml)
 
     def test_tui_sends_multi_selection_messages_with_prompt_identity(self):
         source = (ROOT / "relay" / "herdr_tui.py").read_text(encoding="utf-8")

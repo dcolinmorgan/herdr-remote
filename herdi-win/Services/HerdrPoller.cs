@@ -258,6 +258,18 @@ public sealed class HerdrPoller : IDisposable
     }
 
     /// <summary>
+    /// Submit free-form text to an agent that is not sitting on a permission prompt.
+    /// `herdr agent prompt` is what the relay's agent_prompt handler runs
+    /// (herdr_relay.py:617) precisely because it knows how each agent CLI takes a
+    /// submission; typing into the pane and pressing Enter does not always land.
+    /// </summary>
+    public Task<HerdrResult> PromptAsync(Agent agent, string text, CancellationToken token = default) =>
+        _cli.RunAsync(
+            HostOf(agent),
+            new[] { "agent", "prompt", PaneIdOf(agent), text },
+            token);
+
+    /// <summary>
     /// Send ^C. Spelled "C-c" like the relay's SAFE_KEYS, not the "Ctrl+c" the mac app
     /// passes; the relay proves the CLI takes this spelling, and it keeps one constant
     /// across both modes.

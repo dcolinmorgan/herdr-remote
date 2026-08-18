@@ -23,12 +23,13 @@
     <!-- The island: silhouette behind, content in front, sized by the content so the
          window has almost no transparent area to swallow clicks.
 
-         The explicit Background is what makes hover usable: a null one leaves Root out of
-         hit testing, so every pixel its children do not cover routes the pointer to the
-         window's own background instead — which is not a descendant of Root, so WPF
-         raises MouseLeave and the island collapses while the pointer is still on it. -->
+         The explicit Background matters: a null one leaves Root out of hit testing, so
+         every pixel its children do not cover would route the pointer past the expanded
+         panel to whatever is behind it. Hover itself is decided from the cursor position
+         rather than from MouseEnter/MouseLeave — see IslandWindow.OnPointerTick. -->
     <Grid x:Name="Root" Background="Transparent"
-          MouseEnter="OnRootMouseEnter" MouseLeave="OnRootMouseLeave">
+          ContextMenuOpening="OnContextMenuOpening"
+          ContextMenuClosing="OnContextMenuClosing">
 
         <controls:IslandShape x:Name="Silhouette"
                               Fill="{StaticResource IslandFill}"
@@ -152,6 +153,8 @@
                                        Visibility="{Binding ShowSessionListSurface, Converter={StaticResource BoolToVis}}" />
                 <views:ApprovalCardView x:Name="ApprovalCard"
                                         Visibility="{Binding ShowApprovalSurface, Converter={StaticResource BoolToVis}}" />
+                <views:PaneView x:Name="Pane"
+                                Visibility="{Binding ShowPaneSurface, Converter={StaticResource BoolToVis}}" />
             </Grid>
 
         </StackPanel>

@@ -43,6 +43,12 @@ public static class Protocol
     /// </summary>
     public const string InterruptKey = "C-c";
 
+    /// <summary>
+    /// The relay drops an `agent_prompt` longer than this with "text empty or too long"
+    /// (herdr_relay.py:612), so the text is cut here instead of vanishing on send.
+    /// </summary>
+    public const int MaxPromptLength = 10000;
+
     public static string Respond(string paneId, string? promptId, string text) =>
         JsonSerializer.Serialize(new Dictionary<string, object?>
         {

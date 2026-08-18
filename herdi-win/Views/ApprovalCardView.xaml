@@ -185,6 +185,7 @@
             <TextBox x:Name="ReplyInput"
                      Grid.Column="0"
                      Style="{StaticResource ReplyBox}"
+                     Tag="Custom reply…"
                      Text="{Binding CustomReply, UpdateSourceTrigger=PropertyChanged}"
                      KeyDown="OnReplyKeyDown" />
             <Button Grid.Column="1"

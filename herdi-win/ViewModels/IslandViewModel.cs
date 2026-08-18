@@ -2,6 +2,8 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Windows;
+using System.Windows.Threading;
 using Herdi.Models;
 using Herdi.Services;
 
@@ -13,6 +15,15 @@ public enum IslandSurface
     Collapsed,
     SessionList,
     Approval,
+
+    /// <summary>
+    /// Live terminal for one agent. No macOS counterpart: there, a row opens the pane in
+    /// the terminal app itself (`herdr workspace focus`), which is meaningless from a
+    /// machine that is not the one running herdr — every agent may be an SSH hop away.
+    /// Reading the pane and submitting to it work from anywhere, so that is what a row
+    /// opens here.
+    /// </summary>
+    Pane,
 }
 
 /// <summary>
@@ -21,14 +32,25 @@ public enum IslandSurface
 /// </summary>
 public sealed class IslandViewModel : INotifyPropertyChanged
 {
+    /// <summary>How often an open pane view re-reads its terminal — the relay's POLL_INTERVAL.</summary>
+    private static readonly TimeSpan PaneRefreshInterval = TimeSpan.FromSeconds(2);
+
+    /// <summary>Lines per read. The tail is what matters and every read costs a round trip.</summary>
+    private const int PaneReadLines = 40;
+
     private readonly RelayConnection _relay;
+    private readonly DispatcherTimer _paneTimer = new();
 
     public IslandViewModel(RelayConnection relay, Updater updater)
     {
         _relay = relay;
         Updater = updater;
 
-        SelectAgentCommand = new RelayCommand(p => { if (p is Agent a) ShowApproval(a); });
+        SelectAgentCommand = new RelayCommand(p => { if (p is Agent a) OpenAgent(a); });
+        ShowPaneCommand = new RelayCommand(p => { if (p is Agent a) ShowPane(a); });
+        RefreshPaneCommand = new RelayCommand(_ => RefreshPane());
+        SendPaneInputCommand = new RelayCommand(_ => SendPaneInput());
+        CopyPaneIdCommand = new RelayCommand(p => { if (p is Agent a) CopyToClipboard(a.Id); });
         DismissCommand = new RelayCommand(_ => ShowSessionList());
         ShowSessionListCommand = new RelayCommand(_ => ShowSessionList());
         RespondCommand = new RelayCommand(p =>
@@ -59,6 +81,10 @@ public sealed class IslandViewModel : INotifyPropertyChanged
                 ShowSessionList();
             }
         });
+
+        _relay.PaneContentReceived += OnPaneContent;
+        _paneTimer.Interval = PaneRefreshInterval;
+        _paneTimer.Tick += (_, _) => RefreshPane();
 
         _relay.Agents.CollectionChanged += OnAgentsChanged;
         _relay.PropertyChanged += (_, e) =>
@@ -138,8 +164,10 @@ public sealed class IslandViewModel : INotifyPropertyChanged
             if (Set(ref _surface, value))
             {
                 OnPropertyChanged(nameof(IsExpanded));
+                OnPropertyChanged(nameof(IsSticky));
                 OnPropertyChanged(nameof(ShowSessionListSurface));
                 OnPropertyChanged(nameof(ShowApprovalSurface));
+                OnPropertyChanged(nameof(ShowPaneSurface));
             }
         }
     }
@@ -147,6 +175,14 @@ public sealed class IslandViewModel : INotifyPropertyChanged
     public bool IsExpanded => Surface != IslandSurface.Collapsed;
     public bool ShowSessionListSurface => Surface == IslandSurface.SessionList;
     public bool ShowApprovalSurface => Surface == IslandSurface.Approval && ActiveAgent is not null;
+    public bool ShowPaneSurface => Surface == IslandSurface.Pane && ActiveAgent is not null;
+
+    /// <summary>
+    /// Surfaces the pointer must not close. Both are worked in rather than glanced at —
+    /// answering a prompt or typing to an agent means leaving the island to reach for the
+    /// keyboard, and a hover timer that shut it mid-sentence would be unusable.
+    /// </summary>
+    public bool IsSticky => Surface is IslandSurface.Approval or IslandSurface.Pane;
 
     private Agent? _activeAgent;
     public Agent? ActiveAgent
@@ -157,6 +193,7 @@ public sealed class IslandViewModel : INotifyPropertyChanged
             if (Set(ref _activeAgent, value))
             {
                 OnPropertyChanged(nameof(ShowApprovalSurface));
+                OnPropertyChanged(nameof(ShowPaneSurface));
                 RefreshResponseButtons();
             }
         }
@@ -179,7 +216,27 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     public bool CanSendCustomReply => !string.IsNullOrWhiteSpace(CustomReply);
 
+    private string _paneContent = string.Empty;
+    /// <summary>Terminal text of the agent the pane view is showing.</summary>
+    public string PaneContent { get => _paneContent; private set => Set(ref _paneContent, value); }
+
+    private string _paneInput = string.Empty;
+    public string PaneInput
+    {
+        get => _paneInput;
+        set
+        {
+            if (Set(ref _paneInput, value)) OnPropertyChanged(nameof(CanSendPaneInput));
+        }
+    }
+
+    public bool CanSendPaneInput => !string.IsNullOrWhiteSpace(PaneInput);
+
     public RelayCommand SelectAgentCommand { get; }
+    public RelayCommand ShowPaneCommand { get; }
+    public RelayCommand RefreshPaneCommand { get; }
+    public RelayCommand SendPaneInputCommand { get; }
+    public RelayCommand CopyPaneIdCommand { get; }
     public RelayCommand DismissCommand { get; }
     public RelayCommand ShowSessionListCommand { get; }
     public RelayCommand RespondCommand { get; }
@@ -201,16 +258,42 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     // --- Surface transitions
 
+    /// <summary>
+    /// What a click on a row opens: the approval card when the agent is waiting on an
+    /// answer, its terminal otherwise. macOS routes the second case to `onJump`, which
+    /// focuses the pane in the terminal app on the machine running herdr — not something
+    /// this client can do for an agent reached over SSH.
+    /// </summary>
+    public void OpenAgent(Agent agent)
+    {
+        if (agent.IsBlocked) ShowApproval(agent);
+        else ShowPane(agent);
+    }
+
     public void ShowApproval(Agent agent)
     {
+        _paneTimer.Stop();
         ActiveAgent = agent;
         CustomReply = string.Empty;
         Surface = IslandSurface.Approval;
         SurfaceChanged?.Invoke();
     }
 
+    /// <summary>Open one agent's terminal and keep it refreshing while it is on screen.</summary>
+    public void ShowPane(Agent agent)
+    {
+        ActiveAgent = agent;
+        PaneInput = string.Empty;
+        PaneContent = string.Empty;
+        Surface = IslandSurface.Pane;
+        SurfaceChanged?.Invoke();
+        RefreshPane();
+        _paneTimer.Start();
+    }
+
     public void ShowSessionList()
     {
+        _paneTimer.Stop();
         ActiveAgent = null;
         Surface = IslandSurface.SessionList;
         SurfaceChanged?.Invoke();
@@ -218,6 +301,7 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     public void Collapse()
     {
+        _paneTimer.Stop();
         ActiveAgent = null;
         Surface = IslandSurface.Collapsed;
         SurfaceChanged?.Invoke();
@@ -247,6 +331,52 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         // RelayConnection.Respond routes it through agent_prompt instead.
         _relay.Respond(agent, text);
         ShowSessionList();
+    }
+
+    // --- Pane view
+
+    private void RefreshPane()
+    {
+        if (Surface != IslandSurface.Pane || ActiveAgent is not { } agent)
+        {
+            _paneTimer.Stop();
+            return;
+        }
+        _relay.ReadPane(agent, PaneReadLines);
+    }
+
+    /// <summary>
+    /// A pane read came back. Both transports answer on this event, and a read in flight
+    /// when the surface changed still arrives — hence the check that it is the pane still
+    /// being shown.
+    /// </summary>
+    private void OnPaneContent(string paneId, string content)
+    {
+        if (Surface != IslandSurface.Pane || ActiveAgent?.Id != paneId) return;
+        PaneContent = content.TrimEnd();
+    }
+
+    private void SendPaneInput()
+    {
+        if (ActiveAgent is not { } agent || !CanSendPaneInput) return;
+        var text = PaneInput;
+        PaneInput = string.Empty;
+        _relay.SendPrompt(agent, text);
+        // The submission takes a moment to show up in the pane; pull it early so the
+        // echo appears without waiting out the refresh interval.
+        RefreshPane();
+    }
+
+    private static void CopyToClipboard(string text)
+    {
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception)
+        {
+            // Another process can hold the clipboard open; there is nothing to recover.
+        }
     }
 
     private void RefreshResponseButtons()
@@ -312,6 +442,17 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(HasWorking));
         OnPropertyChanged(nameof(HasIdle));
         OnPropertyChanged(nameof(StatusSummary));
+
+        // A pane that closed while it was on screen has nothing left to read, and the
+        // reads would keep going out every couple of seconds against an id neither
+        // transport still knows.
+        if (Surface == IslandSurface.Pane &&
+            ActiveAgent is { } active &&
+            !_relay.Agents.Contains(active))
+        {
+            ShowSessionList();
+        }
+
         GroupingChanged?.Invoke();
     }
 

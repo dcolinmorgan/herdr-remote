@@ -21,6 +21,14 @@ polling the herdr CLI directly over SSH.
 │  ▌ codex    web                     │
 │  ▌IDLE                          1   │
 └────────────────────────────────────┘
+              ↓ click a row
+┌─ pane ─────────────────────────────┐
+│  ‹ ▌claude · relay        ⟳    ⊘   │
+│  ┌────────────────────────────────┐ │
+│  │ ● Running herdr pane list…     │ │
+│  └────────────────────────────────┘ │
+│  ▏Message this agent…          ↑   │
+└────────────────────────────────────┘
 ```
 
 ## Build
@@ -63,17 +71,19 @@ toasts stop working without it.
 | Remote agents | either mode; the row shows `⇄` and the host it lives on |
 | Blocked-agent toast | Title, body, sound — **plus** permission buttons and a reply box |
 | Answer from the toast | Approve / Deny inline, or type a reply, without opening the island |
-| Top capsule | Hover to expand, blocked agents auto-open the approval card |
+| Top capsule | Hover to expand; collapsed it is click-through and dimmed |
 | Session list | NEEDS YOU / WORKING / IDLE, blocked hoisted to the top |
 | Approval card | diff-highlighted prompt, mapped response buttons, custom reply |
-| Interrupt | ^C to the pane |
+| Pane view | click any row for its live terminal, and a box to message the agent |
+| Row menu | right-click: answer, open terminal, interrupt, copy pane id |
+| Interrupt | ^C to the pane, on the agents it can stop |
 | Tray icon | turns red while any agent is blocked |
 | Reconnect | exponential backoff capped at 30s |
 | Launch at login | per-user `Run` registry key |
 | Self-update | GitHub Releases, same repo and 10-minute throttle as the mac app |
 | Token storage | DPAPI-encrypted (CurrentUser) in `%LOCALAPPDATA%\herdr-remote\settings.json` |
 | Fullscreen awareness | hides while another app is fullscreen or presenting |
-| Keyboard | `Ctrl+Y` Allow · `Ctrl+T` Trust · `Ctrl+N` Deny · `Esc` back |
+| Keyboard | `Ctrl+Y` Allow · `Ctrl+T` Trust · `Ctrl+N` Deny · `Esc` back · `Enter` send |
 
 The toast is deliberately richer than the macOS one: `sendNotification` on macOS
 (`herdi-mac/Sources/RelayConnection.swift:433`) posts text and a sound with no actions,
@@ -83,8 +93,9 @@ so answering there always means opening the panel.
 
 Reads agent state without a relay: every 2 s it runs `herdr pane list` on each configured
 host and merges the results, then reads the pane of anything newly blocked to fill the
-approval card. Answering, interrupting and reading a pane go back out the same way
-(`pane send-text` + `send-keys Enter`, `pane send-keys C-c`, `pane read`).
+approval card. Answering, messaging, interrupting and reading a pane go back out the same
+way (`pane send-text` + `send-keys Enter`, `agent prompt`, `pane send-keys C-c`,
+`pane read`).
 
 The SSH terms are the relay's, not the mac app's — `ssh -o ConnectTimeout=5 -o
 BatchMode=yes <host> $HERDR_REMOTE_BIN …`, a 15 s command timeout, and one command at a
@@ -99,6 +110,7 @@ keeps 6 unfiltered lines instead and therefore renders it differently.
 | Remote hosts come from | relay's `HERDR_REMOTES` | this client's settings |
 | Multi-select questions | sent (relay ignores them today) | unavailable — no CLI verb |
 | Free-text reply | `agent_prompt`, to dodge `SAFE_RESPONSES` | straight to the pane |
+| Pane view | `read_pane` / `agent_prompt` | `pane read` / `agent prompt` |
 | Auth | relay token (DPAPI-encrypted) | SSH key or `ssh-agent` |
 
 **Key auth only.** `BatchMode=yes` forbids every prompt, so the host must accept a key or
@@ -115,13 +127,23 @@ the local host is simply skipped instead of raising the hard error the mac app d
 
 ## Deliberate differences from herdi-mac
 
-**No "Jump to terminal" button.** On macOS this shells out to `herdr workspace focus` +
-`herdr tab focus`. The relay protocol has no equivalent message, and focusing a window is
-only meaningful on the machine running herdr — which in direct mode is an SSH host, not
-this one. The row's interrupt button is kept.
+**A pane view instead of "Jump to terminal".** On macOS a row tap shells out to
+`herdr workspace focus` + `herdr tab focus`. The relay protocol has no equivalent
+message, and focusing a window is only meaningful on the machine running herdr — which
+here is usually an SSH host, not this one. Reading that pane and submitting to it work
+from anywhere, so a row opens the terminal inside the island instead: `read_pane` every
+2 s while it is on screen, and an input box that goes out as `agent_prompt`. Blocked rows
+still open the approval card.
 
-**No notch.** The capsule shape is drawn rather than measured from
-`screen.auxiliaryTopLeftArea`, and it sits on the primary display's top edge.
+**No notch, so the collapsed capsule gets out of the way.** The shape is drawn rather
+than measured from `screen.auxiliaryTopLeftArea`, and it sits on the primary display's
+top edge — over whatever window owns that strip, where macOS has hardware and nothing
+underneath. Collapsed, it therefore carries `WS_EX_TRANSPARENT` so every click reaches
+that window, and it sits at 75 % opacity; expanding takes both back. Hover consequently
+cannot come from `MouseEnter` — a click-through window receives no mouse messages — so it
+is decided by sampling the cursor position every 120 ms. That also fixes a jitter the
+event-driven version had: expanding animates the width and re-centres the window, sweeping
+its edges past a pointer that never moved, and each sweep raised a `MouseLeave`.
 
 **Springs become easing curves.** WPF has no spring animation, so each macOS spring maps
 to the closest-feeling easing: overshoot (`BackEase`) for expand and pop, none
@@ -197,13 +219,14 @@ second copy.
 | `Views/IslandWindow.xaml` | `NotchPanel.swift` |
 | `Views/SessionListView.xaml` | `SessionListContent` |
 | `Views/ApprovalCardView.xaml` | `ApprovalCard` |
+| `Views/PaneView.xaml` | — (stands in for `onJump` / `focusPane`) |
 | `Controls/IslandShape.cs` | `NotchPanelShape` |
 | `ViewModels/ResponseAction.cs` | `ResponseButtonGrid.mapOption` |
 
 ## Status
 
-Compiles clean (`dotnet build`, zero warnings) and publishes to a single exe.
-**Not yet run on Windows** — it was written and compile-verified on Linux, so the
-runtime behaviour that cannot be checked by the compiler is unverified: toast delivery
-and COM activation, the AUMID shortcut, capsule placement across multi-monitor and
-mixed-DPI setups, and the hover feel.
+Compiles clean (`dotnet build`, zero warnings) and publishes to a single exe. Written and
+compile-verified on Linux, so everything the compiler cannot check is unverified until it
+runs on Windows: toast delivery and COM activation, the AUMID shortcut, capsule placement
+across multi-monitor and mixed-DPI setups, the hover feel, and the click-through toggle
+between the collapsed and expanded states.

@@ -29,6 +29,23 @@
                     Padding="10,7"
                     Margin="0,0,0,4"
                     Cursor="Hand">
+
+                <!-- Right-click menu. The items are wired in code-behind rather than to
+                     commands: a ContextMenu lives in its own visual tree, so the
+                     RelativeSource AncestorType hop the row buttons use to reach the view
+                     model does not resolve from inside one. Its DataContext is still the
+                     agent, inherited from the row it is set on. -->
+                <Border.ContextMenu>
+                    <ContextMenu Style="{StaticResource IslandMenu}">
+                        <MenuItem Header="Answer…" Click="OnMenuAnswer"
+                                  Visibility="{Binding IsBlocked, Converter={StaticResource BoolToVis}}" />
+                        <MenuItem Header="Open terminal" Click="OnMenuOpenPane" />
+                        <MenuItem Header="Interrupt (^C)" Click="OnMenuInterrupt"
+                                  Visibility="{Binding CanInterrupt, Converter={StaticResource BoolToVis}}" />
+                        <MenuItem Header="Copy pane id" Click="OnMenuCopyPaneId" />
+                    </ContextMenu>
+                </Border.ContextMenu>
+
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -101,6 +118,19 @@
                                 Opacity="0.6"
                                 ToolTip="Interrupt (^C)"
                                 Command="{Binding DataContext.InterruptCommand,
+                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                CommandParameter="{Binding}"
+                                Visibility="{Binding CanInterrupt, Converter={StaticResource BoolToVis}}" />
+                        <!-- Where macOS puts "Jump to terminal". Opening the pane here is
+                             the same intent for a machine that cannot focus a window on
+                             the host the agent is running on. -->
+                        <Button Style="{StaticResource GlyphButton}"
+                                Content="›"
+                                Foreground="{StaticResource Text60}"
+                                FontSize="15"
+                                FontWeight="Bold"
+                                ToolTip="Open terminal"
+                                Command="{Binding DataContext.ShowPaneCommand,
                                                   RelativeSource={RelativeSource AncestorType=UserControl}}"
                                 CommandParameter="{Binding}" />
                     </StackPanel>
@@ -194,7 +224,8 @@
                                Foreground="{StaticResource Text30}" />
                 </Grid>
                 <ItemsControl ItemsSource="{Binding Working}"
-                              ItemTemplate="{StaticResource AgentRowTemplate}" />
+                              ItemTemplate="{StaticResource AgentRowTemplate}"
+                              PreviewMouseLeftButtonUp="OnRowClicked" />
             </StackPanel>
 
             <!-- IDLE -->
@@ -211,7 +242,8 @@
                                Foreground="{StaticResource Text30}" />
                 </Grid>
                 <ItemsControl ItemsSource="{Binding Idle}"
-                              ItemTemplate="{StaticResource AgentRowTemplate}" />
+                              ItemTemplate="{StaticResource AgentRowTemplate}"
+                              PreviewMouseLeftButtonUp="OnRowClicked" />
             </StackPanel>
 
             <!-- Empty state -->

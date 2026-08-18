@@ -416,6 +416,23 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         agent.ClearPrompt();
     }
 
+    /// <summary>
+    /// Send free-form text to an agent that is not waiting on a permission prompt — the
+    /// pane view's input box. This is `agent_prompt` in both modes: the relay's handler
+    /// runs `herdr agent prompt` (herdr_relay.py:617), and direct mode runs the same verb
+    /// itself, so a message submits the way herdr intends rather than being typed into
+    /// the pane and hoping Enter takes.
+    /// </summary>
+    public void SendPrompt(Agent agent, string text)
+    {
+        var trimmed = text.Trim();
+        if (trimmed.Length == 0) return;
+        if (trimmed.Length > Protocol.MaxPromptLength) trimmed = trimmed[..Protocol.MaxPromptLength];
+
+        if (Mode == ConnectionMode.Direct) _ = ReportAsync(_direct.PromptAsync(agent, trimmed));
+        else Send(Protocol.AgentPrompt(agent.Id, trimmed));
+    }
+
     /// <summary>Send ^C to the pane. The relay's key allowlist spells this "C-c".</summary>
     public void Interrupt(Agent agent)
     {

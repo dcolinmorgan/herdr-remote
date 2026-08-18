@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -36,12 +37,30 @@ public partial class IslandWindow : Window
     private static readonly TimeSpan ExpandDelay = TimeSpan.FromMilliseconds(450);
     private static readonly TimeSpan CollapseDelay = TimeSpan.FromMilliseconds(800);
 
+    /// <summary>
+    /// How often the cursor is sampled. Much faster buys nothing at 60 Hz; much slower and
+    /// the island is visibly late to notice the pointer.
+    /// </summary>
+    private static readonly TimeSpan PointerPollInterval = TimeSpan.FromMilliseconds(120);
+
+    /// <summary>
+    /// Opacity of the collapsed island. On macOS the collapsed panel hides inside the
+    /// notch, where it covers nothing; here it sits on top of whichever window owns the
+    /// top-centre of the screen, so it is toned down to read as an overlay rather than a
+    /// hole punched in that window. Hover and expansion take it back to full.
+    /// </summary>
+    private const double IdleOpacity = 0.75;
+
     private readonly IslandViewModel _vm;
     private readonly DispatcherTimer _hoverTimer = new();
     private readonly DispatcherTimer _presenceTimer = new();
+    private readonly DispatcherTimer _pointerTimer = new();
     private bool _isHovered;
     private bool _prehover;
     private bool _hiddenForFullscreen;
+    private bool _menuOpen;
+    /// <summary>Whether the surface applied last was one the pointer could not close.</summary>
+    private bool _wasSticky;
     /// <summary>Width the last animation aimed at, so a regroup can skip a no-op animation.</summary>
     private double _widthTarget = double.NaN;
 
@@ -54,6 +73,7 @@ public partial class IslandWindow : Window
         // Seed the collapsed width so the first frame is already island-shaped rather than
         // shrink-wrapped around the content, and so Width never starts out Auto.
         Root.Width = _widthTarget = TargetWidth();
+        Root.Opacity = IdleOpacity;
 
         _vm.SurfaceChanged += ApplySurface;
         // Agents appearing or changing group resizes the collapsed island and toggles the
@@ -65,6 +85,9 @@ public partial class IslandWindow : Window
         _presenceTimer.Interval = TimeSpan.FromSeconds(1);
         _presenceTimer.Tick += (_, _) => UpdateFullscreenVisibility();
 
+        _pointerTimer.Interval = PointerPollInterval;
+        _pointerTimer.Tick += OnPointerTick;
+
         SizeChanged += (_, _) => UpdatePosition();
         Deactivated += OnDeactivated;
         Loaded += OnLoaded;
@@ -75,6 +98,7 @@ public partial class IslandWindow : Window
         ApplySurface();
         UpdatePosition();
         _presenceTimer.Start();
+        _pointerTimer.Start();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -85,6 +109,7 @@ public partial class IslandWindow : Window
         // NSWindow's .ignoresCycle collection behaviour.
         var exStyle = GetWindowLong(handle, GwlExStyle);
         SetWindowLong(handle, GwlExStyle, exStyle | WsExToolWindow);
+        ApplyClickThrough();
     }
 
     // --- Positioning
@@ -111,12 +136,7 @@ public partial class IslandWindow : Window
                 transform?.M22 is > 0 ? transform.Value.M22 : 1.0);
     }
 
-    /// <summary>
-    /// Is the pointer geometrically over the island? MouseLeave on its own is not enough to
-    /// decide: opening animates the width and re-centres the window, which sweeps its edges
-    /// past a pointer that never moved, and each such sweep reads as a departure. Checking
-    /// the cursor instead of the hit test keeps those from collapsing the island.
-    /// </summary>
+    /// <summary>Is the pointer geometrically over the island?</summary>
     private bool PointerOverIsland()
     {
         var (scaleX, scaleY) = DeviceScale();
@@ -125,25 +145,45 @@ public partial class IslandWindow : Window
             .Contains(new Point(cursor.X / scaleX, cursor.Y / scaleY));
     }
 
-    // --- Hover state machine (handleHover, NotchContentView.swift:140)
-
-    private void OnRootMouseEnter(object sender, MouseEventArgs e)
+    /// <summary>
+    /// Let clicks through while the island is collapsed. Collapsed it is signage, pinned
+    /// over the top-centre of the screen where tab strips and title bars live, and a
+    /// window that swallowed every click landing there would be worse than the notch it
+    /// stands in for — a notch is hardware, with nothing underneath it to click. Expanded,
+    /// the island is the thing being used, so it takes its input back.
+    /// </summary>
+    private void ApplyClickThrough()
     {
-        // Never collapse or re-trigger while an approval is being answered.
-        if (_vm.Surface == IslandSurface.Approval) return;
-
-        _isHovered = true;
-        SetPrehover(true);
-        RestartHoverTimer(ExpandDelay);
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        var style = GetWindowLong(handle, GwlExStyle);
+        var updated = _vm.IsExpanded ? style & ~WsExTransparent : style | WsExTransparent;
+        if (updated != style) SetWindowLong(handle, GwlExStyle, updated);
     }
 
-    private void OnRootMouseLeave(object sender, MouseEventArgs e)
-    {
-        if (_vm.Surface == IslandSurface.Approval) return;
+    // --- Hover state machine (handleHover, NotchContentView.swift:140)
 
-        _isHovered = false;
-        SetPrehover(false);
-        RestartHoverTimer(CollapseDelay);
+    /// <summary>
+    /// Hover is decided from where the cursor is, not from MouseEnter/MouseLeave. Two
+    /// reasons: the collapsed island is click-through and so receives no mouse messages at
+    /// all, and expanding animates the width and re-centres the window, sweeping its edges
+    /// past a pointer that never moved — each sweep raising a leave that would start
+    /// closing the thing the user is reaching for.
+    /// </summary>
+    private void OnPointerTick(object? sender, EventArgs e)
+    {
+        if (_hiddenForFullscreen) return;
+
+        var over = PointerOverIsland();
+        if (over == _isHovered) return;
+        _isHovered = over;
+
+        // A surface being worked in ignores the pointer, and while a context menu is up
+        // the pointer is legitimately off the island.
+        if (_vm.IsSticky || _menuOpen) return;
+
+        SetPrehover(over);
+        RestartHoverTimer(over ? ExpandDelay : CollapseDelay);
     }
 
     private void RestartHoverTimer(TimeSpan delay)
@@ -156,21 +196,16 @@ public partial class IslandWindow : Window
     private void OnHoverTimerTick(object? sender, EventArgs e)
     {
         _hoverTimer.Stop();
-        if (_vm.Surface == IslandSurface.Approval) return;
-
+        if (_vm.IsSticky || _menuOpen) return;
         if (_isHovered)
         {
             _vm.ShowSessionList();
         }
-        else if (_vm.IsExpanded && PointerOverIsland())
-        {
-            // The pointer is still on the island, so the leave was the window moving rather
-            // than the user. WPF will not raise another leave from here, so keep watching
-            // for the real departure instead of shutting under a pointer that stayed put.
-            RestartHoverTimer(CollapseDelay);
-        }
         else
         {
+            // Clear the prehover widening first: it is still set from the way in, and
+            // Collapse() sizes the island from it on the way out.
+            SetPrehover(false);
             _vm.Collapse();
         }
     }
@@ -180,7 +215,25 @@ public partial class IslandWindow : Window
     {
         if (_prehover == on) return;
         _prehover = on;
-        if (!_vm.IsExpanded) AnimateWidth(TargetWidth(), MicroEase());
+        if (_vm.IsExpanded) return;
+        AnimateWidth(TargetWidth(), MicroEase());
+        AnimateOpacity(on ? 1.0 : IdleOpacity, MicroEase());
+    }
+
+    // A row's context menu opens in its own window, which deactivates this one and puts
+    // the pointer outside the island — both of which otherwise mean "collapse".
+    private void OnContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        _menuOpen = true;
+        _hoverTimer.Stop();
+    }
+
+    private void OnContextMenuClosing(object sender, ContextMenuEventArgs e)
+    {
+        _menuOpen = false;
+        // Give the usual grace period rather than deciding from wherever the pointer
+        // happens to be the instant the menu goes away.
+        if (!_vm.IsSticky) RestartHoverTimer(CollapseDelay);
     }
 
     private void OnDeactivated(object? sender, EventArgs e)
@@ -188,13 +241,14 @@ public partial class IslandWindow : Window
         // Clicking outside collapses the island — the role of the global click monitor
         // installed in showPanel() on macOS. An in-flight approval survives, matching
         // the `if case .approval` guard there.
-        if (_vm.Surface == IslandSurface.Approval) return;
+        if (_vm.Surface == IslandSurface.Approval || _menuOpen) return;
         // Focus can also leave while the pointer is still on the island: pressing a button
         // there activates the window, and whatever it was stolen from deactivates in turn.
         // That is not a click elsewhere, so the island stays open.
         if (PointerOverIsland()) return;
         _isHovered = false;
         _hoverTimer.Stop();
+        SetPrehover(false);
         _vm.Collapse();
     }
 
@@ -203,6 +257,17 @@ public partial class IslandWindow : Window
     private void ApplySurface()
     {
         var expanded = _vm.IsExpanded;
+
+        // Backing out of a surface that ignored the pointer, the hover state can be stale:
+        // the poll acts on transitions, and one that happened while the island was sticky
+        // left no timer behind. Without this the island stays open under a pointer that
+        // left minutes ago. Only on the way out of sticky — an island opened from the tray
+        // with the pointer nowhere near it is meant to stay up until a click elsewhere.
+        if (_wasSticky && !_vm.IsSticky && expanded && !_isHovered && !_menuOpen)
+        {
+            RestartHoverTimer(CollapseDelay);
+        }
+        _wasSticky = _vm.IsSticky;
 
         Divider.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         ExpandedHost.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
@@ -213,6 +278,8 @@ public partial class IslandWindow : Window
         var easing = _vm.Surface == IslandSurface.Approval ? PopEase() : (expanded ? OpenEase() : CloseEase());
         AnimateWidth(TargetWidth(), easing);
         AnimateShape(expanded ? 14 : 3, expanded ? 24 : 12, easing);
+        AnimateOpacity(expanded || _isHovered ? 1.0 : IdleOpacity, easing);
+        ApplyClickThrough();
 
         if (_vm.Surface == IslandSurface.Approval)
         {
@@ -220,6 +287,11 @@ public partial class IslandWindow : Window
             Activate();
             Dispatcher.BeginInvoke(new Action(() => ApprovalCard.FocusReply()),
                 DispatcherPriority.Input);
+        }
+        else if (_vm.Surface == IslandSurface.Pane)
+        {
+            Activate();
+            Dispatcher.BeginInvoke(new Action(() => Pane.FocusInput()), DispatcherPriority.Input);
         }
     }
 
@@ -269,6 +341,16 @@ public partial class IslandWindow : Window
             FillBehavior = FillBehavior.HoldEnd,
         };
         Root.BeginAnimation(WidthProperty, animation);
+    }
+
+    private void AnimateOpacity(double target, IEasingFunction easing)
+    {
+        Root.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(target, Duration(easing))
+            {
+                EasingFunction = easing,
+                FillBehavior = FillBehavior.HoldEnd,
+            });
     }
 
     private void AnimateShape(double extension, double radius, IEasingFunction easing)
@@ -352,7 +434,9 @@ public partial class IslandWindow : Window
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
         base.OnPreviewKeyDown(e);
-        if (_vm.Surface != IslandSurface.Approval) return;
+        // Esc backs out of either worked-in surface; the response shortcuts belong to the
+        // approval card alone.
+        if (!_vm.IsSticky) return;
 
         if (e.Key == Key.Escape)
         {
@@ -361,6 +445,7 @@ public partial class IslandWindow : Window
             return;
         }
 
+        if (_vm.Surface != IslandSurface.Approval) return;
         if ((Keyboard.Modifiers & ModifierKeys.Control) == 0) return;
 
         // Ctrl-based equivalents of the ⌘ shortcuts ResponseAction advertises.
@@ -386,6 +471,7 @@ public partial class IslandWindow : Window
 
     private const int GwlExStyle = -20;
     private const int WsExToolWindow = 0x00000080;
+    private const int WsExTransparent = 0x00000020;
 
     private const int QunsBusy = 2;
     private const int QunsRunningD3DFullScreen = 3;

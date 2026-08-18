@@ -53,6 +53,7 @@ public sealed class Agent : INotifyPropertyChanged
             {
                 OnPropertyChanged(nameof(IsBlocked));
                 OnPropertyChanged(nameof(IsWorking));
+                OnPropertyChanged(nameof(CanInterrupt));
             }
         }
     }
@@ -105,6 +106,12 @@ public sealed class Agent : INotifyPropertyChanged
     public bool IsBlocked => Status == AgentStatus.Blocked;
     public bool IsWorking => Status == AgentStatus.Working;
     public bool IsRemote => !string.Equals(Host, "local", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// ^C is offered on the agents it can actually stop. An idle pane has nothing to
+    /// interrupt, and AgentSessionRow hides the button there too (NotchContentView.swift:500).
+    /// </summary>
+    public bool CanInterrupt => Status is AgentStatus.Working or AgentStatus.Blocked;
 
     /// <summary>Display label: project when known, else the raw cwd.</summary>
     public string DisplayLocation => string.IsNullOrEmpty(Project) ? Cwd : Project;

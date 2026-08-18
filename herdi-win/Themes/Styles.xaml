@@ -152,8 +152,11 @@
                             BorderThickness="0.7"
                             CornerRadius="8">
                         <Grid>
+                            <!-- Placeholder text comes from Tag: the same box asks for a
+                                 permission reply on the approval card and for a message
+                                 on the pane view. -->
                             <TextBlock x:Name="Placeholder"
-                                       Text="Custom reply…"
+                                       Text="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}"
                                        Margin="10,0"
                                        VerticalAlignment="Center"
                                        Foreground="{StaticResource Text30}"
@@ -174,6 +177,62 @@
                             <Setter TargetName="Placeholder" Property="Visibility" Value="Visible" />
                         </MultiTrigger>
                     </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Right-click menu on an agent row. Retemplated rather than merely recoloured: the
+         stock Aero2 menu is a light grey slab with a blue highlight, which reads as a
+         different application entirely when it opens over the black island. -->
+    <Style x:Key="IslandMenuItem" TargetType="MenuItem">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{StaticResource Text90}" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Padding" Value="10,6" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <Border x:Name="Bd"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="5"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter ContentSource="Header"
+                                          RecognizesAccessKey="True"
+                                          VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource Fill06}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.35" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="IslandMenu" TargetType="ContextMenu">
+        <Setter Property="Background" Value="#F21C1C1E" />
+        <Setter Property="BorderBrush" Value="{StaticResource Stroke15}" />
+        <Setter Property="BorderThickness" Value="0.7" />
+        <Setter Property="Padding" Value="4" />
+        <Setter Property="ItemContainerStyle" Value="{StaticResource IslandMenuItem}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContextMenu">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="8"
+                            Padding="{TemplateBinding Padding}">
+                        <StackPanel IsItemsHost="True"
+                                    KeyboardNavigation.DirectionalNavigation="Cycle" />
+                    </Border>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
