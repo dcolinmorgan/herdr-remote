@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Herdi.Models;
 using Herdi.Services;
@@ -9,7 +10,8 @@ namespace Herdi;
 
 /// <summary>
 /// Application entry point. Port of herdi-mac's HerdiApp + HerdiAppDelegate
-/// (Sources/HerdiMacApp.swift): no main window, a tray icon, and the island panel.
+/// (Sources/HerdiMacApp.swift): no main window, a tray icon, and the island flyout that
+/// hangs off it.
 /// </summary>
 public partial class App : Application
 {
@@ -47,10 +49,14 @@ public partial class App : Application
         _vm = new IslandViewModel(_relay, _updater);
 
         _island = new IslandWindow(_vm, _settings);
-        _island.Show();
+        // Built but not shown: the flyout is summoned from the tray. Creating the handle up
+        // front keeps the first click as quick as every one after it, and gets the window's
+        // extended styles applied before anyone can see it.
+        new WindowInteropHelper(_island).EnsureHandle();
 
         _tray = new TrayIconHost(_vm, _settings, _updater);
         _tray.ShowIslandRequested += () => _island?.ShowIsland();
+        _tray.ToggleIslandRequested += () => _island?.ToggleIsland();
         _tray.QuitRequested += Shutdown;
         _tray.SettingsSaved += () =>
         {
@@ -59,7 +65,8 @@ public partial class App : Application
             // nothing and covers a save that skipped the preview path.
             _island?.ApplyAppearance(_settings.Appearance);
         };
-        _tray.AppearancePreviewed += appearance => _island?.ApplyAppearance(appearance);
+        _tray.AppearancePreviewed += appearance => _island?.PreviewAppearance(appearance);
+        _tray.SettingsClosed += () => _island?.EndAppearancePreview();
 
         // Notifications are optional: if the shortcut or COM registration fails the app
         // still works, it just cannot toast.
@@ -91,8 +98,10 @@ public partial class App : Application
 
         if (action.Kind == "open")
         {
+            // Clicking the toast is the user asking for the flyout, so unlike the automatic
+            // pop this one may take focus and stays until dismissed.
             var target = _relay.Find(action.PaneId);
-            if (target is not null) _island?.PopForBlocked(target);
+            if (target is not null) _island?.ShowApproval(target);
             else _island?.ShowIsland();
             return;
         }

@@ -111,7 +111,6 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     public bool IsConnected => _relay.IsConnected;
     public int AgentCount => _relay.Agents.Count;
-    public bool IsActive => _relay.Agents.Count > 0;
     public bool HasNoAgents => _relay.Agents.Count == 0;
 
     // Section visibility goes through these rather than binding a converter straight at
@@ -248,13 +247,6 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     /// <summary>Raised when the surface changes so the window can resize and animate.</summary>
     public event Action? SurfaceChanged;
-
-    /// <summary>
-    /// Raised when the agent grouping changed. The collapsed island's width and its
-    /// working indicator depend on how many agents there are, which moves independently
-    /// of the surface, so the window has to re-apply them here too.
-    /// </summary>
-    public event Action? GroupingChanged;
 
     // --- Surface transitions
 
@@ -436,7 +428,6 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         Sync(Idle, _relay.Agents.Where(a => a.Status is AgentStatus.Idle or AgentStatus.Unknown));
 
         OnPropertyChanged(nameof(AgentCount));
-        OnPropertyChanged(nameof(IsActive));
         OnPropertyChanged(nameof(HasNoAgents));
         OnPropertyChanged(nameof(HasBlocked));
         OnPropertyChanged(nameof(HasWorking));
@@ -452,8 +443,6 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         {
             ShowSessionList();
         }
-
-        GroupingChanged?.Invoke();
     }
 
     /// <summary>Reconcile in place so WPF keeps row identity (and hover state) stable.</summary>

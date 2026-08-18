@@ -1,19 +1,14 @@
 # herdi-win
 
-Windows desktop client for [herdr-remote](../README.md) — a tray icon plus a Dynamic
-Island-style capsule pinned to the top edge of the screen, with native toast
-notifications when an agent needs you.
+Windows desktop client for [herdr-remote](../README.md) — a tray icon whose panel flies
+out above the notification area, with native toast notifications when an agent needs you.
 
 Port of [`herdi-mac`](../herdi-mac), both of its sources: a WebSocket to the relay, or
 polling the herdr CLI directly over SSH.
 
 ```
-┌─ collapsed ────────────────────────┐
-│    ═════╡ ● ⚠2 ●3  5 ╞═════        │  top edge of the primary display
-└────────────────────────────────────┘
-              ↓ hover 0.45s
-┌─ expanded ─────────────────────────┐
-│  ● ▏ herdr ▕                       │
+┌─ session list ─────────────────────┐
+│  ● ⚠2 ●3      herdr          5  ✕  │
 │  ─────────────────────────────────  │
 │  ▌NEEDS YOU                     1   │
 │  ▌ claude   relay — Do you want…    │
@@ -29,7 +24,25 @@ polling the herdr CLI directly over SSH.
 │  └────────────────────────────────┘ │
 │  ▏Message this agent…          ↑   │
 └────────────────────────────────────┘
+                  ▲
+   ┌──────────────┴──────────────────┐
+   │ ▪ ▪ ▪                  ^ ⌂ 🐕 🕐 │  taskbar — click the tray icon
+   └─────────────────────────────────┘
 ```
+
+Click the tray icon to open it, click it again — or anywhere else, or press `Esc` — to
+put it away. Nothing sits on top of your windows while it is closed: the tray icon *is* the
+resting state, and it carries a live count so a glance tells you whether opening it is
+worth it.
+
+```
+🐕      nothing running, or everything idle
+🐕③     3 agents working — dark disc, green digit
+🐕❶     1 agent waiting on you — red disc, white digit
+🐕➕     more than 9; the tooltip has the number
+```
+
+Hover for the full breakdown: `Herdi — 2 waiting on you · 3 working · 1 idle`.
 
 ## Build
 
@@ -56,9 +69,9 @@ Output lands in `dist\<arch>\Herdi.exe`.
      `wss://` tunnel URL) and the token if the relay requires one.
    - **Direct (herdr CLI + SSH)** — enter one SSH target per line, e.g. `user@devbox`.
      No relay needed. See [Direct mode](#direct-mode) for the auth requirement.
-3. Tray → **Settings…** → **Island Appearance** to set the capsule's colour and how
-   see-through it is at rest and once expanded. It previews on the real island as you
-   drag, since transparency only makes sense against whatever is behind it.
+3. Tray → **Settings…** → **Panel Appearance** to set the panel's colour and how
+   see-through it is. The panel comes out while you drag so you can see it against
+   whatever is behind it, and Cancel puts it back.
 4. Tray → **Launch at Login** to start with Windows.
 
 First run writes a Start Menu shortcut named *Herdi*. **Don't delete it** — Windows
@@ -73,21 +86,23 @@ toasts stop working without it.
 | Direct mode | polls `herdr pane list` here — locally and over SSH — with no relay |
 | Remote agents | either mode; the row shows `⇄` and the host it lives on |
 | Blocked-agent toast | Title, body, sound — **plus** permission buttons and a reply box |
-| Answer from the toast | Approve / Deny inline, or type a reply, without opening the island |
-| Top capsule | Hover to expand; collapsed it is click-through and dimmed |
-| Appearance | Island colour plus separate collapsed / expanded opacity, previewed live |
+| Answer from the toast | Approve / Deny inline, or type a reply, without opening the panel |
+| Tray flyout | click the icon to open, again (or away, or `Esc`) to close; nothing on screen in between |
+| Taskbar aware | anchors to the notification-area corner for a taskbar on any of the four edges, at any DPI |
+| Appearance | panel colour and opacity, previewed on the real panel |
 | Session list | NEEDS YOU / WORKING / IDLE, blocked hoisted to the top |
 | Approval card | diff-highlighted prompt, mapped response buttons, custom reply |
 | Pane view | click any row for its live terminal, and a box to message the agent |
 | Row menu | right-click: answer, open terminal, interrupt, copy pane id |
 | Interrupt | ^C to the pane, on the agents it can stop |
-| Tray icon | turns red while any agent is blocked |
+| Tray icon | live count badge: red while agents are blocked, green while they work |
+| Tray tooltip | the full breakdown — `2 waiting on you · 3 working · 1 idle` |
 | Reconnect | exponential backoff capped at 30s |
 | Launch at login | per-user `Run` registry key |
 | Self-update | GitHub Releases, same repo and 10-minute throttle as the mac app |
 | Token storage | DPAPI-encrypted (CurrentUser) in `%LOCALAPPDATA%\herdr-remote\settings.json` |
-| Fullscreen awareness | hides while another app is fullscreen or presenting |
-| Keyboard | `Ctrl+Y` Allow · `Ctrl+T` Trust · `Ctrl+N` Deny · `Esc` back · `Enter` send |
+| Fullscreen awareness | a blocked agent does not pop the panel while another app is fullscreen or presenting |
+| Keyboard | `Ctrl+Y` Allow · `Ctrl+T` Trust · `Ctrl+N` Deny · `Esc` back / close · `Enter` send |
 
 The toast is deliberately richer than the macOS one: `sendNotification` on macOS
 (`herdi-mac/Sources/RelayConnection.swift:433`) posts text and a sound with no actions,
@@ -135,25 +150,55 @@ the local host is simply skipped instead of raising the hard error the mac app d
 `herdr workspace focus` + `herdr tab focus`. The relay protocol has no equivalent
 message, and focusing a window is only meaningful on the machine running herdr — which
 here is usually an SSH host, not this one. Reading that pane and submitting to it work
-from anywhere, so a row opens the terminal inside the island instead: `read_pane` every
+from anywhere, so a row opens the terminal inside the panel instead: `read_pane` every
 2 s while it is on screen, and an input box that goes out as `agent_prompt`. Blocked rows
 still open the approval card.
 
-**No notch, so the collapsed capsule gets out of the way.** The shape is drawn rather
-than measured from `screen.auxiliaryTopLeftArea`, and it sits on the primary display's
-top edge — over whatever window owns that strip, where macOS has hardware and nothing
-underneath. Collapsed, it therefore carries `WS_EX_TRANSPARENT` so every click reaches
-that window, and it sits at 75 % opacity; expanding takes both back. Both opacities and
-the fill colour are preferences here rather than the constants they are on macOS — a
-panel hiding inside a notch covers nothing and has nothing to tune. Hover consequently
-cannot come from `MouseEnter` — a click-through window receives no mouse messages — so it
-is decided by sampling the cursor position every 120 ms. That also fixes a jitter the
-event-driven version had: expanding animates the width and re-centres the window, sweeping
-its edges past a pointer that never moved, and each sweep raised a `MouseLeave`.
+**No notch, so it is a tray flyout rather than a top-edge capsule.** macOS anchors its
+panel to the notch — hardware, with nothing underneath it — so it can live at the top edge
+permanently and open on hover. Windows has no notch. A capsule pinned to the top edge sits
+over whatever window owns that strip (tab strips, title bars, the ribbon), and hover is the
+wrong trigger for something the pointer crosses on its way somewhere else. Windows already
+has an always-visible status surface for a background app — the tray icon, which is here
+anyway and already carries the state (red while blocked, counts in the tooltip) — so it
+takes the collapsed island's job, and the panel becomes the flyout that hangs off it, the
+shape Windows uses for its own network and volume panels.
+
+What follows from that:
+
+- **Click, not hover.** Left-click the icon to open, again to close. There is no collapsed
+  state to widen, no expand delay, and no cursor polling: the flyout is either up or absent.
+- **Nothing on top of your windows while it is closed.** `WS_EX_TRANSPARENT` click-through
+  went with the capsule — a hidden window intercepts nothing, so it does not need to be
+  made transparent to input.
+- **Clicking away dismisses it, even mid-approval.** macOS exempts an open approval card
+  from its global click monitor. Here it cannot be: the flyout is topmost, borderless and
+  has no taskbar button, so one that refuses to leave when it loses focus is one with no
+  way out. The toast carries the same buttons and reply box, and the flyout is one click
+  away again.
+- **Anchored to the taskbar, wherever it is.** `ABM_GETTASKBARPOS` gives the bar's edge and
+  rectangle, the notification area is always at its trailing end, and the result is clamped
+  into that display's work area — so a bar docked left, right, top or bottom, on a
+  non-primary display, at any DPI, all land correctly. `Shell_NotifyIconGetRect` would give
+  the icon's own rectangle, but it needs the window handle and id WinForms' `NotifyIcon`
+  keeps private, and it reports the overflow chevron once the user hides the icon.
+- **One opacity instead of two.** With no resting capsule there is no resting opacity to
+  tune. A `settings.json` from an older build has its expanded value carried over and its
+  collapsed one dropped.
+
+**A blocked agent announces itself without stealing focus.** macOS pops the approval card
+outright (`observeBlockedAgents`, `HerdiMacApp.swift:180`), which it can afford because a
+notch panel covers nothing when it opens. Here the flyout appears without taking the
+keyboard — `SetForegroundWindow` is restricted on Windows precisely because pulling focus
+out from under a typist is hostile — and takes itself away again after 12 s if nobody
+comes. The pointer settling on it, a click, or a keystroke cancels that. Suppressed
+entirely while `SHQueryUserNotificationState` reports a game, a presentation or Focus
+Assist, which is where Windows holds its own toasts back.
 
 **Springs become easing curves.** WPF has no spring animation, so each macOS spring maps
-to the closest-feeling easing: overshoot (`BackEase`) for expand and pop, none
-(`CubicEase`) for collapse.
+to the closest-feeling easing — `CubicEase` out for the flyout's slide-and-fade entrance,
+quicker on the way out. The entrance is shorter than the notch panel's expansion (180 ms
+against 420): a window appearing is not a shape growing.
 
 **Icon font avoided.** Response buttons use plain Unicode symbols instead of SF Symbols'
 Windows analogue. Segoe MDL2 Assets and Segoe Fluent Icons differ in glyph coverage
@@ -162,10 +207,12 @@ between Windows 10 and 11; text symbols render the same on both.
 **One settings dialog.** The mac app spreads the same choices across its status menu (a
 Direct/Relay toggle, an add-remote sheet) plus `UserDefaults` keys it never surfaces, and
 it has no way to type a relay URL at all. Here the source, the relay URL and token, the
-SSH hosts, the herdr path and the island's appearance live in one dialog, and the choices
-are remembered across launches. The appearance controls apply to the live island while
-the dialog is open and are rolled back on Cancel; opacity is clamped to ≥ 20 % so a
-mis-drag cannot make the island impossible to find.
+SSH hosts, the herdr path and the panel's appearance live in one dialog, and the choices
+are remembered across launches. The appearance controls apply to the live panel while the
+dialog is open — bringing it out if it is closed, since translucency can only be judged
+against what is behind it — and are rolled back on Cancel. Opacity is clamped to ≥ 20 % so
+a mis-drag cannot make the panel unreadable, and the dialog is reached from the tray rather
+than from the panel, so nothing set here can lock you out.
 
 **Multi-select is relay-only.** `question_toggle` / `question_submit` are relay-protocol
 messages with no herdr CLI verb behind them, so the checkboxes are inert in direct mode
@@ -222,6 +269,8 @@ second copy.
 | `Services/ToastService.cs` | `sendNotification` + toast actions |
 | `Services/ShortcutHelper.cs` | — (no macOS equivalent needed) |
 | `Services/TrayIconHost.cs` | `NSStatusItem` + `rebuildMenu` |
+| `Services/TrayIconRenderer.cs` | — (macOS swaps SF Symbols; no count on the status item) |
+| `Services/TaskbarInfo.cs` | — (macOS anchors to the notch; nothing to locate) |
 | `Services/Updater.cs` | `Updater.swift` |
 | `Services/SettingsStore.cs` | `UserDefaults` + Keychain |
 | `Services/IslandAppearance.cs` | — (macOS hides the panel in the notch; nothing to tune) |
@@ -229,14 +278,31 @@ second copy.
 | `Views/SessionListView.xaml` | `SessionListContent` |
 | `Views/ApprovalCardView.xaml` | `ApprovalCard` |
 | `Views/PaneView.xaml` | — (stands in for `onJump` / `focusPane`) |
-| `Controls/IslandShape.cs` | `NotchPanelShape` |
 | `ViewModels/ResponseAction.cs` | `ResponseButtonGrid.mapOption` |
 
 ## Status
 
 Compiles clean (`dotnet build`, zero warnings) and publishes to a single exe. Written and
 compile-verified on Linux, so everything the compiler cannot check is unverified until it
-runs on Windows: toast delivery and COM activation, the AUMID shortcut, capsule placement
-across multi-monitor and mixed-DPI setups, the hover feel, the click-through toggle
-between the collapsed and expanded states, and the settings dialog's retemplated sliders
-and colour picker.
+runs on Windows: toast delivery and COM activation, the AUMID shortcut, flyout placement
+against a taskbar on each of the four edges and across multi-monitor and mixed-DPI setups,
+whether a tray click that dismisses the flyout is reliably swallowed rather than reopening
+it, the slide-in feel, and the settings dialog's retemplated sliders and colour picker.
+
+The badge geometry *was* checked: the disc fraction, ring width, digit size and the colour
+pairing were each chosen by rendering the real .ico frames at 16 / 20 / 24 / 32 px through an
+equivalent rasteriser and reading the result, against both a dark and a light taskbar. Three
+things came out of that which a swatch would not have given:
+
+- A green disc on the glyph's own green turns to mush by 20 px, hence the working badge being
+  a dark disc carrying a *green digit* rather than the obvious way round.
+- 0.66 of the icon buries the sheep and 0.52 is illegible; 0.64 keeps both.
+- The digit's em wants to be about the disc's full inner diameter (0.98), not the 0.82 it
+  started at — a digit is only its cap height, so a smaller em was giving up legibility for
+  nothing. That in turn forced the point-centred `DrawString` overload: the rectangle one
+  clips, and at this size the line box is taller than the disc.
+
+What is still unverified is GDI+ itself — its antialiasing, and whether Segoe UI Bold hints
+the same way at these pixel sizes as the font the preview was rendered with. Vertical
+centring is left to `StringAlignment.Center` with no nudge, which is what the preview
+showed; if digits sit high on real hardware it is one constant.

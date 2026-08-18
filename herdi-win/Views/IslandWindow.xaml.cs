@@ -13,57 +13,85 @@ using Herdi.ViewModels;
 namespace Herdi.Views;
 
 /// <summary>
-/// The island itself: a borderless always-on-top capsule pinned to the top edge of the
-/// primary display. Port of herdi-mac's PanelWindowController + NotchPanel
-/// (Sources/NotchPanel.swift).
+/// The island: a tray flyout. Hidden until the tray icon is clicked, then anchored to the
+/// notification-area corner of the taskbar, dismissed by clicking away — the shape Windows
+/// itself uses for the network, volume and battery panels, and that Teams, Slack and
+/// OneDrive use for theirs.
 ///
-/// Windows has no notch, so the shape is self-drawn rather than derived from
-/// screen.auxiliaryTopLeftArea, and the window is sized to its content so there is
-/// almost no invisible area to intercept clicks.
+/// Port of herdi-mac's PanelWindowController + NotchPanel (Sources/NotchPanel.swift), with
+/// its one structural divergence: macOS anchors that panel to the notch, which is hardware
+/// with nothing underneath it, so the panel can live at the top edge permanently and open
+/// on hover. Windows has no notch. A capsule pinned to the top edge sits over whatever
+/// window owns that strip — tab strips, title bars, the ribbon — and hover is the wrong
+/// trigger for something the pointer crosses on its way elsewhere. The tray icon is the
+/// platform's own always-visible status surface and it is already carrying the state
+/// (red while blocked, counts in the tooltip), so it takes the collapsed island's job and
+/// the panel becomes a flyout that hangs off it.
 /// </summary>
 public partial class IslandWindow : Window
 {
-    // Collapsed geometry. CapsuleWidth stands in for the physical notch width macOS
-    // reports; the wings hold the status indicators either side of it.
-    private const double CapsuleWidth = 120;
-    private const double Wing = 50;
-    private const double BlockedExtra = 20;
-    private const double PrehoverExtra = 6;
-    private const double ExpandedWidth = 580;
+    /// <summary>
+    /// Transparent ring around the card for the drop shadow to fall into. Applied to Card's
+    /// margin from here rather than in XAML so the positioning maths cannot drift from it.
+    /// </summary>
+    private const double ShadowMargin = 14;
 
-    // Hover timings from HoverTiming (NotchContentView.swift:10). The collapse delay is
-    // the one divergence: macOS trackpads glide, while a mouse at the very top edge of the
-    // screen jitters, and every twitch that clips the island's edge would otherwise start
-    // shutting it 500 ms later.
-    private static readonly TimeSpan ExpandDelay = TimeSpan.FromMilliseconds(450);
-    private static readonly TimeSpan CollapseDelay = TimeSpan.FromMilliseconds(800);
+    /// <summary>Clearance between the card and both the taskbar and the screen edges.</summary>
+    private const double Gap = 8;
+
+    /// <summary>How far the card travels on its way in, along the taskbar's axis.</summary>
+    private const double SlideDistance = 24;
 
     /// <summary>
-    /// How often the cursor is sampled. Much faster buys nothing at 60 Hz; much slower and
-    /// the island is visibly late to notice the pointer.
+    /// How long a flyout that appeared on its own stays up. Only the automatic path arms
+    /// this: a flyout the user opened is dismissed by clicking away, and one they are
+    /// reading or typing into has focus, which disarms it.
     /// </summary>
-    private static readonly TimeSpan PointerPollInterval = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan AutoHideDelay = TimeSpan.FromSeconds(12);
+
+    /// <summary>
+    /// How long after a dismissal a tray click is still treated as part of that dismissal.
+    /// Clicking the icon while the flyout is up deactivates it first — the flyout hides
+    /// itself — and the click then arrives at the tray, where reopening would make the icon
+    /// look dead. Anything inside this window is swallowed instead.
+    /// </summary>
+    private static readonly TimeSpan ReopenGuard = TimeSpan.FromMilliseconds(400);
 
     private readonly IslandViewModel _vm;
-    private readonly DispatcherTimer _hoverTimer = new();
-    private readonly DispatcherTimer _presenceTimer = new();
-    private readonly DispatcherTimer _pointerTimer = new();
-    private bool _isHovered;
-    private bool _prehover;
-    private bool _hiddenForFullscreen;
+    private readonly DispatcherTimer _autoHide = new();
+
+    /// <summary>Set while the row context menu is up, which deactivates this window.</summary>
     private bool _menuOpen;
-    /// <summary>Whether the surface applied last was one the pointer could not close.</summary>
-    private bool _wasSticky;
-    /// <summary>Width the last animation aimed at, so a regroup can skip a no-op animation.</summary>
-    private double _widthTarget = double.NaN;
+
+    /// <summary>Set while the fade-out is running, and cleared by anything that re-shows.</summary>
+    private bool _closing;
 
     /// <summary>
-    /// Colour and the two opacity levels, from Settings. On macOS the collapsed panel
-    /// hides inside the notch, where it covers nothing and its look is not worth a
-    /// preference; here it sits on top of whichever window owns the top-centre of the
-    /// screen, so the default is toned down to read as an overlay rather than a hole
-    /// punched in that window — and how far down is the user's to change.
+    /// Whether this flyout may take the keyboard. False for the automatic pop: an agent
+    /// going blocked must not pull focus out of whatever the user is typing in — that is
+    /// what the toast is for, and it carries the same buttons and reply box.
     /// </summary>
+    private bool _allowFocus;
+
+    /// <summary>
+    /// Set while the flyout is up on its own initiative rather than the user's, which is the
+    /// only state <see cref="_autoHide"/> runs in. Tracked separately from
+    /// <see cref="_allowFocus"/> rather than inferred from it, because whether WPF honours
+    /// ShowActivated on a re-show is not something to hang a timeout on: an announcement
+    /// that ends up with focus anyway must still take itself away, and only a click, a
+    /// keystroke or the pointer settling on it counts as somebody arriving.
+    /// </summary>
+    private bool _announcing;
+
+    /// <summary>Set while the flyout is only up so the settings dialog can preview it.</summary>
+    private bool _previewing;
+
+    /// <summary>When the flyout last finished hiding, for <see cref="ReopenGuard"/>.</summary>
+    private DateTime _hiddenAt = DateTime.MinValue;
+
+    /// <summary>Edge the last position was computed against, which sets the slide axis.</summary>
+    private TaskbarEdge _edge = TaskbarEdge.Bottom;
+
     private IslandAppearance _appearance;
 
     public IslandWindow(IslandViewModel vm, SettingsStore settings)
@@ -73,64 +101,317 @@ public partial class IslandWindow : Window
         InitializeComponent();
         DataContext = vm;
 
-        // Seed the collapsed width so the first frame is already island-shaped rather than
-        // shrink-wrapped around the content, and so Width never starts out Auto.
-        Root.Width = _widthTarget = TargetWidth();
-        Silhouette.Fill = FillBrush(_appearance);
-        Root.Opacity = _appearance.CollapsedOpacity;
+        Card.Margin = new Thickness(ShadowMargin);
+        // Transparent until the first AnimateIn fades it up. Every later show inherits zero
+        // from the hide fade, which holds its end value; this is only the seed for the first
+        // one, and without it the card's first frame would flash at full opacity before it
+        // has been positioned.
+        Root.Opacity = 0;
+        ApplyAppearance(_appearance);
 
         _vm.SurfaceChanged += ApplySurface;
-        // Agents appearing or changing group resizes the collapsed island and toggles the
-        // working indicator, neither of which is tied to a surface transition.
-        _vm.GroupingChanged += ApplyGrouping;
-        _hoverTimer.Tick += OnHoverTimerTick;
 
-        // Matches the 1s cadence of observeBlockedAgents on macOS.
-        _presenceTimer.Interval = TimeSpan.FromSeconds(1);
-        _presenceTimer.Tick += (_, _) => UpdateFullscreenVisibility();
+        _autoHide.Interval = AutoHideDelay;
+        _autoHide.Tick += OnAutoHideTick;
 
-        _pointerTimer.Interval = PointerPollInterval;
-        _pointerTimer.Tick += OnPointerTick;
-
+        // Switching surfaces changes the card's height, which moves where its anchored
+        // corner has to be.
         SizeChanged += (_, _) => UpdatePosition();
+        Card.MouseEnter += (_, _) => _autoHide.Stop();
+        Card.MouseLeave += (_, _) => RestartAutoHide();
+        Card.PreviewMouseDown += (_, _) => NoteInteraction();
+        Activated += OnActivated;
         Deactivated += OnDeactivated;
-        Loaded += OnLoaded;
-    }
-
-    private void OnLoaded(object sender, RoutedEventArgs e)
-    {
-        ApplySurface();
-        UpdatePosition();
-        _presenceTimer.Start();
-        _pointerTimer.Start();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
         var handle = new WindowInteropHelper(this).Handle;
-        // WS_EX_TOOLWINDOW keeps the island out of Alt+Tab, the same intent as
-        // NSWindow's .ignoresCycle collection behaviour.
+        // WS_EX_TOOLWINDOW keeps the flyout out of Alt+Tab, the same intent as NSWindow's
+        // .ignoresCycle collection behaviour.
         var exStyle = GetWindowLong(handle, GwlExStyle);
         SetWindowLong(handle, GwlExStyle, exStyle | WsExToolWindow);
-        ApplyClickThrough();
     }
+
+    // --- Public entry points
+
+    /// <summary>
+    /// Left-clicking the tray icon. Toggles, which is what every tray flyout does — and
+    /// since the click that opened it also deactivated the flyout, a click arriving right
+    /// after a dismissal is that dismissal and is dropped rather than reopening.
+    /// </summary>
+    public void ToggleIsland()
+    {
+        // Two orderings to swallow, depending on whether the fade-out has finished by the
+        // time the tray click lands: one is still running, or it just ended.
+        if (_closing) return;
+        if (IsVisible)
+        {
+            Dismiss();
+            return;
+        }
+        if (DateTime.UtcNow - _hiddenAt < ReopenGuard) return;
+        ShowIsland();
+    }
+
+    /// <summary>Open the session list, e.g. from the tray menu or a toast.</summary>
+    public void ShowIsland()
+    {
+        _vm.ShowSessionList();
+        ShowFlyout(takeFocus: true);
+    }
+
+    /// <summary>
+    /// Open one agent's approval card, from the toast's "Open" action. User-initiated, so
+    /// unlike <see cref="PopForBlocked"/> it may take the keyboard.
+    /// </summary>
+    public void ShowApproval(Agent agent)
+    {
+        _vm.ShowApproval(agent);
+        ShowFlyout(takeFocus: true);
+    }
+
+    /// <summary>
+    /// A newly blocked agent, announcing itself. Shows without taking focus and takes
+    /// itself away again if nobody comes — the counterpart of herdi-mac's
+    /// observeBlockedAgents auto-pop (Sources/HerdiMacApp.swift:180), which can be
+    /// unconditional there because a notch panel covers nothing when it opens.
+    ///
+    /// Suppressed while a game or a presentation is on, matching where Windows itself
+    /// holds toasts back.
+    /// </summary>
+    public void PopForBlocked(Agent agent)
+    {
+        if (IsQuietHours()) return;
+        // Something already open is being worked in; do not yank it out from under anyone.
+        // A card mid-dismissal does not count as open — its surface has not been reset yet,
+        // but nobody is working in something they just closed.
+        if (IsVisible && !_closing && _vm.IsSticky) return;
+
+        _announcing = true;
+        _vm.ShowApproval(agent);
+        ShowFlyout(takeFocus: false);
+        _autoHide.Start();
+    }
+
+    /// <summary>Dismiss, as clicking away would.</summary>
+    public void Dismiss() => HideFlyout();
+
+    /// <summary>
+    /// Repaint from the settings dialog while it is open. Opacity is applied through the
+    /// animation path rather than the property because the show/hide fade owns Root.Opacity
+    /// with FillBehavior.HoldEnd, and a plain assignment underneath it would never be seen.
+    /// </summary>
+    public void ApplyAppearance(IslandAppearance appearance)
+    {
+        _appearance = appearance.Normalized();
+        var brush = new SolidColorBrush(_appearance.Fill);
+        brush.Freeze();
+        Card.Background = brush;
+        if (IsVisible) AnimateOpacity(Root.Opacity, _appearance.Opacity, MicroEase(), MicroDuration);
+    }
+
+    /// <summary>
+    /// The same, but showing the flyout first if it is hidden: transparency cannot be judged
+    /// from a swatch in a dialog, it depends entirely on what is behind the card, so the
+    /// sliders drive the real thing.
+    /// </summary>
+    public void PreviewAppearance(IslandAppearance appearance)
+    {
+        // A card fading out counts as hidden: showing it again is what cancels that fade,
+        // whereas repainting one on its way out just leaves it to finish leaving.
+        if (!IsVisible || _closing)
+        {
+            _previewing = true;
+            _vm.ShowSessionList();
+            ShowFlyout(takeFocus: false);
+        }
+        ApplyAppearance(appearance);
+    }
+
+    /// <summary>Put the flyout away again if it was only up for the preview.</summary>
+    public void EndAppearancePreview()
+    {
+        if (!_previewing) return;
+        _previewing = false;
+        if (!IsActive) HideFlyout();
+    }
+
+    // --- Show / hide
+
+    private void ShowFlyout(bool takeFocus)
+    {
+        // A fade-out already running has to be animated back out of, not just cancelled: its
+        // Completed handler sees _closing cleared and bows out, leaving Root.Opacity held
+        // wherever the fade had got to — a card that is visible and yet cannot be seen.
+        var interrupting = _closing;
+        _closing = false;
+        _autoHide.Stop();
+        if (takeFocus)
+        {
+            _allowFocus = true;
+            _announcing = false;
+        }
+
+        var appearing = !IsVisible;
+        if (appearing)
+        {
+            Show();
+            // Where the card goes depends on how tall it ended up, and Show() does not
+            // promise a finished layout pass — so force one rather than position against a
+            // stale size and correct it a frame later.
+            UpdateLayout();
+        }
+        UpdatePosition();
+
+        if (takeFocus) Activate();
+        if (appearing || interrupting) AnimateIn(appearing);
+        FocusActiveSurface();
+    }
+
+    private void HideFlyout()
+    {
+        if (!IsVisible)
+        {
+            _vm.Collapse();
+            return;
+        }
+        if (_closing) return;
+
+        _closing = true;
+        _autoHide.Stop();
+        _previewing = false;
+        _allowFocus = false;
+        _announcing = false;
+
+        var fade = new DoubleAnimation(Root.Opacity, 0, new Duration(CloseDuration))
+        {
+            EasingFunction = MicroEase(),
+            FillBehavior = FillBehavior.HoldEnd,
+        };
+        fade.Completed += (_, _) =>
+        {
+            // A show that landed while the fade was running already cleared _closing and
+            // owns Root.Opacity; this completion is stale.
+            if (!_closing) return;
+            _closing = false;
+            Hide();
+            _hiddenAt = DateTime.UtcNow;
+            _vm.Collapse();
+        };
+        Root.BeginAnimation(OpacityProperty, fade);
+        AnimateSlide(new Vector(Slide.X, Slide.Y), SlideOffset(), MicroEase(), CloseDuration);
+    }
+
+    /// <summary>
+    /// Slide in from the taskbar's side while fading up to the chosen opacity. A card that
+    /// was already on screen — one whose fade-out was interrupted — comes back from wherever
+    /// that fade had reached rather than snapping out to the edge first.
+    /// </summary>
+    private void AnimateIn(bool appearing)
+    {
+        var from = appearing ? SlideOffset() : new Vector(Slide.X, Slide.Y);
+        var fromOpacity = appearing ? 0 : Root.Opacity;
+        AnimateSlide(from, new Vector(0, 0), OpenEase(), OpenDuration);
+        AnimateOpacity(fromOpacity, _appearance.Opacity, OpenEase(), OpenDuration);
+    }
+
+    // Both animations carry an explicit From. The previous one holds its end value with
+    // FillBehavior.HoldEnd, so assigning Slide.X or Root.Opacity first would set a base
+    // value nothing ever reads — the From has to be stated, not staged.
+    private void AnimateSlide(Vector from, Vector to, IEasingFunction easing, TimeSpan duration)
+    {
+        var span = new Duration(duration);
+        Slide.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(from.X, to.X, span) { EasingFunction = easing, FillBehavior = FillBehavior.HoldEnd });
+        Slide.BeginAnimation(TranslateTransform.YProperty,
+            new DoubleAnimation(from.Y, to.Y, span) { EasingFunction = easing, FillBehavior = FillBehavior.HoldEnd });
+    }
+
+    private void AnimateOpacity(double from, double to, IEasingFunction easing, TimeSpan duration)
+    {
+        Root.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(from, to, new Duration(duration))
+            {
+                EasingFunction = easing,
+                FillBehavior = FillBehavior.HoldEnd,
+            });
+    }
+
+    /// <summary>Where the card starts from and returns to: outward, along the bar's normal.</summary>
+    private Vector SlideOffset() => _edge switch
+    {
+        TaskbarEdge.Bottom => new Vector(0, SlideDistance),
+        TaskbarEdge.Top => new Vector(0, -SlideDistance),
+        TaskbarEdge.Left => new Vector(-SlideDistance, 0),
+        _ => new Vector(SlideDistance, 0),
+    };
 
     // --- Positioning
 
-    /// <summary>Centre horizontally on the primary display, flush with its top edge.</summary>
+    /// <summary>
+    /// Anchor the card to the taskbar corner the notification area lives in, then clamp it
+    /// into the work area so a tall card cannot run off the screen. Everything the shell
+    /// reports is in physical pixels; Left and Top are DIPs.
+    ///
+    /// The conversion uses this window's own scale factor, which is exact as long as the
+    /// taskbar carrying the tray is on a display at the same DPI as the one the window is
+    /// currently on — the same assumption the top-edge version made. Windows only shows the
+    /// notification area on one taskbar, so the two agree except in the moment after the
+    /// flyout has been dragged across a DPI boundary by a display change, where the next
+    /// reposition settles it.
+    /// </summary>
     private void UpdatePosition()
     {
-        var screen = System.Windows.Forms.Screen.PrimaryScreen;
-        if (screen is null) return;
+        var bar = TaskbarInfo.Current();
+        if (bar.WorkArea.Width <= 0 || bar.WorkArea.Height <= 0) return;
+        _edge = bar.Edge;
 
         var (scaleX, scaleY) = DeviceScale();
 
-        // Screen.Bounds is in physical pixels; Left/Top are DIPs.
-        var bounds = screen.Bounds;
-        Left = (bounds.Left + bounds.Width / 2.0) / scaleX - ActualWidth / 2.0;
-        Top = bounds.Top / scaleY;
+        // The visible card, not the window: the window is inflated by ShadowMargin all
+        // round, and it is the card that should sit Gap away from the bar.
+        var cardWidth = Math.Max(0, ActualWidth - ShadowMargin * 2);
+        var cardHeight = Math.Max(0, ActualHeight - ShadowMargin * 2);
+
+        var corner = bar.TrayCorner;
+        var cornerX = corner.X / scaleX;
+        var cornerY = corner.Y / scaleY;
+
+        double cardLeft, cardTop;
+        switch (bar.Edge)
+        {
+            case TaskbarEdge.Top:
+                // Trailing end of the bar, hanging below it.
+                cardLeft = cornerX - Gap - cardWidth;
+                cardTop = cornerY + Gap;
+                break;
+            case TaskbarEdge.Left:
+                cardLeft = cornerX + Gap;
+                cardTop = cornerY - Gap - cardHeight;
+                break;
+            default: // Bottom, the usual case, and Right — both hang up and left of the corner.
+                cardLeft = cornerX - Gap - cardWidth;
+                cardTop = cornerY - Gap - cardHeight;
+                break;
+        }
+
+        var work = bar.WorkArea;
+        cardLeft = ClampInto(cardLeft, work.Left / scaleX + Gap, work.Right / scaleX - Gap - cardWidth);
+        cardTop = ClampInto(cardTop, work.Top / scaleY + Gap, work.Bottom / scaleY - Gap - cardHeight);
+
+        Left = cardLeft - ShadowMargin;
+        Top = cardTop - ShadowMargin;
     }
+
+    /// <summary>
+    /// Clamp that survives an upper bound below the lower one, which is what a card taller
+    /// than the work area produces. The lower bound wins there, so the card's top-left stays
+    /// on screen and it overflows off the far side rather than the near one.
+    /// </summary>
+    private static double ClampInto(double value, double min, double max) =>
+        max < min ? min : Math.Clamp(value, min, max);
 
     /// <summary>Physical pixels per DIP, for converting screen coordinates.</summary>
     private (double X, double Y) DeviceScale()
@@ -140,341 +421,121 @@ public partial class IslandWindow : Window
                 transform?.M22 is > 0 ? transform.Value.M22 : 1.0);
     }
 
-    /// <summary>Is the pointer geometrically over the island?</summary>
-    private bool PointerOverIsland()
-    {
-        var (scaleX, scaleY) = DeviceScale();
-        var cursor = System.Windows.Forms.Control.MousePosition;
-        return new Rect(Left, Top, ActualWidth, ActualHeight)
-            .Contains(new Point(cursor.X / scaleX, cursor.Y / scaleY));
-    }
+    // --- Dismissal
 
     /// <summary>
-    /// Let clicks through while the island is collapsed. Collapsed it is signage, pinned
-    /// over the top-centre of the screen where tab strips and title bars live, and a
-    /// window that swallowed every click landing there would be worse than the notch it
-    /// stands in for — a notch is hardware, with nothing underneath it to click. Expanded,
-    /// the island is the thing being used, so it takes its input back.
+    /// Focus arriving. Deliberately does not clear <see cref="_announcing"/>: a flyout that
+    /// only announced itself is not being used just because it ended up with the keyboard.
     /// </summary>
-    private void ApplyClickThrough()
+    private void OnActivated(object? sender, EventArgs e) => _allowFocus = true;
+
+    /// <summary>Somebody is actually using it, so the timeout has no business firing.</summary>
+    private void NoteInteraction()
     {
-        var handle = new WindowInteropHelper(this).Handle;
-        if (handle == IntPtr.Zero) return;
-        var style = GetWindowLong(handle, GwlExStyle);
-        var updated = _vm.IsExpanded ? style & ~WsExTransparent : style | WsExTransparent;
-        if (updated != style) SetWindowLong(handle, GwlExStyle, updated);
-    }
-
-    // --- Hover state machine (handleHover, NotchContentView.swift:140)
-
-    /// <summary>
-    /// Hover is decided from where the cursor is, not from MouseEnter/MouseLeave. Two
-    /// reasons: the collapsed island is click-through and so receives no mouse messages at
-    /// all, and expanding animates the width and re-centres the window, sweeping its edges
-    /// past a pointer that never moved — each sweep raising a leave that would start
-    /// closing the thing the user is reaching for.
-    /// </summary>
-    private void OnPointerTick(object? sender, EventArgs e)
-    {
-        if (_hiddenForFullscreen) return;
-
-        var over = PointerOverIsland();
-        if (over == _isHovered) return;
-        _isHovered = over;
-
-        // A surface being worked in ignores the pointer, and while a context menu is up
-        // the pointer is legitimately off the island.
-        if (_vm.IsSticky || _menuOpen) return;
-
-        SetPrehover(over);
-        RestartHoverTimer(over ? ExpandDelay : CollapseDelay);
-    }
-
-    private void RestartHoverTimer(TimeSpan delay)
-    {
-        _hoverTimer.Stop();
-        _hoverTimer.Interval = delay;
-        _hoverTimer.Start();
-    }
-
-    private void OnHoverTimerTick(object? sender, EventArgs e)
-    {
-        _hoverTimer.Stop();
-        if (_vm.IsSticky || _menuOpen) return;
-        if (_isHovered)
-        {
-            _vm.ShowSessionList();
-        }
-        else
-        {
-            // Clear the prehover widening first: it is still set from the way in, and
-            // Collapse() sizes the island from it on the way out.
-            SetPrehover(false);
-            _vm.Collapse();
-        }
-    }
-
-    /// <summary>Immediate acknowledgement of the pointer before the full expansion.</summary>
-    private void SetPrehover(bool on)
-    {
-        if (_prehover == on) return;
-        _prehover = on;
-        if (_vm.IsExpanded) return;
-        AnimateWidth(TargetWidth(), MicroEase());
-        AnimateOpacity(CurrentOpacity(), MicroEase());
-    }
-
-    // A row's context menu opens in its own window, which deactivates this one and puts
-    // the pointer outside the island — both of which otherwise mean "collapse".
-    private void OnContextMenuOpening(object sender, ContextMenuEventArgs e)
-    {
-        _menuOpen = true;
-        _hoverTimer.Stop();
-    }
-
-    private void OnContextMenuClosing(object sender, ContextMenuEventArgs e)
-    {
-        _menuOpen = false;
-        // Give the usual grace period rather than deciding from wherever the pointer
-        // happens to be the instant the menu goes away.
-        if (!_vm.IsSticky) RestartHoverTimer(CollapseDelay);
+        _allowFocus = true;
+        _announcing = false;
+        _autoHide.Stop();
     }
 
     private void OnDeactivated(object? sender, EventArgs e)
     {
-        // Clicking outside collapses the island — the role of the global click monitor
-        // installed in showPanel() on macOS. An in-flight approval survives, matching
-        // the `if case .approval` guard there.
-        if (_vm.Surface == IslandSurface.Approval || _menuOpen) return;
-        // Focus can also leave while the pointer is still on the island: pressing a button
-        // there activates the window, and whatever it was stolen from deactivates in turn.
-        // That is not a click elsewhere, so the island stays open.
-        if (PointerOverIsland()) return;
-        _isHovered = false;
-        _hoverTimer.Stop();
-        SetPrehover(false);
-        _vm.Collapse();
+        // Clicking away dismisses — the role of the global click monitor installed in
+        // showPanel() on macOS. Unlike that one this does not exempt an open approval card:
+        // a topmost, borderless, taskbar-button-less window that refuses to go away when it
+        // loses focus is a window with no way out, and the toast carries the same approval.
+        if (_menuOpen || _previewing) return;
+        HideFlyout();
     }
 
-    // --- Surface application + animation
-
-    private void ApplySurface()
+    /// <summary>The flyout announced itself and nobody came.</summary>
+    private void OnAutoHideTick(object? sender, EventArgs e)
     {
-        var expanded = _vm.IsExpanded;
+        _autoHide.Stop();
+        if (!_announcing || Card.IsMouseOver) return;
+        HideFlyout();
+    }
 
-        // Backing out of a surface that ignored the pointer, the hover state can be stale:
-        // the poll acts on transitions, and one that happened while the island was sticky
-        // left no timer behind. Without this the island stays open under a pointer that
-        // left minutes ago. Only on the way out of sticky — an island opened from the tray
-        // with the pointer nowhere near it is meant to stay up until a click elsewhere.
-        if (_wasSticky && !_vm.IsSticky && expanded && !_isHovered && !_menuOpen)
-        {
-            RestartHoverTimer(CollapseDelay);
-        }
-        _wasSticky = _vm.IsSticky;
+    /// <summary>Re-arm after the pointer leaves, for an announcement nobody acted on.</summary>
+    private void RestartAutoHide()
+    {
+        _autoHide.Stop();
+        if (_announcing && IsVisible) _autoHide.Start();
+    }
 
-        Divider.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        ExpandedHost.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        Wordmark.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        RightWing.Visibility = expanded ? Visibility.Collapsed : Visibility.Visible;
-        ApplyWorkingCount();
-
-        var easing = _vm.Surface == IslandSurface.Approval ? PopEase() : (expanded ? OpenEase() : CloseEase());
-        AnimateWidth(TargetWidth(), easing);
-        AnimateShape(expanded ? 14 : 3, expanded ? 24 : 12, easing);
-        AnimateOpacity(CurrentOpacity(), easing);
-        ApplyClickThrough();
-
-        if (_vm.Surface == IslandSurface.Approval)
-        {
-            // Let the card take keyboard focus so a reply can be typed immediately.
-            Activate();
-            Dispatcher.BeginInvoke(new Action(() => ApprovalCard.FocusReply()),
-                DispatcherPriority.Input);
-        }
-        else if (_vm.Surface == IslandSurface.Pane)
-        {
-            Activate();
-            Dispatcher.BeginInvoke(new Action(() => Pane.FocusInput()), DispatcherPriority.Input);
-        }
+    // A row's context menu opens in its own window, which deactivates this one.
+    private void OnContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        _menuOpen = true;
+        _autoHide.Stop();
     }
 
     /// <summary>
-    /// Re-apply the chrome that follows the agent list rather than the surface. Kept apart
-    /// from <see cref="ApplySurface"/> so a poll that merely regroups the agents cannot
-    /// replay the open/pop animation or steal focus back to an approval card.
+    /// The menu is going away. It had already cost this window its activation, and no second
+    /// Deactivated is coming — so without taking focus back the flyout would sit there
+    /// unfocused, deaf to the click-away that is supposed to dismiss it. Posted rather than
+    /// called inline because the menu's own window is still up at this point.
     /// </summary>
-    private void ApplyGrouping()
+    private void OnContextMenuClosing(object sender, ContextMenuEventArgs e)
     {
-        ApplyWorkingCount();
-        var target = TargetWidth();
-        if (Math.Abs(target - _widthTarget) < 0.5) return;
-        AnimateWidth(target, MicroEase());
-    }
-
-    /// <summary>The pulsing working count belongs to the collapsed island only.</summary>
-    private void ApplyWorkingCount() =>
-        WorkingCount.Visibility = !_vm.IsExpanded && _vm.Working.Count > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-
-    private double TargetWidth()
-    {
-        if (!_vm.IsActive) return CapsuleWidth + 60;
-        if (_vm.IsExpanded) return ExpandedWidth;
-        var width = CapsuleWidth + Wing * 2;
-        if (_vm.Blocked.Count > 0) width += BlockedExtra;
-        if (_prehover) width += PrehoverExtra;
-        return width;
-    }
-
-    private void AnimateWidth(double target, IEasingFunction easing)
-    {
-        _widthTarget = target;
-        // From is always explicit: a To-only DoubleAnimation reads the base value, and WPF
-        // rejects NaN there ("'NaN' is not a valid 'Double' value for class ..."), which is
-        // what Width reads as whenever it is Auto. Root.Width sees the in-flight animated
-        // value, so retargeting mid-animation stays continuous.
-        var from = Root.Width;
-        if (double.IsNaN(from) || double.IsInfinity(from))
-            from = Root.ActualWidth > 0 ? Root.ActualWidth : target;
-
-        var animation = new DoubleAnimation(from, target, Duration(easing))
+        _menuOpen = false;
+        Dispatcher.BeginInvoke(new Action(() =>
         {
-            EasingFunction = easing,
-            FillBehavior = FillBehavior.HoldEnd,
-        };
-        Root.BeginAnimation(WidthProperty, animation);
+            if (!_menuOpen && IsVisible && !_closing && !IsActive) Activate();
+        }), DispatcherPriority.Input);
     }
+
+    private void OnCloseClicked(object sender, RoutedEventArgs e) => HideFlyout();
 
     /// <summary>
-    /// Repaint from the settings dialog while it is open, so the sliders preview against
-    /// the real island instead of a swatch. Opacity goes back through the animation path
-    /// rather than the property: an animation with FillBehavior.HoldEnd owns Root.Opacity,
-    /// and a plain assignment underneath it would never be seen.
-    /// </summary>
-    public void ApplyAppearance(IslandAppearance appearance)
-    {
-        _appearance = appearance.Normalized();
-        Silhouette.Fill = FillBrush(_appearance);
-        AnimateOpacity(CurrentOpacity(), MicroEase());
-    }
-
-    private static Brush FillBrush(IslandAppearance appearance)
-    {
-        var brush = new SolidColorBrush(appearance.Fill);
-        brush.Freeze();
-        return brush;
-    }
-
-    /// <summary>
-    /// Opacity the island belongs at right now. Anything short of resting-and-untouched
-    /// counts as expanded: prehover is the island acknowledging the pointer, and dimming
-    /// what somebody is already reaching for reads as a glitch.
-    /// </summary>
-    private double CurrentOpacity() =>
-        _vm.IsExpanded || _isHovered || _prehover
-            ? _appearance.ExpandedOpacity
-            : _appearance.CollapsedOpacity;
-
-    private void AnimateOpacity(double target, IEasingFunction easing)
-    {
-        Root.BeginAnimation(OpacityProperty,
-            new DoubleAnimation(target, Duration(easing))
-            {
-                EasingFunction = easing,
-                FillBehavior = FillBehavior.HoldEnd,
-            });
-    }
-
-    private void AnimateShape(double extension, double radius, IEasingFunction easing)
-    {
-        var duration = Duration(easing);
-        Silhouette.BeginAnimation(Controls.IslandShape.TopExtensionProperty,
-            new DoubleAnimation(extension, duration) { EasingFunction = easing });
-        Silhouette.BeginAnimation(Controls.IslandShape.BottomRadiusProperty,
-            new DoubleAnimation(radius, duration) { EasingFunction = easing });
-    }
-
-    // WPF has no spring primitive, so each macOS spring maps to the easing curve with
-    // the closest feel: overshoot for open/pop, none for close.
-    private static IEasingFunction OpenEase() => new BackEase { Amplitude = 0.18, EasingMode = EasingMode.EaseOut };
-    private static IEasingFunction CloseEase() => new CubicEase { EasingMode = EasingMode.EaseOut };
-    private static IEasingFunction PopEase() => new BackEase { Amplitude = 0.35, EasingMode = EasingMode.EaseOut };
-    private static IEasingFunction MicroEase() => new QuadraticEase { EasingMode = EasingMode.EaseOut };
-
-    private static System.Windows.Duration Duration(IEasingFunction easing) => easing switch
-    {
-        BackEase { Amplitude: > 0.3 } => new System.Windows.Duration(TimeSpan.FromMilliseconds(300)),
-        BackEase => new System.Windows.Duration(TimeSpan.FromMilliseconds(420)),
-        QuadraticEase => new System.Windows.Duration(TimeSpan.FromMilliseconds(120)),
-        _ => new System.Windows.Duration(TimeSpan.FromMilliseconds(380)),
-    };
-
-    /// <summary>
-    /// The update badge expands to the session list, where the banner lives — the
-    /// onShowUpdate closure CompactBar is handed on macOS.
+    /// The update badge opens the session list, where the banner lives — the onShowUpdate
+    /// closure CompactBar is handed on macOS.
     /// </summary>
     private void OnShowUpdate(object sender, RoutedEventArgs e) => _vm.ShowSessionList();
 
-    // --- Public entry points
+    // --- Surface application
 
-    /// <summary>Open the session list, e.g. from the tray menu.</summary>
-    public void ShowIsland()
+    private void ApplySurface()
     {
-        Show();
-        _vm.ShowSessionList();
-        Activate();
+        // Every surface's own visibility is bound to the view model, so there is nothing to
+        // lay out here, and the height change that follows re-anchors the card through
+        // SizeChanged. Only focus is left to place.
+        if (!_vm.IsExpanded) return;
+        FocusActiveSurface();
     }
 
     /// <summary>
-    /// Auto-open the approval card for a newly blocked agent, then nudge the island —
-    /// the equivalent of the NotchAnimation.pop bounce on macOS.
+    /// Put the caret in whatever the current surface is for typing into, so an approval can
+    /// be answered or an agent messaged without reaching for the mouse. Skipped entirely
+    /// while <see cref="_allowFocus"/> is false — a flyout that appeared on its own has not
+    /// been given the keyboard and must not grab it.
     /// </summary>
-    public void PopForBlocked(Agent agent)
+    private void FocusActiveSurface()
     {
-        if (_hiddenForFullscreen) return;
-        Show();
-        _vm.PopApproval(agent);
+        if (!_allowFocus) return;
+        var surface = _vm.Surface;
+        if (surface is not (IslandSurface.Approval or IslandSurface.Pane)) return;
+
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!_allowFocus || _vm.Surface != surface) return;
+            if (surface == IslandSurface.Approval) ApprovalCard.FocusReply();
+            else Pane.FocusInput();
+        }), DispatcherPriority.Input);
     }
 
-    // --- Fullscreen / do-not-disturb
-
-    /// <summary>
-    /// Hide while another app is fullscreen or presenting, as isActiveSpaceFullscreen
-    /// does on macOS. SHQueryUserNotificationState is the idiomatic Windows probe and
-    /// also respects presentation mode.
-    /// </summary>
-    private void UpdateFullscreenVisibility()
-    {
-        var quiet = SHQueryUserNotificationState(out var state) == 0 && state is
-            QunsBusy or QunsRunningD3DFullScreen or QunsPresentationMode;
-
-        if (quiet && !_hiddenForFullscreen)
-        {
-            _hiddenForFullscreen = true;
-            Hide();
-        }
-        else if (!quiet && _hiddenForFullscreen)
-        {
-            _hiddenForFullscreen = false;
-            Show();
-            UpdatePosition();
-        }
-    }
-
-    // --- Keyboard shortcuts
+    // --- Keyboard
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
         base.OnPreviewKeyDown(e);
-        // Esc backs out of either worked-in surface; the response shortcuts belong to the
-        // approval card alone.
-        if (!_vm.IsSticky) return;
+        NoteInteraction();
 
         if (e.Key == Key.Escape)
         {
-            _vm.ShowSessionList();
+            // Esc backs out of a surface being worked in, and closes the flyout from the
+            // session list — the way out every Windows flyout has.
+            if (_vm.IsSticky) _vm.ShowSessionList();
+            else HideFlyout();
             e.Handled = true;
             return;
         }
@@ -501,11 +562,34 @@ public partial class IslandWindow : Window
         e.Handled = true;
     }
 
+    // --- Animation presets
+
+    // WPF has no spring primitive, so each macOS spring maps to the easing curve with the
+    // closest feel. A flyout's entrance is quicker than the notch panel's expansion was —
+    // it is replacing a window that appears, not a shape that grows.
+    private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(180);
+    private static readonly TimeSpan CloseDuration = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan MicroDuration = TimeSpan.FromMilliseconds(120);
+
+    private static IEasingFunction OpenEase() => new CubicEase { EasingMode = EasingMode.EaseOut };
+    private static IEasingFunction MicroEase() => new QuadraticEase { EasingMode = EasingMode.EaseOut };
+
+    // --- Do not disturb
+
+    /// <summary>
+    /// Whether Windows is holding notifications back — a fullscreen game, a presentation, or
+    /// Focus Assist. The equivalent of isActiveSpaceFullscreen on macOS, and asked at the
+    /// moment it matters rather than polled: the flyout is hidden the rest of the time, so
+    /// there is nothing to keep out of the way.
+    /// </summary>
+    private static bool IsQuietHours() =>
+        SHQueryUserNotificationState(out var state) == 0 && state is
+            QunsBusy or QunsRunningD3DFullScreen or QunsPresentationMode;
+
     // --- Win32
 
     private const int GwlExStyle = -20;
     private const int WsExToolWindow = 0x00000080;
-    private const int WsExTransparent = 0x00000020;
 
     private const int QunsBusy = 2;
     private const int QunsRunningD3DFullScreen = 3;

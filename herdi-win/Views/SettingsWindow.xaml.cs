@@ -8,7 +8,7 @@ using Forms = System.Windows.Forms;
 namespace Herdi.Views;
 
 /// <summary>
-/// Source selection plus the fields each mode needs, and how the island looks. herdi-mac
+/// Source selection plus the fields each mode needs, and how the panel looks. herdi-mac
 /// spreads the same choices across its status menu (a Direct/Relay toggle, an add-remote
 /// sheet) and UserDefaults it never surfaces; one dialog is easier to reason about and
 /// gives the relay URL somewhere to live, which the mac app never provided.
@@ -19,9 +19,9 @@ public partial class SettingsWindow : Window
 
     /// <summary>
     /// Hands the island each appearance edit as it happens. Transparency cannot be judged
-    /// from a swatch in a dialog — it depends entirely on what is behind the island — so
-    /// the sliders drive the real thing and <see cref="OnClosed"/> undoes it if the dialog
-    /// is cancelled. Null when nobody wired a preview up.
+    /// from a swatch in a dialog — it depends entirely on what is behind the panel — so the
+    /// controls drive the real thing and <see cref="OnClosed"/> undoes it if the dialog is
+    /// cancelled. Null when nobody wired a preview up.
     /// </summary>
     private readonly Action<IslandAppearance>? _preview;
 
@@ -70,10 +70,9 @@ public partial class SettingsWindow : Window
         DirectFields.Visibility = direct ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private IslandAppearance CurrentAppearance =>
-        new(_fill, CollapsedOpacitySlider.Value, ExpandedOpacitySlider.Value);
+    private IslandAppearance CurrentAppearance => new(_fill, OpacitySliderControl.Value);
 
-    /// <summary>Load an appearance into the three controls without previewing it back.</summary>
+    /// <summary>Load an appearance into the controls without previewing it back.</summary>
     private void ShowAppearance(IslandAppearance appearance)
     {
         var was = _ready;
@@ -81,8 +80,7 @@ public partial class SettingsWindow : Window
         _fill = appearance.Fill;
         ColorBox.Text = IslandAppearance.ToHex(_fill);
         ColorPreview.Background = new SolidColorBrush(_fill);
-        CollapsedOpacitySlider.Value = appearance.CollapsedOpacity;
-        ExpandedOpacitySlider.Value = appearance.ExpandedOpacity;
+        OpacitySliderControl.Value = appearance.Opacity;
         _ready = was;
     }
 

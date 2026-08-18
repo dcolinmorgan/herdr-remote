@@ -19,9 +19,21 @@ public sealed class TrayIconHost : IDisposable
     private readonly DispatcherTimer _refreshTimer = new();
 
     private readonly Forms.NotifyIcon _icon;
-    private readonly Drawing.Icon? _normalIcon;
-    private readonly Drawing.Icon? _blockedIcon;
-    private bool _showingBlocked;
+
+    /// <summary>Shipped glyphs at the current tray size. Reloaded when that size changes.</summary>
+    private Drawing.Icon? _glyphIcon;
+    private Drawing.Icon? _blockedGlyphIcon;
+
+    /// <summary>The badged icon currently assigned, owned here and replaced as state moves.</summary>
+    private Drawing.Icon? _composedIcon;
+
+    /// <summary>
+    /// What <see cref="_icon"/> was last painted for. Refresh runs every second and
+    /// reassigning NotifyIcon.Icon makes the shell repaint, so the icon is only rebuilt when
+    /// one of these actually moved. The count is capped at the highest the badge can spell,
+    /// so 12 → 13 agents is not a repaint.
+    /// </summary>
+    private (TrayBadge Badge, int Count, int Size) _iconState = (TrayBadge.None, -1, 0);
 
     private readonly Forms.ToolStripMenuItem _statusItem = new() { Enabled = false };
     private readonly Forms.ToolStripMenuItem _relayItem = new() { Enabled = false };
@@ -33,18 +45,20 @@ public sealed class TrayIconHost : IDisposable
     /// <summary>Host list the submenu was last built from, so it is only rebuilt on change.</summary>
     private string _remotesSignature = string.Empty;
 
+    /// <summary>Pixel size the glyphs were loaded at, i.e. the tray size at that DPI.</summary>
+    private int _glyphSize;
+
     public TrayIconHost(IslandViewModel vm, SettingsStore settings, Updater updater)
     {
         _vm = vm;
         _settings = settings;
         _updater = updater;
 
-        _normalIcon = LoadIcon("herdi.ico");
-        _blockedIcon = LoadIcon("herdi-blocked.ico");
+        LoadGlyphs(Forms.SystemInformation.SmallIconSize.Width);
 
         _icon = new Forms.NotifyIcon
         {
-            Icon = _normalIcon,
+            Icon = _glyphIcon,
             Visible = true,
             Text = "Herdi",
             ContextMenuStrip = BuildMenu(),
@@ -58,8 +72,15 @@ public sealed class TrayIconHost : IDisposable
         Refresh();
     }
 
-    /// <summary>Raised when the user asks to see the island.</summary>
+    /// <summary>Raised when the user asks to see the island from the menu.</summary>
     public event Action? ShowIslandRequested;
+
+    /// <summary>
+    /// Raised by a left click on the icon. Separate from <see cref="ShowIslandRequested"/>
+    /// because the icon is the flyout's anchor: clicking it again is how you put the flyout
+    /// away, while the menu item only ever opens it.
+    /// </summary>
+    public event Action? ToggleIslandRequested;
 
     /// <summary>Raised when the user quits from the menu.</summary>
     public event Action? QuitRequested;
@@ -68,30 +89,59 @@ public sealed class TrayIconHost : IDisposable
     public event Action? SettingsSaved;
 
     /// <summary>
+    /// Raised once the settings dialog has closed, saved or not, so the island can put away
+    /// a preview it only came out for.
+    /// </summary>
+    public event Action? SettingsClosed;
+
+    /// <summary>
     /// Raised for every appearance edit made in the settings dialog, saved or not, so the
-    /// island can preview it. Cancelling the dialog raises one last time with the stored
-    /// appearance, which puts it back.
+    /// island can preview it — which means showing the flyout, since it is otherwise hidden.
+    /// Cancelling the dialog raises one last time with the stored appearance, which puts it
+    /// back.
     /// </summary>
     public event Action<IslandAppearance>? AppearancePreviewed;
 
-    private static Drawing.Icon? LoadIcon(string fileName)
+    /// <summary>
+    /// Load both shipped glyphs at the tray's current pixel size, dropping whatever was
+    /// loaded for a previous one. The size follows the DPI of the display the taskbar is on,
+    /// which can change under a running process — docking a laptop, or moving the taskbar —
+    /// and a glyph scaled from the wrong frame is visibly soft.
+    /// </summary>
+    private void LoadGlyphs(int size)
+    {
+        if (_glyphSize == size && _glyphIcon is not null) return;
+        _glyphSize = size;
+
+        var previousGlyph = _glyphIcon;
+        var previousBlocked = _blockedGlyphIcon;
+
+        _glyphIcon = LoadIcon("herdi.ico", size);
+        _blockedGlyphIcon = LoadIcon("herdi-blocked.ico", size);
+
+        // Only after the replacements exist: the old pair may still be what the shell is
+        // showing until the next ApplyIcon.
+        previousGlyph?.Dispose();
+        previousBlocked?.Dispose();
+
+        // Force the next ApplyIcon to repaint against the new glyphs.
+        _iconState = (TrayBadge.None, -1, 0);
+    }
+
+    private static Drawing.Icon? LoadIcon(string fileName, int size)
     {
         try
         {
             // Resource names follow RootNamespace.Folder.File, e.g. Herdi.Assets.herdi.ico.
             var resource = $"Herdi.Assets.{fileName}";
             using var stream = typeof(TrayIconHost).Assembly.GetManifestResourceStream(resource);
-            if (stream is not null)
-            {
-                // Pick the frame matching the current DPI's tray size rather than the
-                // .ico's default 256px frame.
-                var size = Forms.SystemInformation.SmallIconSize;
-                return new Drawing.Icon(stream, size.Width, size.Height);
-            }
+            // Pick the frame matching the tray's pixel size rather than the .ico's default
+            // 256px frame.
+            if (stream is not null) return new Drawing.Icon(stream, size, size);
 
             // Development fallback: a loose file next to the binary.
             var path = Path.Combine(AppContext.BaseDirectory, "Assets", fileName);
-            return File.Exists(path) ? new Drawing.Icon(path) : null;
+            return File.Exists(path) ? new Drawing.Icon(path, size, size) : null;
         }
         catch (Exception)
         {
@@ -111,7 +161,7 @@ public sealed class TrayIconHost : IDisposable
         menu.Items.Add(_remotesItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
 
-        var show = new Forms.ToolStripMenuItem("Show Island");
+        var show = new Forms.ToolStripMenuItem("Show Panel");
         show.Click += (_, _) => ShowIslandRequested?.Invoke();
         menu.Items.Add(show);
 
@@ -145,7 +195,7 @@ public sealed class TrayIconHost : IDisposable
 
     private void OnIconClicked(object? sender, Forms.MouseEventArgs e)
     {
-        if (e.Button == Forms.MouseButtons.Left) ShowIslandRequested?.Invoke();
+        if (e.Button == Forms.MouseButtons.Left) ToggleIslandRequested?.Invoke();
     }
 
     private void ToggleLaunchAtLogin()
@@ -160,6 +210,7 @@ public sealed class TrayIconHost : IDisposable
         var window = new Views.SettingsWindow(_settings, a => AppearancePreviewed?.Invoke(a));
         window.ShowDialog();
         if (window.Saved) SettingsSaved?.Invoke();
+        SettingsClosed?.Invoke();
     }
 
     private void Refresh()
@@ -179,20 +230,72 @@ public sealed class TrayIconHost : IDisposable
             ? $"Update to v{_updater.LatestVersion}"
             : $"v{_updater.CurrentVersion} ✓";
 
-        // Red badge while anything is blocked, mirroring the macOS status item swap
-        // to exclamationmark.circle.fill.
-        var blocked = _vm.Blocked.Count > 0;
-        if (blocked != _showingBlocked)
+        ApplyIcon();
+        ApplyTooltip();
+    }
+
+    /// <summary>
+    /// Paint the icon for the current state: a red count while agents are blocked, a green
+    /// count while they are working, the bare glyph when neither. This is what the tray icon
+    /// is for now that the panel is hidden by default — the icon is the resting state, so it
+    /// has to carry enough that a glance is worth taking, and the number is what makes it
+    /// worth clicking.
+    ///
+    /// Supersedes the two-file swap this used to do (herdi.ico ↔ herdi-blocked.ico), which
+    /// could say "somebody is waiting" but not how many, and nothing at all about work in
+    /// progress. Both files are still shipped and are what a failed compose falls back to.
+    /// </summary>
+    private void ApplyIcon()
+    {
+        LoadGlyphs(Forms.SystemInformation.SmallIconSize.Width);
+
+        var blocked = _vm.Blocked.Count;
+        var working = _vm.Working.Count;
+
+        // Blocked outranks working: one is a question addressed to the user, the other is
+        // progress they can ignore.
+        var (badge, count) = blocked > 0
+            ? (TrayBadge.Blocked, blocked)
+            : working > 0 ? (TrayBadge.Working, working) : (TrayBadge.None, 0);
+
+        var state = (badge, Math.Min(count, TrayIconRenderer.MaxShownCount + 1), _glyphSize);
+        if (state == _iconState) return;
+        _iconState = state;
+
+        var glyph = _glyphIcon;
+        var composed = glyph is null ? null : TrayIconRenderer.Compose(glyph, badge, count, _glyphSize);
+
+        // Composition failed, or there is no glyph to compose onto: fall back to the shipped
+        // pair, which still says blocked-or-not even though it cannot count.
+        _icon.Icon = composed
+            ?? (badge == TrayBadge.Blocked ? _blockedGlyphIcon ?? glyph : glyph);
+
+        // Only once the shell has been handed the replacement.
+        _composedIcon?.Dispose();
+        _composedIcon = composed;
+    }
+
+    /// <summary>
+    /// The full breakdown, which is where the numbers the badge cannot fit end up — the
+    /// idle count, and any count past 9. NotifyIcon.Text throws above 63 characters.
+    /// </summary>
+    private void ApplyTooltip()
+    {
+        string detail;
+        if (!_vm.IsConnected)
         {
-            _showingBlocked = blocked;
-            var next = blocked ? _blockedIcon : _normalIcon;
-            if (next is not null) _icon.Icon = next;
+            detail = "disconnected";
+        }
+        else
+        {
+            var parts = new List<string>(3);
+            if (_vm.Blocked.Count > 0) parts.Add($"{_vm.Blocked.Count} waiting on you");
+            if (_vm.Working.Count > 0) parts.Add($"{_vm.Working.Count} working");
+            if (_vm.Idle.Count > 0) parts.Add($"{_vm.Idle.Count} idle");
+            detail = parts.Count > 0 ? string.Join(" · ", parts) : "no agents";
         }
 
-        // NotifyIcon.Text throws above 63 characters.
-        var tooltip = blocked
-            ? $"Herdi — {_vm.Blocked.Count} waiting on you"
-            : $"Herdi — {_vm.StatusSummary}";
+        var tooltip = "Herdi — " + detail;
         _icon.Text = tooltip.Length > 63 ? tooltip[..63] : tooltip;
     }
 
@@ -229,7 +332,8 @@ public sealed class TrayIconHost : IDisposable
         _refreshTimer.Stop();
         _icon.Visible = false;
         _icon.Dispose();
-        _normalIcon?.Dispose();
-        _blockedIcon?.Dispose();
+        _composedIcon?.Dispose();
+        _glyphIcon?.Dispose();
+        _blockedGlyphIcon?.Dispose();
     }
 }

@@ -201,7 +201,7 @@
             <Border Height="0.7" Margin="0,18,0,0" Background="{StaticResource Stroke10}" />
 
             <Grid Margin="0,16,0,0">
-                <TextBlock Text="Island Appearance" Style="{StaticResource FieldLabel}" />
+                <TextBlock Text="Panel Appearance" Style="{StaticResource FieldLabel}" />
                 <Button Content="Reset"
                         HorizontalAlignment="Right"
                         Style="{StaticResource PlainButton}"
@@ -212,7 +212,7 @@
                         Click="OnResetAppearance" />
             </Grid>
             <TextBlock Style="{StaticResource FieldHint}"
-                       Text="Previewed on the island itself as you change it. Cancel puts it back." />
+                       Text="The panel comes out above the tray and previews each change as you make it. Cancel puts it back." />
 
             <TextBlock Text="Colour" Margin="0,6,0,0" Style="{StaticResource FieldLabel}"
                        FontWeight="Normal" Foreground="{StaticResource Text60}" />
@@ -257,31 +257,15 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="Collapsed Opacity" Style="{StaticResource FieldLabel}"
+                <TextBlock Text="Opacity" Style="{StaticResource FieldLabel}"
                            FontWeight="Normal" Foreground="{StaticResource Text60}" />
                 <TextBlock Grid.Column="1" Style="{StaticResource FieldLabel}"
                            FontFamily="{StaticResource MonoFont}"
-                           Text="{Binding Value, ElementName=CollapsedOpacitySlider, StringFormat={}{0:P0}}" />
+                           Text="{Binding Value, ElementName=OpacitySliderControl, StringFormat={}{0:P0}}" />
             </Grid>
             <TextBlock Style="{StaticResource FieldHint}"
-                       Text="The capsule at rest, over whatever window owns the top edge. Applies to the whole island, text included." />
-            <Slider x:Name="CollapsedOpacitySlider" Style="{StaticResource OpacitySlider}"
-                    ValueChanged="OnOpacityChanged" />
-
-            <Grid Margin="0,10,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="Expanded Opacity" Style="{StaticResource FieldLabel}"
-                           FontWeight="Normal" Foreground="{StaticResource Text60}" />
-                <TextBlock Grid.Column="1" Style="{StaticResource FieldLabel}"
-                           FontFamily="{StaticResource MonoFont}"
-                           Text="{Binding Value, ElementName=ExpandedOpacitySlider, StringFormat={}{0:P0}}" />
-            </Grid>
-            <TextBlock Style="{StaticResource FieldHint}"
-                       Text="Hovered, expanded, or working in an approval card. Below ~80 % the terminal text starts to bleed through." />
-            <Slider x:Name="ExpandedOpacitySlider" Style="{StaticResource OpacitySlider}"
+                       Text="The whole card, text included. Below ~80 % the terminal text starts to bleed through whatever is behind it." />
+            <Slider x:Name="OpacitySliderControl" Style="{StaticResource OpacitySlider}"
                     ValueChanged="OnOpacityChanged" />
 
             </StackPanel>

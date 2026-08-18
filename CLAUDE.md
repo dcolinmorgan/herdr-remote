@@ -33,7 +33,7 @@ The mac and Windows clients can also skip the relay entirely. Their **direct** m
 | `demo-worker/` | Cloudflare Worker mock relay for demos | JS |
 | `herdi-mac/` | macOS menu bar app | Swift (SPM) |
 | `herdi-ios/` | iOS app with widgets + Live Activities | Swift (XcodeGen) |
-| `herdi-win/` | Windows tray app + top-edge island | C# (.NET 8 / WPF) |
+| `herdi-win/` | Windows tray app + tray flyout panel | C# (.NET 8 / WPF) |
 
 ## Running Components
 

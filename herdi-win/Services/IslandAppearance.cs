@@ -3,43 +3,41 @@ using System.Windows.Media;
 namespace Herdi.Services;
 
 /// <summary>
-/// How the island paints itself: the silhouette colour plus the two opacity levels it
-/// animates between. herdi-mac has no equivalent — its panel hides inside the notch,
-/// where pure black at full opacity is the only sensible answer. Here the capsule sits
-/// on top of whichever window owns the top-centre of the screen, so how loud it is has
-/// to be the user's call.
+/// How the flyout paints itself: the card colour and how see-through it is. herdi-mac has
+/// no equivalent — its panel hides inside the notch, where pure black at full opacity is
+/// the only sensible answer. Here the card is a surface of its own above the tray, so its
+/// colour is worth a preference; the dark default is what the rest of the styling assumes,
+/// since every foreground in Themes/Styles.xaml is white at some opacity.
 /// </summary>
-/// <param name="Fill">Silhouette colour. Always opaque: transparency is the two
-/// opacities' job, and an alpha here would compound with them.</param>
-/// <param name="CollapsedOpacity">The capsule at rest, pointer elsewhere.</param>
-/// <param name="ExpandedOpacity">Hovered, expanded, or working in a surface.</param>
-public readonly record struct IslandAppearance(
-    Color Fill,
-    double CollapsedOpacity,
-    double ExpandedOpacity)
+/// <param name="Fill">Card colour. Always opaque: transparency is
+/// <paramref name="Opacity"/>'s job, and an alpha here would compound with it.</param>
+/// <param name="Opacity">The whole card, text included.</param>
+public readonly record struct IslandAppearance(Color Fill, double Opacity)
 {
     /// <summary>
-    /// Floor for both sliders. Below this the collapsed capsule is hard to find and the
-    /// expanded text is unreadable — and since the settings dialog is reached through a
-    /// tray menu rather than the island, an invisible island would not be unrecoverable,
-    /// only annoying. The clamp keeps a hand-edited settings.json inside the same range.
+    /// Floor for the slider. Below this the text is unreadable — and since the settings
+    /// dialog is reached through the tray menu rather than through the flyout, an invisible
+    /// flyout would not be unrecoverable, only annoying. The clamp keeps a hand-edited
+    /// settings.json inside the same range.
     /// </summary>
     public const double MinOpacity = 0.2;
 
-    public const double DefaultCollapsedOpacity = 0.75;
-    public const double DefaultExpandedOpacity = 1.0;
+    /// <summary>
+    /// Opaque by default. A flyout is a surface the user summoned and is reading, not
+    /// signage sitting over someone else's window, so there is nothing to see through it
+    /// for — but a translucent card over a wallpaper is a reasonable thing to want.
+    /// </summary>
+    public const double DefaultOpacity = 1.0;
 
     /// <summary>Pure black, as herdi-mac fills the notch shape with.</summary>
     public static Color DefaultFill => Colors.Black;
 
-    public static IslandAppearance Default =>
-        new(DefaultFill, DefaultCollapsedOpacity, DefaultExpandedOpacity);
+    public static IslandAppearance Default => new(DefaultFill, DefaultOpacity);
 
-    /// <summary>Drop any alpha and pull both opacities back into range.</summary>
+    /// <summary>Drop any alpha and pull the opacity back into range.</summary>
     public IslandAppearance Normalized() => new(
         Color.FromRgb(Fill.R, Fill.G, Fill.B),
-        Clamp(CollapsedOpacity, DefaultCollapsedOpacity),
-        Clamp(ExpandedOpacity, DefaultExpandedOpacity));
+        double.IsFinite(Opacity) ? Math.Clamp(Opacity, MinOpacity, 1.0) : DefaultOpacity);
 
     public static string ToHex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
 
@@ -66,7 +64,4 @@ public readonly record struct IslandAppearance(
         }
         return null;
     }
-
-    private static double Clamp(double value, double fallback) =>
-        double.IsFinite(value) ? Math.Clamp(value, MinOpacity, 1.0) : fallback;
 }

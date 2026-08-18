@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Herdi.Services;
 
@@ -89,22 +90,28 @@ public sealed class SettingsStore
     }
 
     /// <summary>
-    /// Island colour and the two opacity levels. Anything missing or out of range falls
-    /// back to <see cref="IslandAppearance.Default"/>, so an older settings.json — or a
-    /// hand-edited one — cannot leave the island invisible.
+    /// Flyout colour and opacity. Anything missing or out of range falls back to
+    /// <see cref="IslandAppearance.Default"/>, so an older settings.json — or a hand-edited
+    /// one — cannot leave the flyout invisible.
+    ///
+    /// IslandExpandedOpacity is read for the sake of settings written while the island was
+    /// a top-edge capsule with two opacities. Its resting one described a capsule that no
+    /// longer exists and is dropped; the expanded one described exactly this card, so it
+    /// carries over. Both keys stop being written on the next save.
     /// </summary>
     public IslandAppearance Appearance
     {
         get => new IslandAppearance(
             IslandAppearance.ParseHex(_data.IslandColor) ?? IslandAppearance.DefaultFill,
-            _data.IslandCollapsedOpacity ?? IslandAppearance.DefaultCollapsedOpacity,
-            _data.IslandExpandedOpacity ?? IslandAppearance.DefaultExpandedOpacity).Normalized();
+            _data.IslandOpacity ?? _data.IslandExpandedOpacity ?? IslandAppearance.DefaultOpacity)
+            .Normalized();
         set
         {
             var normalized = value.Normalized();
             _data.IslandColor = IslandAppearance.ToHex(normalized.Fill);
-            _data.IslandCollapsedOpacity = normalized.CollapsedOpacity;
-            _data.IslandExpandedOpacity = normalized.ExpandedOpacity;
+            _data.IslandOpacity = normalized.Opacity;
+            _data.IslandCollapsedOpacity = null;
+            _data.IslandExpandedOpacity = null;
             Save();
         }
     }
@@ -150,7 +157,7 @@ public sealed class SettingsStore
     {
         try
         {
-            var json = JsonSerializer.Serialize(_data, new JsonSerializerOptions { WriteIndented = true });
+            var json = JsonSerializer.Serialize(_data, SerializerOptions);
             File.WriteAllText(_path, json);
         }
         catch (Exception)
@@ -158,6 +165,16 @@ public sealed class SettingsStore
             // Losing a preference write is preferable to crashing the tray app.
         }
     }
+
+    /// <summary>
+    /// Nulls are left out rather than written as JSON null, so a setting that has been
+    /// retired — or never set — leaves no trace in the file.
+    /// </summary>
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
 
     private static string? Protect(string plain)
     {
@@ -199,6 +216,10 @@ public sealed class SettingsStore
         public bool LaunchAtLogin { get; set; }
         public bool ShortcutInstalled { get; set; }
         public string? IslandColor { get; set; }
+        public double? IslandOpacity { get; set; }
+
+        // Written by the top-edge-capsule builds. Read once for migration, then nulled —
+        // Save omits nulls, so the next write drops them from the file for good.
         public double? IslandCollapsedOpacity { get; set; }
         public double? IslandExpandedOpacity { get; set; }
     }
