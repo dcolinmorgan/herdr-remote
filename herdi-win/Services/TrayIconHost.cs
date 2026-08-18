@@ -42,6 +42,7 @@ public sealed class TrayIconHost : IDisposable
     private readonly Forms.ToolStripMenuItem _toastErrorItem = new() { Enabled = false, Available = false };
     private readonly Forms.ToolStripMenuItem _remotesItem = new("Remote Hosts") { Available = false };
     private readonly Forms.ToolStripMenuItem _launchItem = new("Launch at Login");
+    private readonly Forms.ToolStripMenuItem _notifyFinishItem = new("Notify When Finished");
     private readonly Forms.ToolStripMenuItem _versionItem = new();
 
     /// <summary>Host list the submenu was last built from, so it is only rebuilt on change.</summary>
@@ -175,6 +176,14 @@ public sealed class TrayIconHost : IDisposable
 
         menu.Items.Add(new Forms.ToolStripSeparator());
 
+        _notifyFinishItem.CheckOnClick = false;
+        _notifyFinishItem.Click += (_, _) =>
+        {
+            _settings.NotifyOnFinish = !_settings.NotifyOnFinish;
+            Refresh();
+        };
+        menu.Items.Add(_notifyFinishItem);
+
         _launchItem.CheckOnClick = false;
         _launchItem.Click += (_, _) => ToggleLaunchAtLogin();
         menu.Items.Add(_launchItem);
@@ -222,6 +231,7 @@ public sealed class TrayIconHost : IDisposable
         _statusItem.Text = _vm.StatusSummary;
         _relayItem.Text = "  " + _vm.SourceSummary;
         _launchItem.Checked = StartupManager.IsEnabled;
+        _notifyFinishItem.Checked = _settings.NotifyOnFinish;
         RefreshRemotes();
 
         // Reconnects back off to 30s, so a silent "Disconnected" can sit there for a long

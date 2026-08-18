@@ -1,6 +1,7 @@
 using System.Collections.Specialized;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Web;
 using Herdi.Models;
@@ -140,11 +141,75 @@ public sealed class ToastService : IDisposable
     }
 
     /// <summary>
+    /// Post the agent-finished toast.
+    ///
+    /// Deliberately unlike the blocked one in three ways, because it is saying something
+    /// different: it does not use scenario="reminder" (an approval prompt must survive you
+    /// walking away, a "done" notice going stale on screen is just clutter), it gets its own
+    /// sound so the two are distinguishable without looking, and it is tagged per pane so
+    /// three agents finishing at once produce three lines rather than overwriting each other.
+    /// </summary>
+    public void ShowFinished(Agent agent)
+    {
+        if (!_registered)
+        {
+            Log($"finished skipped: not registered ({SetupError ?? "no reason recorded"})");
+            return;
+        }
+        Post(() => BuildFinishedXml(agent), $"finished: {agent.Name} @ {agent.Id}", FinishedTag(agent));
+    }
+
+    /// <summary>
+    /// Per-pane tag, so distinct agents stack in Action Center while the *same* agent
+    /// replaces its own earlier notice. That second half matters: if a status flaps between
+    /// working and idle, reusing the tag turns what would be a stream of toasts into one that
+    /// keeps being refreshed.
+    ///
+    /// Hashed rather than truncated because Tag is capped at 64 characters and a pane id is
+    /// not, and two panes whose ids share a prefix must not collapse into one toast.
+    /// </summary>
+    private static string FinishedTag(Agent agent)
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(agent.Id));
+        return "herdr-done-" + Convert.ToHexString(digest)[..16];
+    }
+
+    internal static string BuildFinishedXml(Agent agent)
+    {
+        var body = $"{agent.Name} finished in {agent.DisplayLocation}";
+        var pane = Uri.EscapeDataString(agent.Id);
+        var attribution = agent.IsRemote ? $"{agent.Host} · herdr" : "herdr";
+        var launch = $"action=open&amp;pane={pane}";
+
+        // A reply box rather than buttons: a finished agent has no options to pick from, but
+        // "now do this next" is the obvious thing to want, and it costs nothing — the reply
+        // path already routes free text through agent_prompt.
+        var reply = Esc($"Tell {agent.Name} what's next…");
+
+        return $"""
+            <toast launch="{launch}" activationType="background">
+              <visual>
+                <binding template="ToastGeneric">
+                  <text>Agent Finished</text>
+                  <text>{Esc(body)}</text>
+                  <text placement="attribution">{Esc(attribution)}</text>
+                </binding>
+              </visual>
+              <audio src="ms-winsoundevent:Notification.IM"/>
+              <actions>
+                <input id="reply" type="text" placeHolderContent="{reply}"/>
+                <action content="Send" hint-inputId="reply" arguments="action=reply&amp;pane={pane}" activationType="background"/>
+              </actions>
+            </toast>
+            """;
+    }
+
+    /// <summary>
     /// Hand one toast to Windows, recording what happened. Every failure mode below is
     /// otherwise invisible: a malformed payload, a notifier that will not construct, and an
     /// OS that has notifications switched off all produce the same nothing on screen.
     /// </summary>
-    private void Post(Func<string> buildXml, string what)
+    private void Post(Func<string> buildXml, string what, string? tag = null)
     {
         // Built inside the try, not passed in already built: an exception while composing the
         // payload would otherwise escape past this handler and reach the dispatcher, turning a
@@ -177,9 +242,10 @@ public sealed class ToastService : IDisposable
 
             var toast = new ToastNotification(doc)
             {
-                // Same tag for every blocked toast: a newer prompt replaces the older
-                // one rather than stacking, matching the relay's push collapse topic.
-                Tag = ToastTag,
+                // Blocked toasts all share one tag, so a newer prompt replaces the older
+                // rather than stacking, matching the relay's push collapse topic. Finished
+                // ones pass their own per-pane tag instead.
+                Tag = tag ?? ToastTag,
                 Group = ToastGroup,
             };
             notifier.Show(toast);

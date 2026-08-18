@@ -60,6 +60,13 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
     /// <summary>Raised when a blocked agent is answered elsewhere, so a stale toast can be pulled.</summary>
     public event Action<Agent>? AgentUnblocked;
 
+    /// <summary>
+    /// Raised when an agent that was working goes idle — it finished. The counterpart of
+    /// <see cref="AgentBlocked"/>: one says the agent needs you before it can continue, this
+    /// one says it no longer needs anything.
+    /// </summary>
+    public event Action<Agent>? AgentFinished;
+
     /// <summary>Raised for `pane_content` replies to <see cref="ReadPane"/>.</summary>
     public event Action<string, string>? PaneContentReceived;
 
@@ -306,6 +313,7 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         if (existing is not null)
         {
             var wasBlocked = existing.Status == AgentStatus.Blocked;
+            var wasWorking = existing.Status == AgentStatus.Working;
             becameBlocked = status == AgentStatus.Blocked && !wasBlocked;
             existing.Name = data.Agent;
             existing.Status = status;
@@ -318,6 +326,13 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
                 existing.ClearPrompt();
                 AgentUnblocked?.Invoke(existing);
             }
+
+            // Finished. Strictly Idle, not merely "no longer Working": Unknown is what a
+            // status we could not parse becomes, so treating it as finished would fire a
+            // notification every time a poll came back garbled. Blocked is not finished
+            // either — AgentBlocked already speaks for that one.
+            if (wasWorking && status == AgentStatus.Idle) AgentFinished?.Invoke(existing);
+
             return existing;
         }
 

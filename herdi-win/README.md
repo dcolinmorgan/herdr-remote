@@ -86,6 +86,7 @@ toasts stop working without it.
 | Direct mode | polls `herdr pane list` here — locally and over SSH — with no relay |
 | Remote agents | either mode; the row shows `⇄` and the host it lives on |
 | Blocked-agent toast | Title, body, sound — **plus** permission buttons and a reply box |
+| Agent-finished toast | when a working agent goes idle, with a box to say what's next; own sound, one per agent |
 | Answer from the toast | Approve / Deny inline, or type a reply, without opening the panel |
 | Tray flyout | click the icon to open, again (or away, or `Esc`) to close; nothing on screen in between |
 | Taskbar aware | anchors to the notification-area corner for a taskbar on any of the four edges, at any DPI |
@@ -99,6 +100,7 @@ toasts stop working without it.
 | Tray tooltip | the full breakdown — `2 waiting on you · 3 working · 1 idle` |
 | Reconnect | exponential backoff capped at 30s |
 | Launch at login | per-user `Run` registry key |
+| Notify When Finished | tray toggle; on by default |
 | Self-update | GitHub Releases, same repo and 10-minute throttle as the mac app |
 | Token storage | DPAPI-encrypted (CurrentUser) in `%LOCALAPPDATA%\herdr-remote\settings.json` |
 | Fullscreen awareness | a blocked agent does not pop the panel while another app is fullscreen or presenting |
@@ -107,6 +109,33 @@ toasts stop working without it.
 The toast is deliberately richer than the macOS one: `sendNotification` on macOS
 (`herdi-mac/Sources/RelayConnection.swift:433`) posts text and a sound with no actions,
 so answering there always means opening the panel.
+
+### Two notifications, saying different things
+
+`AgentBlocked` fires when an agent needs you before it can continue; `AgentFinished` fires on
+the `Working → Idle` transition, when it no longer needs anything. Neither client this was
+ported from has the second one — the macOS and iOS apps notify only on blocked — and an agent
+you set going and walked away from is exactly the case where being told it is *done* is worth
+as much as being told it is stuck.
+
+The two toasts are shaped differently on purpose:
+
+| | Blocked | Finished |
+|---|---|---|
+| `scenario` | `reminder` — stays until dismissed | default — a stale "done" notice is clutter |
+| Sound | `Notification.Default` | `Notification.IM`, so they differ by ear |
+| Tag | one for all, newest replaces | per pane, so several finishing agents stack |
+| Actions | Allow / Deny / Trust + reply | reply only — nothing to pick from |
+| Panel | pops (unless fullscreen) | does not; the toast's click opens it |
+
+"Finished" is strictly `Idle`, never merely *not* `Working`. `Unknown` is what an unparseable
+status becomes, so counting it would fire a notification every time a poll came back garbled,
+and `Blocked` has its own toast already. Panes that vanish from a poll are removed rather than
+called finished — a closed pane is not a completed one, and there would be nothing to open.
+
+Volume is the risk with this one, so **Notify When Finished** in the tray menu turns it off,
+and the per-pane tag means an agent whose status flaps between working and idle refreshes one
+toast instead of producing a stream of them.
 
 ## Direct mode
 
@@ -257,26 +286,29 @@ second copy.
 
 ### When nothing appears
 
-A malformed payload is dropped by the platform without a word, and two bugs of exactly that
-kind were the reason no toast ever appeared on Windows: `scenario` was set to
-`urgentReminder`, which is not one of the four values that exist (`reminder`, `alarm`,
-`incomingCall`, `urgent`), and `<audio>` was placed after `<actions>` when the
-[`toast` element](https://learn.microsoft.com/en-us/uwp/schemas/tiles/toastschema/element-toast)
-is an ordered sequence of `visual, audio?, commands?, actions?, header?`. Either one alone is
-enough for the notification to be discarded silently — no exception, no event log, nothing on
-screen.
+Notifications have an unusual number of ways to produce *silence* rather than an error, so
+they get more instrumentation than the rest of the app:
 
-The OS may also simply have notifications switched off. `ToastNotifier.Setting` is the only
-place Windows says so; `DeliveryBlocked` translates it (`DisabledForApplication`,
-`DisabledForUser`, `DisabledByGroupPolicy`) into something readable. And setup can fail per
-machine — the shortcut write, the CLSID registration, or the toast call itself, none of which
-may take the app down since notifications are meant to degrade rather than crash it.
-`SetupError` records which, with the HRESULT, because the useful ones are numbers:
-`0x80070490` (element not found) means the AUMID shortcut is not resolving, the usual
-first-run failure.
+- **A malformed payload is dropped without a word.** Two bugs of exactly this kind shipped
+  and were the reason no toast ever appeared on Windows: `scenario` was set to
+  `urgentReminder`, which is not one of the four values that exist (`reminder`, `alarm`,
+  `incomingCall`, `urgent`), and `<audio>` was placed after `<actions>` when the
+  [`toast` element](https://learn.microsoft.com/en-us/uwp/schemas/tiles/toastschema/element-toast)
+  is an ordered sequence of `visual, audio?, commands?, actions?, header?`. Either one alone
+  is enough for the platform to discard the notification silently.
+- **The OS may simply have them switched off.** `ToastNotifier.Setting` is the only place
+  Windows says so; `DeliveryBlocked` translates it (`DisabledForApplication`,
+  `DisabledForUser`, `DisabledByGroupPolicy`) into something readable.
+- **Setup can fail per machine** — the shortcut write, the CLSID registration, or the toast
+  call itself, none of which may take the app down since notifications are meant to degrade
+  rather than crash it. `SetupError` records which, with the HRESULT, because the useful ones
+  are numbers: `0x80070490` (element not found) means the AUMID shortcut is not resolving,
+  the usual first-run failure.
 
-`Problem` folds those two together and `TrayIconHost` shows it as a tray-menu line, the same
-treatment `IslandViewModel.ConnectionError` gets. Beyond that, every attempt is recorded in
+`Problem` folds the last two together and `TrayIconHost` shows it as a tray-menu line, the
+same treatment `IslandViewModel.ConnectionError` gets.
+
+Beyond that, every attempt is recorded in
 [`DiagnosticLog`](Services/DiagnosticLog.cs) — `%LOCALAPPDATA%\herdr-remote\herdi.log` — with
 the payload and HRESULT on failure. A tray app has no console and no window, so a subsystem
 that fails quietly by design has no other way to account for itself.
@@ -310,10 +342,15 @@ that fails quietly by design has no other way to account for itself.
 
 Compiles clean (`dotnet build`, zero warnings) and publishes to a single exe. Written and
 compile-verified on Linux, so everything the compiler cannot check is unverified until it
-runs on Windows: toast delivery and COM activation, the AUMID shortcut, flyout placement
+runs on Windows: COM activation, the AUMID shortcut, flyout placement
 against a taskbar on each of the four edges and across multi-monitor and mixed-DPI setups,
 whether a tray click that dismisses the flyout is reliably swallowed rather than reopening
 it, the slide-in feel, and the settings dialog's retemplated sliders and colour picker.
+
+Toast delivery was the one thing this bit: the payload is now validated against the
+published `toast` element schema — well-formedness, `scenario` against its four legal values,
+child-element order, and the five-action cap — which is what caught the two silent-drop bugs
+described above. That the platform then *shows* it still needs a real machine.
 
 The badge geometry *was* checked: the disc fraction, ring width, digit size and the colour
 pairing were each chosen by rendering the real .ico frames at 16 / 20 / 24 / 32 px through an

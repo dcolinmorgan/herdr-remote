@@ -44,6 +44,21 @@ public sealed class SettingsStore
         }
     }
 
+    /// <summary>
+    /// Whether an agent finishing raises a notification. On by default, since it is what the
+    /// feature was asked for, and toggleable from the tray because "every agent that finishes"
+    /// is exactly the kind of notification that goes from useful to unbearable with volume.
+    ///
+    /// Nullable in the file on purpose: a plain bool deserialises a *missing* key to false, so
+    /// shipping it that way would leave the feature silently off for everyone who already has
+    /// a settings.json.
+    /// </summary>
+    public bool NotifyOnFinish
+    {
+        get => _data.NotifyOnFinish ?? true;
+        set { _data.NotifyOnFinish = value; Save(); }
+    }
+
     public string RelayUrl
     {
         get => string.IsNullOrWhiteSpace(_data.RelayUrl) ? DefaultRelayUrl : _data.RelayUrl!;
@@ -214,6 +229,7 @@ public sealed class SettingsStore
         public List<string>? Remotes { get; set; }
         public string? HerdrPath { get; set; }
         public bool LaunchAtLogin { get; set; }
+        public bool? NotifyOnFinish { get; set; }
         public bool ShortcutInstalled { get; set; }
         public string? IslandColor { get; set; }
         public double? IslandOpacity { get; set; }

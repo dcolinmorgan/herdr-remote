@@ -75,6 +75,7 @@ public partial class App : Application
 
         _relay.AgentBlocked += OnAgentBlocked;
         _relay.AgentUnblocked += _ => _toasts?.ClearBlocked();
+        _relay.AgentFinished += OnAgentFinished;
 
         _relay.Connect();
 
@@ -89,6 +90,16 @@ public partial class App : Application
     {
         _toasts?.ShowBlocked(agent);
         _island?.PopForBlocked(agent);
+    }
+
+    /// <summary>
+    /// An agent finished. Notify, but do not pop the panel: being told is the point, and a
+    /// panel that appeared every time any agent went idle would be worse than no notification
+    /// at all. The toast's own click opens it for anyone who wants to look.
+    /// </summary>
+    private void OnAgentFinished(Agent agent)
+    {
+        if (_settings?.NotifyOnFinish ?? true) _toasts?.ShowFinished(agent);
     }
 
     /// <summary>Apply a button press or inline reply from a toast.</summary>
