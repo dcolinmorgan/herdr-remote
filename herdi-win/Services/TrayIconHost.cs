@@ -67,6 +67,13 @@ public sealed class TrayIconHost : IDisposable
     /// <summary>Raised after the relay URL or token changed, so the caller can reconnect.</summary>
     public event Action? SettingsSaved;
 
+    /// <summary>
+    /// Raised for every appearance edit made in the settings dialog, saved or not, so the
+    /// island can preview it. Cancelling the dialog raises one last time with the stored
+    /// appearance, which puts it back.
+    /// </summary>
+    public event Action<IslandAppearance>? AppearancePreviewed;
+
     private static Drawing.Icon? LoadIcon(string fileName)
     {
         try
@@ -150,7 +157,7 @@ public sealed class TrayIconHost : IDisposable
 
     private void OpenSettings()
     {
-        var window = new Views.SettingsWindow(_settings);
+        var window = new Views.SettingsWindow(_settings, a => AppearancePreviewed?.Invoke(a));
         window.ShowDialog();
         if (window.Saved) SettingsSaved?.Invoke();
     }

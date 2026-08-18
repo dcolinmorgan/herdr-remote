@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Herdi.Models;
+using Herdi.Services;
 using Herdi.ViewModels;
 
 namespace Herdi.Views;
@@ -43,14 +44,6 @@ public partial class IslandWindow : Window
     /// </summary>
     private static readonly TimeSpan PointerPollInterval = TimeSpan.FromMilliseconds(120);
 
-    /// <summary>
-    /// Opacity of the collapsed island. On macOS the collapsed panel hides inside the
-    /// notch, where it covers nothing; here it sits on top of whichever window owns the
-    /// top-centre of the screen, so it is toned down to read as an overlay rather than a
-    /// hole punched in that window. Hover and expansion take it back to full.
-    /// </summary>
-    private const double IdleOpacity = 0.75;
-
     private readonly IslandViewModel _vm;
     private readonly DispatcherTimer _hoverTimer = new();
     private readonly DispatcherTimer _presenceTimer = new();
@@ -64,16 +57,27 @@ public partial class IslandWindow : Window
     /// <summary>Width the last animation aimed at, so a regroup can skip a no-op animation.</summary>
     private double _widthTarget = double.NaN;
 
-    public IslandWindow(IslandViewModel vm)
+    /// <summary>
+    /// Colour and the two opacity levels, from Settings. On macOS the collapsed panel
+    /// hides inside the notch, where it covers nothing and its look is not worth a
+    /// preference; here it sits on top of whichever window owns the top-centre of the
+    /// screen, so the default is toned down to read as an overlay rather than a hole
+    /// punched in that window — and how far down is the user's to change.
+    /// </summary>
+    private IslandAppearance _appearance;
+
+    public IslandWindow(IslandViewModel vm, SettingsStore settings)
     {
         _vm = vm;
+        _appearance = settings.Appearance;
         InitializeComponent();
         DataContext = vm;
 
         // Seed the collapsed width so the first frame is already island-shaped rather than
         // shrink-wrapped around the content, and so Width never starts out Auto.
         Root.Width = _widthTarget = TargetWidth();
-        Root.Opacity = IdleOpacity;
+        Silhouette.Fill = FillBrush(_appearance);
+        Root.Opacity = _appearance.CollapsedOpacity;
 
         _vm.SurfaceChanged += ApplySurface;
         // Agents appearing or changing group resizes the collapsed island and toggles the
@@ -217,7 +221,7 @@ public partial class IslandWindow : Window
         _prehover = on;
         if (_vm.IsExpanded) return;
         AnimateWidth(TargetWidth(), MicroEase());
-        AnimateOpacity(on ? 1.0 : IdleOpacity, MicroEase());
+        AnimateOpacity(CurrentOpacity(), MicroEase());
     }
 
     // A row's context menu opens in its own window, which deactivates this one and puts
@@ -278,7 +282,7 @@ public partial class IslandWindow : Window
         var easing = _vm.Surface == IslandSurface.Approval ? PopEase() : (expanded ? OpenEase() : CloseEase());
         AnimateWidth(TargetWidth(), easing);
         AnimateShape(expanded ? 14 : 3, expanded ? 24 : 12, easing);
-        AnimateOpacity(expanded || _isHovered ? 1.0 : IdleOpacity, easing);
+        AnimateOpacity(CurrentOpacity(), easing);
         ApplyClickThrough();
 
         if (_vm.Surface == IslandSurface.Approval)
@@ -342,6 +346,36 @@ public partial class IslandWindow : Window
         };
         Root.BeginAnimation(WidthProperty, animation);
     }
+
+    /// <summary>
+    /// Repaint from the settings dialog while it is open, so the sliders preview against
+    /// the real island instead of a swatch. Opacity goes back through the animation path
+    /// rather than the property: an animation with FillBehavior.HoldEnd owns Root.Opacity,
+    /// and a plain assignment underneath it would never be seen.
+    /// </summary>
+    public void ApplyAppearance(IslandAppearance appearance)
+    {
+        _appearance = appearance.Normalized();
+        Silhouette.Fill = FillBrush(_appearance);
+        AnimateOpacity(CurrentOpacity(), MicroEase());
+    }
+
+    private static Brush FillBrush(IslandAppearance appearance)
+    {
+        var brush = new SolidColorBrush(appearance.Fill);
+        brush.Freeze();
+        return brush;
+    }
+
+    /// <summary>
+    /// Opacity the island belongs at right now. Anything short of resting-and-untouched
+    /// counts as expanded: prehover is the island acknowledging the pointer, and dimming
+    /// what somebody is already reaching for reads as a glitch.
+    /// </summary>
+    private double CurrentOpacity() =>
+        _vm.IsExpanded || _isHovered || _prehover
+            ? _appearance.ExpandedOpacity
+            : _appearance.CollapsedOpacity;
 
     private void AnimateOpacity(double target, IEasingFunction easing)
     {

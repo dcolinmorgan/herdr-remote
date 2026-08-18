@@ -29,62 +29,102 @@
             <Setter Property="FontSize" Value="11" />
             <Setter Property="Margin" Value="0,0,16,0" />
         </Style>
+
+        <!-- One of the preset island colours. Tag carries the hex the click handler reads. -->
+        <Style x:Key="Swatch" TargetType="Button">
+            <Setter Property="Width" Value="22" />
+            <Setter Property="Height" Value="22" />
+            <Setter Property="Margin" Value="0,0,6,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{StaticResource Stroke15}"
+                                BorderThickness="0.7"
+                                CornerRadius="5" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- The halves of the slider track either side of the thumb. Templated away
+             entirely: the stock RepeatButton would paint two grey slabs on the track. -->
+        <Style x:Key="SliderTrackButton" TargetType="RepeatButton">
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RepeatButton">
+                        <Border Background="Transparent" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Retemplated for the same reason as IslandMenuItem: the Aero2 slider is a light
+             grey trough that reads as a different application on this background. -->
+        <Style x:Key="OpacitySlider" TargetType="Slider">
+            <Setter Property="Minimum" Value="0.2" />
+            <Setter Property="Maximum" Value="1" />
+            <Setter Property="SmallChange" Value="0.01" />
+            <Setter Property="LargeChange" Value="0.05" />
+            <Setter Property="TickFrequency" Value="0.01" />
+            <Setter Property="IsSnapToTickEnabled" Value="True" />
+            <!-- Click anywhere on the track to jump there, rather than stepping one
+                 LargeChange per click the way the stock RepeatButtons do. -->
+            <Setter Property="IsMoveToPointEnabled" Value="True" />
+            <Setter Property="Height" Value="22" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid VerticalAlignment="Center">
+                            <Border Height="3" CornerRadius="1.5" VerticalAlignment="Center"
+                                    Background="{StaticResource Stroke15}" />
+                            <!-- Orientation and the range are stated rather than left to
+                                 the PART_Track contract: the stock themes set them by
+                                 hand too, and a Track that silently defaulted to vertical
+                                 would lay the thumb out along the wrong axis. -->
+                            <Track x:Name="PART_Track"
+                                   Orientation="Horizontal"
+                                   Minimum="{TemplateBinding Minimum}"
+                                   Maximum="{TemplateBinding Maximum}"
+                                   Value="{TemplateBinding Value}">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Style="{StaticResource SliderTrackButton}"
+                                                  Command="Slider.DecreaseLarge" />
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Style="{StaticResource SliderTrackButton}"
+                                                  Command="Slider.IncreaseLarge" />
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Width="14" Height="14">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Ellipse Fill="White" />
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
-    <StackPanel Margin="20">
+    <!-- The fields scroll and the buttons do not: Appearance made the dialog tall enough
+         to outgrow a 768px display, and SizeToContent with no scroll would put Save off
+         the bottom of the screen where a NoResize window could never reach it. The window
+         is capped to the work area in the constructor. -->
+    <DockPanel>
 
-        <TextBlock Text="Source" Style="{StaticResource FieldLabel}" />
-        <TextBlock Style="{StaticResource FieldHint}"
-                   Text="Relay reads state over a WebSocket. Direct runs the herdr CLI itself — here and over SSH — with no relay in between." />
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-            <RadioButton x:Name="RelayModeChoice" Style="{StaticResource ModeChoice}"
-                         Content="Relay (WebSocket)" GroupName="Mode"
-                         Checked="OnModeChanged" />
-            <RadioButton x:Name="DirectModeChoice" Style="{StaticResource ModeChoice}"
-                         Content="Direct (herdr CLI + SSH)" GroupName="Mode"
-                         Checked="OnModeChanged" />
-        </StackPanel>
-
-        <!-- Relay fields -->
-        <StackPanel x:Name="RelayFields">
-            <TextBlock Text="Relay URL" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
-            <TextBlock Style="{StaticResource FieldHint}"
-                       Text="ws://127.0.0.1:8375 locally, or the wss:// tunnel URL." />
-            <TextBox x:Name="UrlBox" Style="{StaticResource ReplyBox}" />
-
-            <TextBlock Text="Relay Token" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
-            <TextBlock Style="{StaticResource FieldHint}"
-                       Text="Required when the relay binds beyond loopback or runs behind a tunnel (HERDR_RELAY_TOKEN). Stored encrypted with DPAPI." />
-            <PasswordBox x:Name="TokenBox"
-                         Background="{StaticResource Fill05}"
-                         Foreground="White"
-                         CaretBrush="White"
-                         BorderBrush="{StaticResource Stroke10}"
-                         BorderThickness="0.7"
-                         Padding="10,7"
-                         FontFamily="{StaticResource MonoFont}"
-                         FontSize="11" />
-        </StackPanel>
-
-        <!-- Direct fields -->
-        <StackPanel x:Name="DirectFields" Visibility="Collapsed">
-            <TextBlock Text="SSH Hosts" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
-            <TextBlock Style="{StaticResource FieldHint}"
-                       Text="One target per line, e.g. user@devbox — the same list the relay takes as HERDR_REMOTES. Key or ssh-agent auth only: the connection runs with BatchMode=yes and never prompts. Stored in plaintext; hosts are not secrets." />
-            <TextBox x:Name="RemotesBox"
-                     Style="{StaticResource ReplyBox}"
-                     AcceptsReturn="True"
-                     TextWrapping="NoWrap"
-                     VerticalScrollBarVisibility="Auto"
-                     Height="76" />
-
-            <TextBlock Text="Local herdr Path" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
-            <TextBlock Style="{StaticResource FieldHint}"
-                       Text="Optional. Leave empty to use HERDR_BIN or PATH. Windows usually has no local herdr at all, in which case only the SSH hosts above are polled." />
-            <TextBox x:Name="HerdrPathBox" Style="{StaticResource ReplyBox}" />
-        </StackPanel>
-
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+        <StackPanel DockPanel.Dock="Bottom"
+                    Orientation="Horizontal" HorizontalAlignment="Right"
+                    Margin="20,14,20,20">
             <Button Content="Cancel"
                     Style="{StaticResource PlainButton}"
                     Background="{StaticResource Fill06}"
@@ -101,5 +141,151 @@
                     Click="OnSave" />
         </StackPanel>
 
-    </StackPanel>
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Padding="20,20,20,0">
+            <StackPanel>
+
+            <TextBlock Text="Source" Style="{StaticResource FieldLabel}" />
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="Relay reads state over a WebSocket. Direct runs the herdr CLI itself — here and over SSH — with no relay in between." />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <RadioButton x:Name="RelayModeChoice" Style="{StaticResource ModeChoice}"
+                             Content="Relay (WebSocket)" GroupName="Mode"
+                             Checked="OnModeChanged" />
+                <RadioButton x:Name="DirectModeChoice" Style="{StaticResource ModeChoice}"
+                             Content="Direct (herdr CLI + SSH)" GroupName="Mode"
+                             Checked="OnModeChanged" />
+            </StackPanel>
+
+            <!-- Relay fields -->
+            <StackPanel x:Name="RelayFields">
+                <TextBlock Text="Relay URL" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
+                <TextBlock Style="{StaticResource FieldHint}"
+                           Text="ws://127.0.0.1:8375 locally, or the wss:// tunnel URL." />
+                <TextBox x:Name="UrlBox" Style="{StaticResource ReplyBox}" />
+
+                <TextBlock Text="Relay Token" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
+                <TextBlock Style="{StaticResource FieldHint}"
+                           Text="Required when the relay binds beyond loopback or runs behind a tunnel (HERDR_RELAY_TOKEN). Stored encrypted with DPAPI." />
+                <PasswordBox x:Name="TokenBox"
+                             Background="{StaticResource Fill05}"
+                             Foreground="White"
+                             CaretBrush="White"
+                             BorderBrush="{StaticResource Stroke10}"
+                             BorderThickness="0.7"
+                             Padding="10,7"
+                             FontFamily="{StaticResource MonoFont}"
+                             FontSize="11" />
+            </StackPanel>
+
+            <!-- Direct fields -->
+            <StackPanel x:Name="DirectFields" Visibility="Collapsed">
+                <TextBlock Text="SSH Hosts" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
+                <TextBlock Style="{StaticResource FieldHint}"
+                           Text="One target per line, e.g. user@devbox — the same list the relay takes as HERDR_REMOTES. Key or ssh-agent auth only: the connection runs with BatchMode=yes and never prompts. Stored in plaintext; hosts are not secrets." />
+                <TextBox x:Name="RemotesBox"
+                         Style="{StaticResource ReplyBox}"
+                         AcceptsReturn="True"
+                         TextWrapping="NoWrap"
+                         VerticalScrollBarVisibility="Auto"
+                         Height="76" />
+
+                <TextBlock Text="Local herdr Path" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
+                <TextBlock Style="{StaticResource FieldHint}"
+                           Text="Optional. Leave empty to use HERDR_BIN or PATH. Windows usually has no local herdr at all, in which case only the SSH hosts above are polled." />
+                <TextBox x:Name="HerdrPathBox" Style="{StaticResource ReplyBox}" />
+            </StackPanel>
+
+            <!-- Appearance. Belongs to neither mode, so it sits below both field groups. -->
+            <Border Height="0.7" Margin="0,18,0,0" Background="{StaticResource Stroke10}" />
+
+            <Grid Margin="0,16,0,0">
+                <TextBlock Text="Island Appearance" Style="{StaticResource FieldLabel}" />
+                <Button Content="Reset"
+                        HorizontalAlignment="Right"
+                        Style="{StaticResource PlainButton}"
+                        Foreground="{StaticResource Text60}"
+                        FontFamily="{StaticResource UiFont}"
+                        FontSize="11"
+                        Padding="6,2"
+                        Click="OnResetAppearance" />
+            </Grid>
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="Previewed on the island itself as you change it. Cancel puts it back." />
+
+            <TextBlock Text="Colour" Margin="0,6,0,0" Style="{StaticResource FieldLabel}"
+                       FontWeight="Normal" Foreground="{StaticResource Text60}" />
+            <Grid Margin="0,4,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="ColorPreview" Grid.Column="0"
+                        Width="32" Height="32" CornerRadius="7" Margin="0,0,8,0"
+                        BorderBrush="{StaticResource Stroke15}" BorderThickness="0.7" />
+                <TextBox x:Name="ColorBox" Grid.Column="1"
+                         Style="{StaticResource ReplyBox}"
+                         Tag="#000000"
+                         VerticalAlignment="Center"
+                         TextChanged="OnColorTextChanged" />
+                <Button Grid.Column="2" Content="Pick…"
+                        Style="{StaticResource PlainButton}"
+                        Background="{StaticResource Fill06}"
+                        Padding="12,7" Margin="8,0,0,0"
+                        Click="OnPickColor" />
+            </Grid>
+
+            <StackPanel Orientation="Horizontal" Margin="40,8,0,0">
+                <Button Style="{StaticResource Swatch}" Background="#000000" Tag="#000000"
+                        ToolTip="Black — the herdi-mac fill" Click="OnSwatchPicked" />
+                <Button Style="{StaticResource Swatch}" Background="#1C1C1E" Tag="#1C1C1E"
+                        ToolTip="Graphite" Click="OnSwatchPicked" />
+                <Button Style="{StaticResource Swatch}" Background="#0E1621" Tag="#0E1621"
+                        ToolTip="Midnight" Click="OnSwatchPicked" />
+                <Button Style="{StaticResource Swatch}" Background="#0F1F17" Tag="#0F1F17"
+                        ToolTip="Forest" Click="OnSwatchPicked" />
+                <Button Style="{StaticResource Swatch}" Background="#1D1226" Tag="#1D1226"
+                        ToolTip="Plum" Click="OnSwatchPicked" />
+                <Button Style="{StaticResource Swatch}" Background="#241209" Tag="#241209"
+                        ToolTip="Espresso" Click="OnSwatchPicked" />
+            </StackPanel>
+
+            <Grid Margin="0,16,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Collapsed Opacity" Style="{StaticResource FieldLabel}"
+                           FontWeight="Normal" Foreground="{StaticResource Text60}" />
+                <TextBlock Grid.Column="1" Style="{StaticResource FieldLabel}"
+                           FontFamily="{StaticResource MonoFont}"
+                           Text="{Binding Value, ElementName=CollapsedOpacitySlider, StringFormat={}{0:P0}}" />
+            </Grid>
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="The capsule at rest, over whatever window owns the top edge. Applies to the whole island, text included." />
+            <Slider x:Name="CollapsedOpacitySlider" Style="{StaticResource OpacitySlider}"
+                    ValueChanged="OnOpacityChanged" />
+
+            <Grid Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Expanded Opacity" Style="{StaticResource FieldLabel}"
+                           FontWeight="Normal" Foreground="{StaticResource Text60}" />
+                <TextBlock Grid.Column="1" Style="{StaticResource FieldLabel}"
+                           FontFamily="{StaticResource MonoFont}"
+                           Text="{Binding Value, ElementName=ExpandedOpacitySlider, StringFormat={}{0:P0}}" />
+            </Grid>
+            <TextBlock Style="{StaticResource FieldHint}"
+                       Text="Hovered, expanded, or working in an approval card. Below ~80 % the terminal text starts to bleed through." />
+            <Slider x:Name="ExpandedOpacitySlider" Style="{StaticResource OpacitySlider}"
+                    ValueChanged="OnOpacityChanged" />
+
+            </StackPanel>
+        </ScrollViewer>
+
+    </DockPanel>
 </Window>

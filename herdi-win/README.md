@@ -56,7 +56,10 @@ Output lands in `dist\<arch>\Herdi.exe`.
      `wss://` tunnel URL) and the token if the relay requires one.
    - **Direct (herdr CLI + SSH)** — enter one SSH target per line, e.g. `user@devbox`.
      No relay needed. See [Direct mode](#direct-mode) for the auth requirement.
-3. Tray → **Launch at Login** to start with Windows.
+3. Tray → **Settings…** → **Island Appearance** to set the capsule's colour and how
+   see-through it is at rest and once expanded. It previews on the real island as you
+   drag, since transparency only makes sense against whatever is behind it.
+4. Tray → **Launch at Login** to start with Windows.
 
 First run writes a Start Menu shortcut named *Herdi*. **Don't delete it** — Windows
 resolves this app's notification identity (AppUserModelID) through that shortcut, and
@@ -72,6 +75,7 @@ toasts stop working without it.
 | Blocked-agent toast | Title, body, sound — **plus** permission buttons and a reply box |
 | Answer from the toast | Approve / Deny inline, or type a reply, without opening the island |
 | Top capsule | Hover to expand; collapsed it is click-through and dimmed |
+| Appearance | Island colour plus separate collapsed / expanded opacity, previewed live |
 | Session list | NEEDS YOU / WORKING / IDLE, blocked hoisted to the top |
 | Approval card | diff-highlighted prompt, mapped response buttons, custom reply |
 | Pane view | click any row for its live terminal, and a box to message the agent |
@@ -139,7 +143,9 @@ still open the approval card.
 than measured from `screen.auxiliaryTopLeftArea`, and it sits on the primary display's
 top edge — over whatever window owns that strip, where macOS has hardware and nothing
 underneath. Collapsed, it therefore carries `WS_EX_TRANSPARENT` so every click reaches
-that window, and it sits at 75 % opacity; expanding takes both back. Hover consequently
+that window, and it sits at 75 % opacity; expanding takes both back. Both opacities and
+the fill colour are preferences here rather than the constants they are on macOS — a
+panel hiding inside a notch covers nothing and has nothing to tune. Hover consequently
 cannot come from `MouseEnter` — a click-through window receives no mouse messages — so it
 is decided by sampling the cursor position every 120 ms. That also fixes a jitter the
 event-driven version had: expanding animates the width and re-centres the window, sweeping
@@ -156,8 +162,10 @@ between Windows 10 and 11; text symbols render the same on both.
 **One settings dialog.** The mac app spreads the same choices across its status menu (a
 Direct/Relay toggle, an add-remote sheet) plus `UserDefaults` keys it never surfaces, and
 it has no way to type a relay URL at all. Here the source, the relay URL and token, the
-SSH hosts and the herdr path live in one dialog, and the choice is remembered across
-launches.
+SSH hosts, the herdr path and the island's appearance live in one dialog, and the choices
+are remembered across launches. The appearance controls apply to the live island while
+the dialog is open and are rolled back on Cancel; opacity is clamped to ≥ 20 % so a
+mis-drag cannot make the island impossible to find.
 
 **Multi-select is relay-only.** `question_toggle` / `question_submit` are relay-protocol
 messages with no herdr CLI verb behind them, so the checkboxes are inert in direct mode
@@ -216,6 +224,7 @@ second copy.
 | `Services/TrayIconHost.cs` | `NSStatusItem` + `rebuildMenu` |
 | `Services/Updater.cs` | `Updater.swift` |
 | `Services/SettingsStore.cs` | `UserDefaults` + Keychain |
+| `Services/IslandAppearance.cs` | — (macOS hides the panel in the notch; nothing to tune) |
 | `Views/IslandWindow.xaml` | `NotchPanel.swift` |
 | `Views/SessionListView.xaml` | `SessionListContent` |
 | `Views/ApprovalCardView.xaml` | `ApprovalCard` |
@@ -228,5 +237,6 @@ second copy.
 Compiles clean (`dotnet build`, zero warnings) and publishes to a single exe. Written and
 compile-verified on Linux, so everything the compiler cannot check is unverified until it
 runs on Windows: toast delivery and COM activation, the AUMID shortcut, capsule placement
-across multi-monitor and mixed-DPI setups, the hover feel, and the click-through toggle
-between the collapsed and expanded states.
+across multi-monitor and mixed-DPI setups, the hover feel, the click-through toggle
+between the collapsed and expanded states, and the settings dialog's retemplated sliders
+and colour picker.

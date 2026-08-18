@@ -46,13 +46,20 @@ public partial class App : Application
         _toasts = new ToastService(_settings);
         _vm = new IslandViewModel(_relay, _updater);
 
-        _island = new IslandWindow(_vm);
+        _island = new IslandWindow(_vm, _settings);
         _island.Show();
 
         _tray = new TrayIconHost(_vm, _settings, _updater);
         _tray.ShowIslandRequested += () => _island?.ShowIsland();
         _tray.QuitRequested += Shutdown;
-        _tray.SettingsSaved += () => _relay?.Connect();
+        _tray.SettingsSaved += () =>
+        {
+            _relay?.Connect();
+            // The island is already showing this from the live preview; re-applying costs
+            // nothing and covers a save that skipped the preview path.
+            _island?.ApplyAppearance(_settings.Appearance);
+        };
+        _tray.AppearancePreviewed += appearance => _island?.ApplyAppearance(appearance);
 
         // Notifications are optional: if the shortcut or COM registration fails the app
         // still works, it just cannot toast.

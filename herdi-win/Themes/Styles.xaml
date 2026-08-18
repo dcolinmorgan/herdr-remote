@@ -12,7 +12,9 @@
 
     <!-- Palette. The island is deliberately always dark: it impersonates hardware
          sitting at the top edge of the screen, so it does not follow the system theme
-         (herdi-mac fills the same shape with pure black). -->
+         (herdi-mac fills the same shape with pure black). The foreground colours below
+         assume that; IslandFill is only the starting point, and IslandWindow replaces it
+         from Settings → Island Appearance on every launch. -->
     <SolidColorBrush x:Key="IslandFill" Color="#FF000000" />
     <SolidColorBrush x:Key="Red" Color="#FFFF453A" />
     <SolidColorBrush x:Key="Green" Color="#FF32D74B" />

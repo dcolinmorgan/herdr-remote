@@ -88,6 +88,27 @@ public sealed class SettingsStore
         set { _data.LaunchAtLogin = value; Save(); }
     }
 
+    /// <summary>
+    /// Island colour and the two opacity levels. Anything missing or out of range falls
+    /// back to <see cref="IslandAppearance.Default"/>, so an older settings.json — or a
+    /// hand-edited one — cannot leave the island invisible.
+    /// </summary>
+    public IslandAppearance Appearance
+    {
+        get => new IslandAppearance(
+            IslandAppearance.ParseHex(_data.IslandColor) ?? IslandAppearance.DefaultFill,
+            _data.IslandCollapsedOpacity ?? IslandAppearance.DefaultCollapsedOpacity,
+            _data.IslandExpandedOpacity ?? IslandAppearance.DefaultExpandedOpacity).Normalized();
+        set
+        {
+            var normalized = value.Normalized();
+            _data.IslandColor = IslandAppearance.ToHex(normalized.Fill);
+            _data.IslandCollapsedOpacity = normalized.CollapsedOpacity;
+            _data.IslandExpandedOpacity = normalized.ExpandedOpacity;
+            Save();
+        }
+    }
+
     /// <summary>Set once the Start Menu shortcut carrying our AUMID has been created.</summary>
     public bool ShortcutInstalled
     {
@@ -177,5 +198,8 @@ public sealed class SettingsStore
         public string? HerdrPath { get; set; }
         public bool LaunchAtLogin { get; set; }
         public bool ShortcutInstalled { get; set; }
+        public string? IslandColor { get; set; }
+        public double? IslandCollapsedOpacity { get; set; }
+        public double? IslandExpandedOpacity { get; set; }
     }
 }
