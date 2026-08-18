@@ -16,6 +16,7 @@ public sealed class TrayIconHost : IDisposable
     private readonly IslandViewModel _vm;
     private readonly SettingsStore _settings;
     private readonly Updater _updater;
+    private readonly ToastService? _toasts;
     private readonly DispatcherTimer _refreshTimer = new();
 
     private readonly Forms.NotifyIcon _icon;
@@ -38,6 +39,7 @@ public sealed class TrayIconHost : IDisposable
     private readonly Forms.ToolStripMenuItem _statusItem = new() { Enabled = false };
     private readonly Forms.ToolStripMenuItem _relayItem = new() { Enabled = false };
     private readonly Forms.ToolStripMenuItem _errorItem = new() { Enabled = false, Available = false };
+    private readonly Forms.ToolStripMenuItem _toastErrorItem = new() { Enabled = false, Available = false };
     private readonly Forms.ToolStripMenuItem _remotesItem = new("Remote Hosts") { Available = false };
     private readonly Forms.ToolStripMenuItem _launchItem = new("Launch at Login");
     private readonly Forms.ToolStripMenuItem _versionItem = new();
@@ -48,11 +50,12 @@ public sealed class TrayIconHost : IDisposable
     /// <summary>Pixel size the glyphs were loaded at, i.e. the tray size at that DPI.</summary>
     private int _glyphSize;
 
-    public TrayIconHost(IslandViewModel vm, SettingsStore settings, Updater updater)
+    public TrayIconHost(IslandViewModel vm, SettingsStore settings, Updater updater, ToastService? toasts)
     {
         _vm = vm;
         _settings = settings;
         _updater = updater;
+        _toasts = toasts;
 
         LoadGlyphs(Forms.SystemInformation.SmallIconSize.Width);
 
@@ -156,6 +159,7 @@ public sealed class TrayIconHost : IDisposable
         menu.Items.Add(_statusItem);
         menu.Items.Add(_relayItem);
         menu.Items.Add(_errorItem);
+        menu.Items.Add(_toastErrorItem);
         // Direct mode only: in relay mode the SSH targets are the relay's HERDR_REMOTES and
         // nothing on the wire tells us what they are.
         menu.Items.Add(_remotesItem);
@@ -225,6 +229,13 @@ public sealed class TrayIconHost : IDisposable
         var error = _vm.ConnectionError;
         _errorItem.Text = error is null ? string.Empty : "  ⚠ " + error;
         _errorItem.Available = error is not null;
+
+        // Notification setup fails silently by design — it must not block the app — but a
+        // silent failure the user can never see is just a bug with better manners. Surfacing
+        // it here is the same treatment ConnectionError above already gets.
+        var toastError = _toasts?.Problem;
+        _toastErrorItem.Text = toastError is null ? string.Empty : "  ⚠ Notifications: " + toastError;
+        _toastErrorItem.Available = toastError is not null;
 
         _versionItem.Text = _updater.UpdateAvailable
             ? $"Update to v{_updater.LatestVersion}"

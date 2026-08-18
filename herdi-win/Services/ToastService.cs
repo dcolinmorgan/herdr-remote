@@ -44,6 +44,16 @@ public sealed class ToastService : IDisposable
     /// <summary>Non-null when notifications could not be set up (surfaced in the tray menu).</summary>
     public string? SetupError { get; private set; }
 
+    /// <summary>
+    /// Non-null when Windows itself is refusing to show notifications. Nothing failed in
+    /// that case — the OS is simply configured not to show them — so it is kept apart from
+    /// <see cref="SetupError"/>, which means something broke.
+    /// </summary>
+    public string? DeliveryBlocked { get; private set; }
+
+    /// <summary>Whatever is currently stopping notifications, for the tray menu to show.</summary>
+    public string? Problem => SetupError ?? DeliveryBlocked;
+
     public bool Initialize()
     {
         try
@@ -51,6 +61,7 @@ public sealed class ToastService : IDisposable
             if (!ShortcutHelper.EnsureShortcut(Aumid, ActivatorClsid, "Herdi"))
             {
                 SetupError = "Could not create the Start Menu shortcut; toasts are unavailable.";
+                Log("registration failed: no Start Menu shortcut");
                 return false;
             }
             _settings.ShortcutInstalled = true;
@@ -59,11 +70,13 @@ public sealed class ToastService : IDisposable
             RegisterClassObject();
             NotificationActivator.Handler = OnActivated;
             _registered = true;
+            Log($"registered: aumid={Aumid} exe={Environment.ProcessPath}");
             return true;
         }
         catch (Exception ex)
         {
-            SetupError = ex.Message;
+            SetupError = $"{ex.Message} (0x{ex.HResult:X8})";
+            Log($"registration failed: {ex.GetType().Name}: {SetupError}");
             return false;
         }
     }
@@ -96,6 +109,8 @@ public sealed class ToastService : IDisposable
         if (hr < 0) Marshal.ThrowExceptionForHR(hr);
     }
 
+    private static void Log(string message) => DiagnosticLog.Write("toast: " + message);
+
     private void OnActivated(string args, IReadOnlyDictionary<string, string> input)
     {
         var parsed = HttpUtility.ParseQueryString(args);
@@ -116,12 +131,50 @@ public sealed class ToastService : IDisposable
     /// <summary>Post (or replace) the blocked-agent toast.</summary>
     public void ShowBlocked(Agent agent)
     {
-        if (!_registered) return;
+        if (!_registered)
+        {
+            Log($"skipped: not registered ({SetupError ?? "no reason recorded"})");
+            return;
+        }
+        Post(() => BuildBlockedXml(agent), $"blocked: {agent.Name} @ {agent.Id}");
+    }
+
+    /// <summary>
+    /// Hand one toast to Windows, recording what happened. Every failure mode below is
+    /// otherwise invisible: a malformed payload, a notifier that will not construct, and an
+    /// OS that has notifications switched off all produce the same nothing on screen.
+    /// </summary>
+    private void Post(Func<string> buildXml, string what)
+    {
+        // Built inside the try, not passed in already built: an exception while composing the
+        // payload would otherwise escape past this handler and reach the dispatcher, turning a
+        // notification that cannot be sent into a message box the user has to dismiss.
+        var xml = "<not built>";
         try
         {
-            var xml = BuildBlockedXml(agent);
+            xml = buildXml();
             var doc = new XmlDocument();
+            // Throws on malformed XML, which is worth separating from a toast that parsed
+            // and was then rejected — the log says which.
             doc.LoadXml(xml);
+
+            var notifier = ToastNotificationManager.CreateToastNotifier(Aumid);
+
+            // Windows will accept the toast and show nothing if notifications are off for
+            // this app, for the user, or by policy. It says so here, and only here.
+            var setting = notifier.Setting;
+            DeliveryBlocked = setting switch
+            {
+                NotificationSetting.Enabled => null,
+                NotificationSetting.DisabledForApplication =>
+                    "turned off for Herdi in Settings › System › Notifications",
+                NotificationSetting.DisabledForUser =>
+                    "turned off for this user in Settings › System › Notifications",
+                NotificationSetting.DisabledByGroupPolicy => "blocked by group policy",
+                NotificationSetting.DisabledByManifest => "blocked by the app manifest",
+                _ => $"unavailable ({setting})",
+            };
+
             var toast = new ToastNotification(doc)
             {
                 // Same tag for every blocked toast: a newer prompt replaces the older
@@ -129,11 +182,19 @@ public sealed class ToastService : IDisposable
                 Tag = ToastTag,
                 Group = ToastGroup,
             };
-            ToastNotificationManager.CreateToastNotifier(Aumid).Show(toast);
+            notifier.Show(toast);
+
+            Log(DeliveryBlocked is null
+                ? $"shown ({what})"
+                : $"handed over but Windows is {DeliveryBlocked} ({what})");
         }
         catch (Exception ex)
         {
-            SetupError = ex.Message;
+            // HRESULT included because the useful ones are numbers: 0x80070490
+            // (element not found) means the AUMID shortcut is not being resolved, which is
+            // the usual first-run failure.
+            SetupError = $"{ex.Message} (0x{ex.HResult:X8})";
+            Log($"failed ({what}): {ex.GetType().Name}: {SetupError}\n{xml}");
         }
     }
 

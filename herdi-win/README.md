@@ -266,6 +266,21 @@ is an ordered sequence of `visual, audio?, commands?, actions?, header?`. Either
 enough for the notification to be discarded silently — no exception, no event log, nothing on
 screen.
 
+The OS may also simply have notifications switched off. `ToastNotifier.Setting` is the only
+place Windows says so; `DeliveryBlocked` translates it (`DisabledForApplication`,
+`DisabledForUser`, `DisabledByGroupPolicy`) into something readable. And setup can fail per
+machine — the shortcut write, the CLSID registration, or the toast call itself, none of which
+may take the app down since notifications are meant to degrade rather than crash it.
+`SetupError` records which, with the HRESULT, because the useful ones are numbers:
+`0x80070490` (element not found) means the AUMID shortcut is not resolving, the usual
+first-run failure.
+
+`Problem` folds those two together and `TrayIconHost` shows it as a tray-menu line, the same
+treatment `IslandViewModel.ConnectionError` gets. Beyond that, every attempt is recorded in
+[`DiagnosticLog`](Services/DiagnosticLog.cs) — `%LOCALAPPDATA%\herdr-remote\herdi.log` — with
+the payload and HRESULT on failure. A tray app has no console and no window, so a subsystem
+that fails quietly by design has no other way to account for itself.
+
 ## Layout
 
 | Path | Corresponds to |

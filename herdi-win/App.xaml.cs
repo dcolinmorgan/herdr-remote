@@ -54,7 +54,7 @@ public partial class App : Application
         // extended styles applied before anyone can see it.
         new WindowInteropHelper(_island).EnsureHandle();
 
-        _tray = new TrayIconHost(_vm, _settings, _updater);
+        _tray = new TrayIconHost(_vm, _settings, _updater, _toasts);
         _tray.ShowIslandRequested += () => _island?.ShowIsland();
         _tray.ToggleIslandRequested += () => _island?.ToggleIsland();
         _tray.QuitRequested += Shutdown;
