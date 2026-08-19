@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Herdi.Models;
 using Herdi.Services;
@@ -42,30 +43,30 @@ public partial class App : Application
 
         DispatcherUnhandledException += OnUnhandledException;
 
+        ApplyRenderMode();
+
         _settings = new SettingsStore();
         _updater = new Updater();
         _relay = new RelayConnection(_settings, action => Dispatcher.Invoke(action));
         _toasts = new ToastService(_settings);
         _vm = new IslandViewModel(_relay, _updater);
 
-        _island = new IslandWindow(_vm, _settings);
-        // Built but not shown: the flyout is summoned from the tray. Creating the handle up
-        // front keeps the first click as quick as every one after it, and gets the window's
-        // extended styles applied before anyone can see it.
-        new WindowInteropHelper(_island).EnsureHandle();
+        // The island is not built here. See Island().
 
         _tray = new TrayIconHost(_vm, _settings, _updater, _toasts);
-        _tray.ShowIslandRequested += () => _island?.ShowIsland();
-        _tray.ToggleIslandRequested += () => _island?.ToggleIsland();
+        _tray.ShowIslandRequested += () => Island().ShowIsland();
+        _tray.ToggleIslandRequested += () => Island().ToggleIsland();
         _tray.QuitRequested += Shutdown;
         _tray.SettingsSaved += () =>
         {
             _relay?.Connect();
-            // The island is already showing this from the live preview; re-applying costs
-            // nothing and covers a save that skipped the preview path.
+            // Only if it exists: the live preview has already applied this to a flyout the
+            // user actually saw, and a save made without ever opening one has nothing to
+            // repaint. Building the window here would undo the whole point of Island().
             _island?.ApplyAppearance(_settings.Appearance);
         };
-        _tray.AppearancePreviewed += appearance => _island?.PreviewAppearance(appearance);
+        // Previewing means showing the flyout, so this one does build it.
+        _tray.AppearancePreviewed += appearance => Island().PreviewAppearance(appearance);
         _tray.SettingsClosed += () => _island?.EndAppearancePreview();
 
         // Notifications are optional: if the shortcut or COM registration fails the app
@@ -86,10 +87,57 @@ public partial class App : Application
         _ = _updater.CheckForUpdatesAsync();
     }
 
+    /// <summary>
+    /// Keep WPF off the GPU.
+    ///
+    /// The flyout sets AllowsTransparency, which makes it a layered window, and WPF has no
+    /// hardware path for those - it rasterises them in software and hands the result to
+    /// UpdateLayeredWindow either way. What it does anyway, the first time any window is
+    /// shown, is stand up its composition engine for the whole process: load the display
+    /// driver's user-mode DLL and create a D3D device. Measured, that cost 170 MB - opening
+    /// the flyout took the process from 20 MB to 250 MB, and to 80 MB with this switched
+    /// off - for a 608 px card that never draws a single frame through it.
+    ///
+    /// So the accelerated path here is pure cost, and switching it off should be invisible.
+    /// Set HERDI_RENDER=hardware to put it back - worth trying if the flyout ever renders
+    /// wrongly rather than merely slowly, since that would mean something in the card does
+    /// depend on the accelerated rasteriser after all.
+    /// </summary>
+    private static void ApplyRenderMode()
+    {
+        var requested = Environment.GetEnvironmentVariable("HERDI_RENDER");
+        if (string.Equals(requested, "hardware", StringComparison.OrdinalIgnoreCase)) return;
+
+        RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+    }
+
+    /// <summary>
+    /// The flyout, built the first time something actually needs to show it and kept alive
+    /// from then on.
+    ///
+    /// This used to be constructed during startup, with its handle forced up front, so that
+    /// the first tray click cost no more than the tenth. That was the wrong trade for a
+    /// process that spends its life in the tray: constructing the window parses the XAML,
+    /// realises the whole visual tree and spins up WPF's rendering stack, and the app then
+    /// held all of it resident for a panel that is hidden by default and on many days never
+    /// opened at all.
+    ///
+    /// What it costs is that the first open now pays for that work. Every later one does
+    /// not, because the window is hidden rather than closed.
+    /// </summary>
+    private IslandWindow Island()
+    {
+        if (_island is not null) return _island;
+        _island = new IslandWindow(_vm!, _settings!);
+        return _island;
+    }
+
     private void OnAgentBlocked(Agent agent)
     {
+        // Toast first: it is what the user actually sees, and it must not queue behind the
+        // flyout's first realisation on the one blocked agent that happens to build it.
         _toasts?.ShowBlocked(agent);
-        _island?.PopForBlocked(agent);
+        Island().PopForBlocked(agent);
     }
 
     /// <summary>
@@ -112,8 +160,8 @@ public partial class App : Application
             // Clicking the toast is the user asking for the flyout, so unlike the automatic
             // pop this one may take focus and stays until dismissed.
             var target = _relay.Find(action.PaneId);
-            if (target is not null) _island?.ShowApproval(target);
-            else _island?.ShowIsland();
+            if (target is not null) Island().ShowApproval(target);
+            else Island().ShowIsland();
             return;
         }
 
