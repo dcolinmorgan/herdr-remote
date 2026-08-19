@@ -146,28 +146,6 @@ class ClientPayloadTests(unittest.TestCase):
             self.assertIn(f"public bool {flag} =>", view_model)
             self.assertIn(f"OnPropertyChanged(nameof({flag}))", view_model)
 
-    def test_windows_island_paints_its_own_silhouette(self):
-        """A Shape here paints nothing, and an unpainted island cannot be hovered.
-
-        Shape seeds its rendered geometry to Geometry.Empty and only drops that cache from
-        its own ArrangeOverride, which a geometry derived from RenderSize must override —
-        so the island stayed fully transparent. Transparency also punches hit-test holes:
-        every pixel Root's children do not cover routes the pointer straight past the
-        expanded panel to whatever is behind it. Root's Background covers those gaps.
-        """
-        shape = (ROOT / "herdi-win" / "Controls" / "IslandShape.cs").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("class IslandShape : FrameworkElement", shape)
-        self.assertNotIn("class IslandShape : Shape", shape)
-        self.assertIn("override void OnRender(", shape)
-        self.assertIn("DrawGeometry(", shape)
-
-        island = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml").read_text(
-            encoding="utf-8"
-        )
-        self.assertRegex(island, r'x:Name="Root"[^>]*Background="Transparent"')
-
     def test_clients_offer_the_same_two_sources(self):
         """Direct mode is the mac app's second half; the Windows client must have it too."""
         mac = (ROOT / "herdi-mac" / "Sources" / "RelayConnection.swift").read_text(
@@ -330,35 +308,38 @@ class ClientPayloadTests(unittest.TestCase):
             self.assertIn(f'Click="{handler}"', sessions)
             self.assertIn(f"private void {handler}(", code_behind)
 
-        # A menu takes focus into its own window and puts the pointer off the island —
-        # both of which otherwise collapse it out from under the open menu.
+        # A menu opens in its own window, which deactivates the flyout — and the flyout
+        # dismisses itself on deactivation, so it would go away out from under the menu it
+        # just opened.
         island = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml.cs").read_text(
             encoding="utf-8"
         )
         self.assertIn("_menuOpen = true;", island)
-        self.assertIn("if (_vm.IsSticky || _menuOpen) return;", island)
+        self.assertIn("if (_menuOpen || _previewing) return;", island)
 
-    def test_windows_collapsed_island_lets_clicks_through(self):
-        """Collapsed, the island covers the top-centre of somebody else's window.
+    def test_windows_flyout_is_absent_rather_than_transparent(self):
+        """Nothing of ours sits over somebody else's window while nothing is happening.
 
-        macOS hides the collapsed panel in the notch, where there is nothing underneath to
-        click. Here it sits over tab strips and title bars, so it gives its input back
-        until it is expanded — which also means hover cannot come from MouseEnter, since a
-        click-through window receives no mouse messages at all.
+        The top-edge island had to hand its input back through WS_EX_TRANSPARENT, because
+        a capsule pinned above every window covers tab strips and title bars whether or not
+        anyone wants it there. The tray flyout meets the same requirement by not being on
+        screen at all: hidden until the tray icon is clicked, out of the taskbar and out of
+        Alt+Tab, and not even constructed until something asks for it.
         """
+        xaml = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml").read_text(encoding="utf-8")
+        self.assertIn('ShowInTaskbar="False"', xaml)
+        self.assertIn('ShowActivated="False"', xaml)
+
         island = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml.cs").read_text(
             encoding="utf-8"
         )
-        self.assertIn("WsExTransparent = 0x00000020", island)
-        self.assertIn(
-            "_vm.IsExpanded ? style & ~WsExTransparent : style | WsExTransparent", island
-        )
-        self.assertIn("_pointerTimer", island)
-        self.assertIn("var over = PointerOverIsland();", island)
+        # WS_EX_TOOLWINDOW, the same intent as NSWindow's .ignoresCycle on the mac panel.
+        self.assertIn("WsExToolWindow = 0x00000080", island)
+        self.assertIn("exStyle | WsExToolWindow", island)
 
-        xaml = (ROOT / "herdi-win" / "Views" / "IslandWindow.xaml").read_text(encoding="utf-8")
-        self.assertNotIn("MouseEnter=", xaml)
-        self.assertNotIn("MouseLeave=", xaml)
+        # Built on first use, so a session that never opens it never pays for a WPF window.
+        app = (ROOT / "herdi-win" / "App.xaml.cs").read_text(encoding="utf-8")
+        self.assertIn("private IslandWindow? _island;", app)
 
     def test_tui_sends_multi_selection_messages_with_prompt_identity(self):
         source = (ROOT / "relay" / "herdr_tui.py").read_text(encoding="utf-8")
