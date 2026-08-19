@@ -30,12 +30,64 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
+  <!-- Memory. This process sits in the tray all day beside the editors and browsers the
+       user actually came to use, so its resting footprint is a feature.
+
+       Measured on 0.7.3 with dotnet-counters and Task Manager, in that order, because the
+       first number that mattered was the one that ruled the code out: the managed heap was
+       4.9 MB against ~300 MB of private bytes. None of this was ever the app's own data,
+       and no amount of care in the code that does the work would have moved it.
+
+       Where it actually went, and what it is now:
+
+         ~300 MB  startup, compressed self-contained bundle + flyout built during startup
+          ~20 MB  startup, uncompressed bundle + flyout built on first use (this file, App)
+          ~80 MB  with the flyout open and software rendering (App.ApplyRenderMode)
+         ~250 MB  with the flyout open and the GPU path, i.e. 170 MB for a D3D device that
+                  a layered window cannot use -->
+  <PropertyGroup>
+    <!-- No background GC. It exists so gen2 collections do not pause a large heap; this one
+         is five megabytes with a ~160 KB/s allocation rate, so what it buys in practice is a
+         dedicated thread and a second heap budget held for the life of the process.
+         This is tidying, not a fix - the GC was never where the memory was, and it is the
+         only GC knob kept for that reason. ServerGarbageCollection=false and
+         RetainVMGarbageCollection=false were tried and dropped: both are already the
+         default. System.GC.ConserveMemory was tried and dropped too - it trades CPU for a
+         few megabytes of a heap this size, and it was never measured to do even that. -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <!-- Deliberately NOT set, all three of them:
+
+         InvariantGlobalization=true. It would drop the ~30 MB of ICU data a self-contained
+         publish otherwise carries, and nothing in this app's own code is culture-sensitive
+         - but WPF's is. Every FrameworkElement carries Language="en-us" by default and
+         every binding resolves it through XmlLanguage.GetSpecificCulture(), which has no
+         culture to find once ICU is gone. The result is an InvalidOperationException
+         ("Cannot find non-neutral culture related to 'en-us'") the first time any window
+         with a binding is shown. It compiles clean and fails only at runtime, so do not
+         re-add it on the strength of a successful build.
+
+         UseSystemResourceKeys=true. Replaces framework exception messages with bare ids,
+         and this app puts those messages in the tray menu and its crash dialog.
+
+         EventSourceSupport=false. It would switch off the very counters used to measure
+         any of this. -->
+  </PropertyGroup>
+
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <DebugType>none</DebugType>
+    <!-- Compression is a memory decision, not a size one, and it is off for that reason.
+         An uncompressed bundle is memory-mapped: assemblies load as file-backed pages the
+         OS can share and evict. A compressed one cannot be mapped at all, so the runtime
+         decompresses every assembly it loads into private anonymous memory that is never
+         shared, never paged out and never returned, and this app loads 74 of them. Turning
+         it off and deferring the window together took startup from ~300 MB to ~20 MB; the
+         two were never measured apart, so treat that as their combined effect.
+         The cost is the download: the exe roughly doubles (69 MB -> ~150 MB). Pass
+         -p:EnableCompressionInSingleFile=true (or build.ps1 -Compress) to trade back. -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
