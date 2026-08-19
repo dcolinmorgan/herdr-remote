@@ -53,7 +53,7 @@ cd herdi-win
 .\build.ps1                 # self-contained single exe, no runtime needed
 .\build.ps1 -Framework      # small exe, requires the .NET 8 Desktop Runtime
 .\build.ps1 -Compress       # smaller exe, double the memory
-.\build.ps1 -Zip            # also produce the release asset the updater looks for
+.\build.ps1 -Zip            # produce BOTH release assets (see below)
 .\build.ps1 -Arch win-arm64 # ARM64
 ```
 
@@ -72,7 +72,28 @@ the built-in updater downloads on every release. Almost all of `-Framework`'s 25
 loads for one namespace (`Windows.UI.Notifications`).
 
 `-Compress` saves 96 MB of download and costs 80 MB of memory for as long as the process
-runs. See [Memory](#memory) for why.
+runs. See [Memory](#memory) for why. It is refused alongside `-Zip`: a release asset decides
+what every install of it costs to run, and that is not a bill to hand people invisibly.
+
+### Releases carry both
+
+`-Zip` publishes a pair per architecture, and **both must be uploaded**:
+
+| Asset | What it is | Who takes it |
+|---|---|---|
+| `Herdi-win-x64-<version>.zip` | self-contained, 166 MB | first install; anyone with no .NET |
+| `Herdi-win-x64-<version>-fdd.zip` | framework-dependent, 25 MB | every update of an install that has the runtime |
+
+They are not interchangeable, so the updater does not guess. The deployment mode is stamped
+into the assembly at build time (`HerdiDeployment` in `Herdi.Win.csproj`) and
+`Updater.IsUsableAsset` matches on it *and* on the running architecture — replacing a
+self-contained install with the `-fdd` asset would leave it unable to start on a machine
+with no .NET 8 Desktop Runtime, and the old `*win*.zip` match would happily have handed an
+x64 install the arm64 build.
+
+Publishing only the `-fdd` asset strands every self-contained install whose machine has no
+runtime. Publishing only the other just makes every update six times larger than it needs
+to be.
 
 `dotnet build` also works from Linux/macOS for compile checking — the project sets
 `EnableWindowsTargeting`. Running it obviously needs Windows.

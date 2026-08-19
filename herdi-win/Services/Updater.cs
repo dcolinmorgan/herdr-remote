@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -19,6 +20,28 @@ public sealed class Updater : INotifyPropertyChanged
 {
     private const string Repo = "dcolinmorgan/herdr-remote";
     private static readonly HttpClient Http = CreateClient();
+
+    /// <summary>
+    /// Whether this copy carries its own runtime, as stamped into the assembly at build time
+    /// (see HerdiDeployment in Herdi.Win.csproj). A release carries both builds, and they are
+    /// not interchangeable: replacing a self-contained install with the framework-dependent
+    /// asset leaves it unable to start on a machine with no .NET 8 Desktop Runtime.
+    ///
+    /// Missing metadata means self-contained, because that asset runs everywhere - the wrong
+    /// guess in this direction costs download size, and in the other it costs the install.
+    /// </summary>
+    private static readonly bool IsSelfContained =
+        Assembly.GetExecutingAssembly()
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(a => a.Key == "Deployment")?.Value != "framework-dependent";
+
+    /// <summary>
+    /// The RID this process is running as, which is the token build.ps1 puts in every asset
+    /// name. Matching on it is what stops an x64 install from helpfully downloading the
+    /// arm64 build.
+    /// </summary>
+    private static readonly string AssetRid =
+        RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "win-arm64" : "win-x64";
 
     private DateTime? _lastCheck;
     private string? _downloadUrl;
@@ -94,14 +117,9 @@ public sealed class Updater : INotifyPropertyChanged
                 foreach (var asset in assets.EnumerateArray())
                 {
                     var name = asset.TryGetProperty("name", out var n) ? n.GetString() : null;
-                    if (name is null) continue;
-                    // Match what build.ps1 publishes, e.g. Herdi-win-x64-0.7.3.zip.
-                    if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
-                        name.Contains("win", StringComparison.OrdinalIgnoreCase))
-                    {
-                        url = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
-                        break;
-                    }
+                    if (name is null || !IsUsableAsset(name)) continue;
+                    url = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
+                    break;
                 }
             }
 
@@ -114,6 +132,22 @@ public sealed class Updater : INotifyPropertyChanged
         {
             Status = $"v{CurrentVersion}";
         }
+    }
+
+    /// <summary>
+    /// Whether a release asset is the one this install should take. build.ps1 -Zip publishes
+    /// a pair per architecture, e.g. Herdi-win-x64-0.7.3.zip alongside
+    /// Herdi-win-x64-0.7.3-fdd.zip, so a name alone is ambiguous in two ways and both of them
+    /// install something that does not run: the wrong architecture, or a build whose runtime
+    /// this machine may not have.
+    /// </summary>
+    private static bool IsUsableAsset(string name)
+    {
+        if (!name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!name.Contains(AssetRid, StringComparison.OrdinalIgnoreCase)) return false;
+
+        var frameworkDependent = name.Contains("-fdd", StringComparison.OrdinalIgnoreCase);
+        return frameworkDependent != IsSelfContained;
     }
 
     public async Task PerformUpdateAsync()

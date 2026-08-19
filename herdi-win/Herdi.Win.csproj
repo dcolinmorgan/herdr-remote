@@ -90,6 +90,23 @@
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
   </PropertyGroup>
 
+  <!-- Stamp how this copy was deployed, so Updater can pick the release asset that matches.
+       Releases carry both: a self-contained zip that runs anywhere, and a framework-dependent
+       one a sixth the size. Handing a self-contained install the smaller asset would leave it
+       unable to start on a machine with no .NET 8 Desktop Runtime, and the process has no
+       other reliable way to know which it is. Evaluated after the Release PropertyGroup above
+       so it sees whatever SelfContained ended up as, including a -p: override from build.ps1.
+       A plain `dotnet build` leaves SelfContained empty, which is framework-dependent, which
+       is what `dotnet run` actually does. -->
+  <PropertyGroup>
+    <HerdiDeployment Condition="'$(SelfContained)' == 'true'">self-contained</HerdiDeployment>
+    <HerdiDeployment Condition="'$(SelfContained)' != 'true'">framework-dependent</HerdiDeployment>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="Deployment" Value="$(HerdiDeployment)" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- UseWindowsForms adds System.Drawing/System.Windows.Forms to the implicit usings,
          whose Color/Brush/Size/Point collide with the WPF types this app is built on.

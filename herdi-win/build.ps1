@@ -4,7 +4,7 @@
 #   .\build.ps1                  # self-contained single exe (no .NET needed to run)
 #   .\build.ps1 -Framework       # small exe, requires the .NET 8 Desktop Runtime
 #   .\build.ps1 -Compress        # smaller exe, double the memory -- see the table
-#   .\build.ps1 -Zip             # also produce the release asset the updater looks for
+#   .\build.ps1 -Zip             # produce BOTH release assets (see below)
 #   .\build.ps1 -Arch win-arm64  # ARM64 device
 #
 # Measured on 0.7.3, private bytes with the flyout open:
@@ -22,6 +22,16 @@
 # -Framework and the default cost exactly the same memory, because both map their
 # assemblies off disk. The 6.6x size difference is the whole of what separates them, and
 # it is paid on every update the built-in updater downloads.
+#
+# So -Zip publishes both, and the updater picks the one matching what is already installed
+# (Updater.IsUsableAsset, against the deployment mode stamped in by Herdi.Win.csproj):
+#
+#   Herdi-<arch>-<version>.zip       self-contained, runs on a machine with no .NET
+#   Herdi-<arch>-<version>-fdd.zip   framework-dependent, a sixth the download
+#
+# Both must be uploaded to the release. Publishing only the -fdd one would brick every
+# self-contained install whose machine has no .NET 8 Desktop Runtime; publishing only the
+# other just makes every update six times larger than it needs to be.
 #
 # ASCII only, deliberately. Windows PowerShell 5.1 reads .ps1 files as ANSI unless they
 # carry a UTF-8 BOM, so on a non-Latin system locale a stray multi-byte character here is
@@ -49,10 +59,26 @@ if ($Compress -and $Framework) {
     throw '-Compress and -Framework are mutually exclusive: single-file compression is only supported for self-contained publishes (NETSDK1176).'
 }
 
-Write-Host '> Building release...'
-Push-Location $scriptDir
-try {
-    if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
+# -Zip builds both deployment modes, so a mode switch alongside it is a contradiction.
+if ($Zip -and $Framework) {
+    throw '-Zip already builds both deployment modes; drop -Framework.'
+}
+
+# Refused rather than warned about. A release asset decides what every install of it costs
+# to run, and compression doubles that: 80 MB against 160 MB of private bytes, measured. A
+# smaller download is not worth spending it on every user, every day, invisibly.
+if ($Zip -and $Compress) {
+    throw '-Zip and -Compress are mutually exclusive: release assets are published uncompressed because compression doubles the memory of every install that runs them.'
+}
+
+function Invoke-Publish {
+    param(
+        [Parameter(Mandatory)] [bool]$SelfContained,
+        [Parameter(Mandatory)] [string]$OutDir,
+        [Parameter(Mandatory)] [string]$Label
+    )
+
+    if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 
     # Not $args: that is an automatic variable, and assigning to it inside an advanced
     # script is asking for trouble.
@@ -60,52 +86,84 @@ try {
         'publish'
         '-c', 'Release'
         '-r', $Arch
-        '-o', $outDir
+        '-o', $OutDir
         '--nologo'
+        '-p:PublishSingleFile=true'
+        "-p:SelfContained=$($SelfContained.ToString().ToLower())"
+        # The csproj leaves compression off because a compressed bundle cannot be
+        # memory-mapped and has to be decompressed into private memory instead. Passed
+        # explicitly because the SDK rejects it outright when SelfContained is false.
+        "-p:EnableCompressionInSingleFile=$(($Compress -and $SelfContained).ToString().ToLower())"
     )
 
-    if ($Framework) {
-        # Framework-dependent: a couple of MB, but the target machine needs
-        # the .NET 8 Desktop Runtime installed.
-        $publishArgs += @('-p:SelfContained=false', '-p:PublishSingleFile=true')
-        Write-Host '  mode: framework-dependent (requires .NET 8 Desktop Runtime)'
+    Write-Host "  $Label"
+    # Out-Host, not bare: this function returns the exe path, and a native command writes
+    # its output to the success stream, so without this every line dotnet prints comes back
+    # as part of the return value.
+    & dotnet @publishArgs | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
+
+    $exe = Join-Path $OutDir 'Herdi.exe'
+    if (-not (Test-Path $exe)) { throw "Expected $exe to exist after publish." }
+    return $exe
+}
+
+function New-Asset {
+    param(
+        [Parameter(Mandatory)] [string]$FromDir,
+        [Parameter(Mandatory)] [string]$ZipPath
+    )
+
+    if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+    Compress-Archive -Path (Join-Path $FromDir '*') -DestinationPath $ZipPath
+    $mb = [math]::Round((Get-Item $ZipPath).Length / 1MB, 1)
+    Write-Host "OK Packaged: $ZipPath ($mb MB)"
+}
+
+Write-Host '> Building release...'
+$built = @()
+Push-Location $scriptDir
+try {
+    if ($Zip) {
+        # Both, because the updater picks per install and a release missing either one
+        # strands the installs that needed it.
+        $selfDir = Join-Path $distDir $Arch
+        $fddDir = Join-Path $distDir "$Arch-fdd"
+        $built += Invoke-Publish -SelfContained $true -OutDir $selfDir `
+            -Label 'mode: self-contained single file'
+        $built += Invoke-Publish -SelfContained $false -OutDir $fddDir `
+            -Label 'mode: framework-dependent (requires .NET 8 Desktop Runtime)'
+    }
+    elseif ($Framework) {
+        $built += Invoke-Publish -SelfContained $false -OutDir $outDir `
+            -Label 'mode: framework-dependent (requires .NET 8 Desktop Runtime)'
     }
     else {
-        # Self-contained single file - the closest match to dragging Herdi.app across.
-        $publishArgs += @('-p:SelfContained=true', '-p:PublishSingleFile=true')
-        Write-Host '  mode: self-contained single file'
+        $built += Invoke-Publish -SelfContained $true -OutDir $outDir `
+            -Label "mode: self-contained single file$(if ($Compress) { ', compressed (smaller exe, double the memory)' })"
     }
-
-    # The csproj leaves compression off because a compressed bundle cannot be memory-mapped
-    # and has to be decompressed into private memory instead. -Compress buys the download
-    # size back at that cost; see the comment on EnableCompressionInSingleFile.
-    $publishArgs += "-p:EnableCompressionInSingleFile=$($Compress.IsPresent.ToString().ToLower())"
-    Write-Host "  compression: $(if ($Compress) { 'on (smaller exe, larger resting memory)' } else { 'off (mapped from the bundle)' })"
-
-    & dotnet @publishArgs
-    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 }
 finally {
     Pop-Location
 }
 
-$exe = Join-Path $outDir 'Herdi.exe'
-if (-not (Test-Path $exe)) { throw "Expected $exe to exist after publish." }
-
-$sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-Write-Host "OK Built: $exe ($sizeMb MB)"
+foreach ($exe in $built) {
+    $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+    Write-Host "OK Built: $exe ($sizeMb MB)"
+}
 
 if ($Zip) {
-    # The updater matches release assets by *win*.zip (see Updater.HandleRelease).
-    $zipPath = Join-Path $distDir "Herdi-$Arch-$version.zip"
-    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-    Compress-Archive -Path (Join-Path $outDir '*') -DestinationPath $zipPath
-    Write-Host "OK Packaged: $zipPath"
+    # The updater matches these by RID and by the -fdd marker (Updater.IsUsableAsset).
+    New-Asset -FromDir (Join-Path $distDir $Arch) -ZipPath (Join-Path $distDir "Herdi-$Arch-$version.zip")
+    New-Asset -FromDir (Join-Path $distDir "$Arch-fdd") -ZipPath (Join-Path $distDir "Herdi-$Arch-$version-fdd.zip")
+    Write-Host ''
+    Write-Host 'Upload BOTH to the release. The updater picks per install:'
+    Write-Host '  self-contained installs take the plain zip, framework-dependent ones the -fdd zip.'
 }
 
 Write-Host ''
 Write-Host 'Run it:'
-Write-Host "  $exe"
+foreach ($exe in $built) { Write-Host "  $exe" }
 Write-Host ''
 Write-Host 'Notes:'
 Write-Host '  - The exe is unsigned, so SmartScreen will warn on first launch.'
