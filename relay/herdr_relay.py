@@ -745,6 +745,7 @@ async def process_request(connection, request):
 
     public_paths = {
         "/sw.js", "/logo.svg", "/api/vapid-public-key",
+        "/favicon-32.png", "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
         "/HackNerdFont-Regular.woff2", "/HackNerdFont-LICENSE.txt",
     }
     request_path = (request.path or "/").split("?", 1)[0]
@@ -857,6 +858,10 @@ async def process_request(connection, request):
             return Response(200, "OK", headers, body)
 
     static_files = {
+        "/favicon-32.png": ("favicon-32.png", "image/png"),
+        "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+        "/icon-192.png": ("icon-192.png", "image/png"),
+        "/icon-512.png": ("icon-512.png", "image/png"),
         "/HackNerdFont-Regular.woff2": ("HackNerdFont-Regular.woff2", "font/woff2"),
         "/HackNerdFont-LICENSE.txt": ("HackNerdFont-LICENSE.txt", "text/plain; charset=utf-8"),
     }
