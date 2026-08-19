@@ -63,6 +63,8 @@ cd herdi-ios && xcodegen generate
 
 # Windows app (needs the .NET 8 SDK; `dotnet build` also works off-Windows
 # for compile checking thanks to EnableWindowsTargeting)
+# ./build.ps1 -Framework is 25 MB against the default's 166 MB for identical memory;
+# ./build.ps1 -Compress halves the download and doubles the memory. See herdi-win/README.md.
 cd herdi-win && ./build.ps1
 ```
 
@@ -75,6 +77,7 @@ cd herdi-win && ./build.ps1
 | `HERDR_REMOTES` | Comma-separated SSH targets to poll |
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
+| `HERDI_RENDER` | Windows client only: `hardware` restores WPF's GPU path (default is software — see `herdi-win/README.md#memory`) |
 
 ## Web App
 

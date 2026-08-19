@@ -50,16 +50,70 @@ Requires the [.NET 8 SDK](https://dotnet.microsoft.com/download) on Windows.
 
 ```powershell
 cd herdi-win
-.\build.ps1                 # self-contained single exe (~72 MB, no runtime needed)
-.\build.ps1 -Framework      # ~3 MB, requires the .NET 8 Desktop Runtime
+.\build.ps1                 # self-contained single exe, no runtime needed
+.\build.ps1 -Framework      # small exe, requires the .NET 8 Desktop Runtime
+.\build.ps1 -Compress       # smaller exe, double the memory
 .\build.ps1 -Zip            # also produce the release asset the updater looks for
 .\build.ps1 -Arch win-arm64 # ARM64
 ```
 
-Output lands in `dist\<arch>\Herdi.exe`.
+Output lands in `dist\<arch>\Herdi.exe`. What each mode costs, measured on 0.7.3:
+
+| | exe | memory, flyout open | target machine needs |
+|---|---|---|---|
+| default | 166 MB | 80 MB | nothing |
+| `-Framework` | 25 MB | 80 MB | .NET 8 Desktop Runtime |
+| `-Compress` | 70 MB | **160 MB** | nothing |
+
+`-Framework` and the default measure identically, because both map their assemblies off
+disk rather than unpacking them; size is the whole of what separates them, and size is what
+the built-in updater downloads on every release. Almost all of `-Framework`'s 25 MB is
+`Microsoft.Windows.SDK.NET.dll`, the Windows SDK's entire WinRT projection, which this app
+loads for one namespace (`Windows.UI.Notifications`).
+
+`-Compress` saves 96 MB of download and costs 80 MB of memory for as long as the process
+runs. See [Memory](#memory) for why.
 
 `dotnet build` also works from Linux/macOS for compile checking — the project sets
 `EnableWindowsTargeting`. Running it obviously needs Windows.
+
+## Memory
+
+It sits in the tray all day beside the editors and browsers you actually came to use, so
+what it costs while doing nothing is part of what it is.
+
+| | private bytes |
+|---|---|
+| Tray icon, relay connection, polling, toasts | ~20 MB |
+| With the flyout open | ~80 MB |
+
+It used to be ~300 MB at rest, and none of that was ever this app's own data: the managed
+heap measures 4.9 MB either way, which ruled the code out before any of it was read. Three
+things were paying for it, all of them configuration rather than design:
+
+- **A compressed single-file bundle.** A compressed bundle cannot be memory-mapped, so the
+  runtime decompresses every assembly it loads into private memory that is never shared,
+  never paged out and never returned — 74 of them here. Uncompressed, the same assemblies
+  are mapped straight out of the bundle. This is the trade `-Compress` still offers.
+- **The flyout being built during startup**, handle forced up front, so the first tray click
+  would cost no more than the tenth. For a panel that is hidden by default and on many days
+  never opened, that is the wrong way round; it is built on first use now, and kept
+  afterwards because it is hidden rather than closed.
+- **A D3D device the flyout cannot use.** `AllowsTransparency` makes it a layered window and
+  WPF has no hardware path for those — it rasterises them in software and hands the result
+  to `UpdateLayeredWindow` regardless. It still stands up its composition engine and loads
+  the display driver's user-mode DLL the first time any window is shown, which measured
+  170 MB for a 608 px card that never draws a frame through it. `RenderMode.SoftwareOnly`
+  skips it, and nothing here can tell the difference.
+
+`HERDI_RENDER=hardware` puts the GPU path back — worth trying only if the flyout ever
+renders *wrongly* rather than merely slowly, which would mean something in the card does
+depend on the accelerated rasteriser after all.
+
+`InvariantGlobalization` is not among these, though it looks like it should be: it drops
+~30 MB of ICU data, compiles clean, and then throws *"Cannot find non-neutral culture
+related to 'en-us'"* the first time a window with a binding is shown, because WPF resolves
+every binding's culture through `XmlLanguage.GetSpecificCulture()`.
 
 ## Setup
 
