@@ -26,7 +26,7 @@ public sealed record PollResult(
 /// app keeps 6 unfiltered lines, which means the same blocked pane reads differently
 /// there than through the relay — switching modes here shows the same card.
 /// </summary>
-public sealed class HerdrPoller : IDisposable
+public sealed partial class HerdrPoller : IDisposable
 {
     /// <summary>Matches the relay's POLL_INTERVAL and the mac app's pollTimer.</summary>
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(2);
@@ -45,10 +45,17 @@ public sealed class HerdrPoller : IDisposable
     private static readonly string[] SubagentOptions =
         { "approve all pending", "configure individually", "exit (cancel subagents)" };
 
-    /// <summary>Terminal chrome that is not part of the prompt. Port of CHROME_RE (herdr_relay.py:73).</summary>
-    private static readonly Regex Chrome = new(
-        @"^[\s─━═_—│|◔◑◕●]+$|Kiro\s[·•]|esc to cancel|type to queue|^\s*[◔◑◕●]\s+(Shell|Bash)",
-        RegexOptions.Compiled);
+    /// <summary>
+    /// Terminal chrome that is not part of the prompt. Port of CHROME_RE (herdr_relay.py:73).
+    ///
+    /// Source-generated rather than RegexOptions.Compiled. Compiled builds the matcher with
+    /// Reflection.Emit on first use, which means a dynamic assembly and a JIT pass held for
+    /// the life of the process - a poor trade for a pattern that only runs when a pane turns
+    /// out to be blocked. The generator does the same work at build time for nothing at run
+    /// time.
+    /// </summary>
+    [GeneratedRegex(@"^[\s─━═_—│|◔◑◕●]+$|Kiro\s[·•]|esc to cancel|type to queue|^\s*[◔◑◕●]\s+(Shell|Bash)")]
+    private static partial Regex Chrome();
 
     private readonly SettingsStore _settings;
     private readonly HerdrCli _cli;
@@ -223,7 +230,7 @@ public sealed class HerdrPoller : IDisposable
         var kept = new List<string>();
         foreach (var line in content.Replace("\r\n", "\n").Split('\n'))
         {
-            if (!string.IsNullOrWhiteSpace(line) && !Chrome.IsMatch(line)) kept.Add(line);
+            if (!string.IsNullOrWhiteSpace(line) && !Chrome().IsMatch(line)) kept.Add(line);
         }
         if (kept.Count > PromptKeepLines) kept.RemoveRange(0, kept.Count - PromptKeepLines);
 

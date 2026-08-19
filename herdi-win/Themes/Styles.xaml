@@ -252,30 +252,41 @@
             </Setter.Value>
         </Setter>
         <Style.Triggers>
-            <EventTrigger RoutedEvent="Loaded">
-                <BeginStoryboard>
-                    <Storyboard RepeatBehavior="Forever" AutoReverse="True">
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleX"
-                                         To="1.3" Duration="0:0:1.2">
-                            <DoubleAnimation.EasingFunction>
-                                <SineEase EasingMode="EaseInOut" />
-                            </DoubleAnimation.EasingFunction>
-                        </DoubleAnimation>
-                        <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleY"
-                                         To="1.3" Duration="0:0:1.2">
-                            <DoubleAnimation.EasingFunction>
-                                <SineEase EasingMode="EaseInOut" />
-                            </DoubleAnimation.EasingFunction>
-                        </DoubleAnimation>
-                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                         To="0.7" Duration="0:0:1.2">
-                            <DoubleAnimation.EasingFunction>
-                                <SineEase EasingMode="EaseInOut" />
-                            </DoubleAnimation.EasingFunction>
-                        </DoubleAnimation>
-                    </Storyboard>
-                </BeginStoryboard>
-            </EventTrigger>
+            <!-- Driven by IsVisible, not Loaded. The flyout is hidden rather than closed,
+                 so its visual tree stays loaded for the life of the process: a Loaded
+                 trigger starts this forever-loop once and never stops it, and WPF goes on
+                 ticking the timeline and waking the UI thread for a dot nobody can see.
+                 IsVisible goes false the moment IslandWindow.Hide() runs, which stops the
+                 clock and returns the scale and opacity to their base values. -->
+            <Trigger Property="IsVisible" Value="True">
+                <Trigger.EnterActions>
+                    <BeginStoryboard x:Name="Pulse">
+                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleX"
+                                             To="1.3" Duration="0:0:1.2">
+                                <DoubleAnimation.EasingFunction>
+                                    <SineEase EasingMode="EaseInOut" />
+                                </DoubleAnimation.EasingFunction>
+                            </DoubleAnimation>
+                            <DoubleAnimation Storyboard.TargetProperty="RenderTransform.ScaleY"
+                                             To="1.3" Duration="0:0:1.2">
+                                <DoubleAnimation.EasingFunction>
+                                    <SineEase EasingMode="EaseInOut" />
+                                </DoubleAnimation.EasingFunction>
+                            </DoubleAnimation>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                             To="0.7" Duration="0:0:1.2">
+                                <DoubleAnimation.EasingFunction>
+                                    <SineEase EasingMode="EaseInOut" />
+                                </DoubleAnimation.EasingFunction>
+                            </DoubleAnimation>
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                    <StopStoryboard BeginStoryboardName="Pulse" />
+                </Trigger.ExitActions>
+            </Trigger>
         </Style.Triggers>
     </Style>
 
