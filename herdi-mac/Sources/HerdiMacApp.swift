@@ -160,7 +160,7 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
     /// Watch for agents transitioning to blocked state and auto-expand the panel
     private func observeBlockedAgents() {
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 let blocked = self.relay.agents.filter { $0.status == .blocked }
 
