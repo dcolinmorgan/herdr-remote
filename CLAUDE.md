@@ -20,6 +20,8 @@ Clients (web/mac/ios/telegram/tui)
 
 The relay (`relay/herdr_relay.py`) is the central hub: it polls herdr for agent state, accepts push events via HTTP POST and UDP, and broadcasts to connected WebSocket clients. Clients send `respond`, `read_pane`, `send_keys`, and `send_text` messages back through the relay to control agents.
 
+The mac and Windows clients can also skip the relay entirely. Their **direct** mode runs the CLI itself — `herdr pane list` locally and `ssh <target> herdr pane list` per configured host — on the same SSH terms as the relay (`ConnectTimeout=5`, `BatchMode=yes`, `HERDR_REMOTE_BIN`). The host list is per client: `herdi_remotes` in `UserDefaults` on macOS, `%LOCALAPPDATA%\herdr-remote\settings.json` on Windows. Nothing in this mode touches the relay, so none of the relay constraints below apply to it.
+
 ## Components
 
 | Path | What | Language |
@@ -31,6 +33,7 @@ The relay (`relay/herdr_relay.py`) is the central hub: it polls herdr for agent 
 | `demo-worker/` | Cloudflare Worker mock relay for demos | JS |
 | `herdi-mac/` | macOS menu bar app | Swift (SPM) |
 | `herdi-ios/` | iOS app with widgets + Live Activities | Swift (XcodeGen) |
+| `herdi-win/` | Windows tray app + tray flyout panel | C# (.NET 8 / WPF) |
 
 ## Running Components
 
@@ -57,6 +60,12 @@ cd herdi-mac && ./build.sh
 
 # iOS app (generate Xcode project)
 cd herdi-ios && xcodegen generate
+
+# Windows app (needs the .NET 8 SDK; `dotnet build` also works off-Windows
+# for compile checking thanks to EnableWindowsTargeting)
+# ./build.ps1 -Framework is 25 MB against the default's 166 MB for identical memory;
+# ./build.ps1 -Compress halves the download and doubles the memory. See herdi-win/README.md.
+cd herdi-win && ./build.ps1
 ```
 
 ## Key Environment Variables
@@ -68,6 +77,7 @@ cd herdi-ios && xcodegen generate
 | `HERDR_REMOTES` | Comma-separated SSH targets to poll |
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
+| `HERDI_RENDER` | Windows client only: `hardware` restores WPF's GPU path (default is software — see `herdi-win/README.md#memory`) |
 
 ## Web App
 
@@ -79,7 +89,15 @@ Messages are JSON with a `type` field:
 
 **Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read)
 
-**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline)
+**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `get_history`, `create_tab`, `push_subscribe`/`push_unsubscribe`
+
+### Relay-side constraints clients must respect
+
+Easy to get wrong — three of the existing clients do:
+
+- **`respond` is allowlisted.** Only the 12 values in `SAFE_RESPONSES` (`herdr_relay.py:90`) are accepted; anything else returns `response not in allowlist`. Free-form replies must use `agent_prompt` (≤10000 chars) or `send_text` (≤1000). The mac/iOS approval cards send custom text as `respond`, so their custom-reply box does not work against the relay.
+- **Interrupt is `C-c`.** `SAFE_KEYS` (`herdr_relay.py:91`) accepts `C-c`, not `Ctrl+c`, and `keys` must be an array. The mac app's `Ctrl+c` only works because it invokes the local CLI rather than the relay.
+- **`question_toggle`/`question_submit` have no relay handler.** The web app, TUI, mac and iOS clients all send them; the relay ignores both, so multi-select questions cannot be answered from any client until it grows support.
 
 ## Deployment
 

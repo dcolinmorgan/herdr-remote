@@ -1,0 +1,158 @@
+<Window x:Class="Herdi.Views.IslandWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:Herdi.Views"
+        xmlns:vm="clr-namespace:Herdi.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        d:DataContext="{d:DesignInstance Type=vm:IslandViewModel}"
+        mc:Ignorable="d"
+        Title="Herdi"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        ResizeMode="NoResize"
+        SizeToContent="WidthAndHeight"
+        UseLayoutRounding="True"
+        TextOptions.TextFormattingMode="Display">
+
+    <!-- A tray flyout: hidden until summoned, then anchored to the notification-area corner
+         of the taskbar. Positioning lives in IslandWindow.UpdatePosition.
+
+         Root deliberately has no Background. The window is inflated on every side by
+         ShadowMargin so the drop shadow has room to fall, and a null background leaves that
+         inflated ring out of hit testing — clicks in it reach whatever is behind rather than
+         being swallowed by an invisible frame. Card, having a Background, hit-tests
+         normally, which is also what makes its MouseEnter/MouseLeave usable. -->
+    <Grid x:Name="Root">
+        <Grid.RenderTransform>
+            <!-- Slide-in offset, animated to zero on show. The axis and sign follow whichever
+                 edge the taskbar is docked to. -->
+            <TranslateTransform x:Name="Slide" />
+        </Grid.RenderTransform>
+
+        <Border x:Name="Card"
+                CornerRadius="8"
+                BorderThickness="1"
+                BorderBrush="{StaticResource Stroke10}"
+                Background="{StaticResource IslandFill}"
+                ContextMenuOpening="OnContextMenuOpening"
+                ContextMenuClosing="OnContextMenuClosing">
+            <Border.Effect>
+                <!-- Windows draws its own flyouts with a soft shadow directly beneath the
+                     card. ShadowDepth 2 with a wide blur reads the same without the card
+                     appearing to float off at an angle. -->
+                <DropShadowEffect BlurRadius="18" ShadowDepth="2" Direction="270"
+                                  Opacity="0.5" Color="Black" RenderingBias="Quality" />
+            </Border.Effect>
+
+            <!-- Width matches what the expanded island was: the approval card's diff lines and
+                 the pane view's terminal text are laid out against it. -->
+            <StackPanel x:Name="Body" Width="580">
+
+                <!-- Header. Descended from CompactBar (NotchContentView.swift:179), which was
+                     the collapsed capsule on macOS; with no collapsed state left it is simply
+                     the card's title bar. -->
+                <Grid Height="34">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Left: connection dot, blocked count, working count -->
+                    <StackPanel Grid.Column="0" Orientation="Horizontal"
+                                VerticalAlignment="Center" Margin="12,0,0,0">
+                        <Ellipse Width="7" Height="7">
+                            <Ellipse.Style>
+                                <Style TargetType="Ellipse">
+                                    <Setter Property="Fill" Value="{StaticResource Red}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsConnected}" Value="True">
+                                            <Setter Property="Fill" Value="{StaticResource Green}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Ellipse.Style>
+                        </Ellipse>
+
+                        <StackPanel Orientation="Horizontal" Margin="6,0,0,0"
+                                    Visibility="{Binding HasBlocked, Converter={StaticResource BoolToVis}}">
+                            <TextBlock Text="⚠" FontSize="10" FontWeight="Bold"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource Red}" />
+                            <TextBlock Text="{Binding Blocked.Count}"
+                                       Margin="2,0,0,0"
+                                       FontFamily="{StaticResource MonoFont}"
+                                       FontSize="11" FontWeight="Bold"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource Red}" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal" Margin="6,0,0,0"
+                                    Visibility="{Binding HasWorking, Converter={StaticResource BoolToVis}}">
+                            <Ellipse Style="{StaticResource PulsingDot}" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding Working.Count}"
+                                       Margin="2,0,0,0"
+                                       FontFamily="{StaticResource MonoFont}"
+                                       FontSize="11" FontWeight="Medium"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource Text90}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <!-- Centre: wordmark -->
+                    <TextBlock Grid.Column="1"
+                               Text="herdr"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               FontFamily="{StaticResource UiFont}"
+                               FontSize="12" FontWeight="SemiBold"
+                               Foreground="{StaticResource Text90}" />
+
+                    <!-- Right: update badge, total agent count, dismiss -->
+                    <StackPanel Grid.Column="2" Orientation="Horizontal"
+                                VerticalAlignment="Center" Margin="0,0,8,0">
+                        <Button Style="{StaticResource GlyphButton}"
+                                Content="⬇"
+                                FontSize="11"
+                                Foreground="{StaticResource Cyan}"
+                                ToolTip="Show update"
+                                Click="OnShowUpdate"
+                                Visibility="{Binding Updater.UpdateAvailable, Converter={StaticResource BoolToVis}}" />
+                        <TextBlock Text="{Binding AgentCount}"
+                                   Margin="4,0,0,0"
+                                   FontFamily="{StaticResource MonoFont}"
+                                   FontSize="10" FontWeight="Medium"
+                                   VerticalAlignment="Center"
+                                   Foreground="{StaticResource Text40}" />
+                        <!-- A flyout normally closes by clicking away, but this one is
+                             topmost and borderless, so it also earns an explicit way out
+                             for anyone who reaches for one. -->
+                        <Button Style="{StaticResource GlyphButton}"
+                                Content="✕"
+                                FontSize="11"
+                                Margin="6,0,0,0"
+                                Foreground="{StaticResource Text40}"
+                                ToolTip="Close (Esc)"
+                                Click="OnCloseClicked" />
+                    </StackPanel>
+                </Grid>
+
+                <Border Height="0.7" Margin="12,0" Background="{StaticResource Stroke15}" />
+
+                <Grid>
+                    <views:SessionListView x:Name="SessionList"
+                                           Visibility="{Binding ShowSessionListSurface, Converter={StaticResource BoolToVis}}" />
+                    <views:ApprovalCardView x:Name="ApprovalCard"
+                                            Visibility="{Binding ShowApprovalSurface, Converter={StaticResource BoolToVis}}" />
+                    <views:PaneView x:Name="Pane"
+                                    Visibility="{Binding ShowPaneSurface, Converter={StaticResource BoolToVis}}" />
+                </Grid>
+
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
