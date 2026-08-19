@@ -31,6 +31,15 @@ public sealed partial class HerdrPoller : IDisposable
     /// <summary>Matches the relay's POLL_INTERVAL and the mac app's pollTimer.</summary>
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// The prompt preview budget. Only the last of these has to agree with the relay,
+    /// which cuts to <c>content[-500:]</c> in blocked_message (herdr_relay.py): taking the
+    /// other end would keep the scrollback and drop the question, and with it the options
+    /// <see cref="DetectOptions"/> parses back out of the same text. How much each side
+    /// reads to get there differs on purpose -- the relay fetches 100 lines for a pane
+    /// view, this fetches 50 for a toast -- because the 500-character cut lands well
+    /// inside both.
+    /// </summary>
     private const int PromptReadLines = 50;
     private const int PromptKeepLines = 20;
     private const int PromptMaxChars = 500;
@@ -235,7 +244,7 @@ public sealed partial class HerdrPoller : IDisposable
         if (kept.Count > PromptKeepLines) kept.RemoveRange(0, kept.Count - PromptKeepLines);
 
         var prompt = string.Join("\n", kept);
-        if (prompt.Length > PromptMaxChars) prompt = prompt[..PromptMaxChars];
+        if (prompt.Length > PromptMaxChars) prompt = prompt[^PromptMaxChars..];
         return (prompt, DetectOptions(prompt));
     }
 

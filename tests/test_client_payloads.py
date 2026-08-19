@@ -217,13 +217,20 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("HERDR_REMOTE_BIN", cli)
 
         self.assertIn('"pane", "list"', poller)
-        # read_pane(): 50 lines fetched, chrome dropped, last 20 kept, capped at 500 chars.
-        self.assertIn('"--lines", "50"', relay)
+
+        # Both sides build the preview out of the tail of the pane: read, drop chrome, keep
+        # the last lines, cut to the last 500 characters. Only that final cut has to agree
+        # -- taking it off the front would keep the scrollback and drop the question, and
+        # with it the options each side parses back out of the same text. How much is read
+        # to get there differs on purpose: 100 lines for a pane view the relay also serves,
+        # 50 for a toast.
+        self.assertIn('"--lines", "100"', relay)
         self.assertIn("PromptReadLines = 50", poller)
-        self.assertIn("lines[-20:]", relay)
+        self.assertIn("lines[-50:]", relay)
         self.assertIn("PromptKeepLines = 20", poller)
-        self.assertIn("content[:500]", relay)
+        self.assertIn('"prompt": content[-500:]', relay)
         self.assertIn("PromptMaxChars = 500", poller)
+        self.assertIn("prompt[^PromptMaxChars..]", poller)
 
     def test_windows_direct_mode_namespaces_remote_pane_ids(self):
         """Two hosts can hand out the same pane id, so ids carry their host in direct mode.
