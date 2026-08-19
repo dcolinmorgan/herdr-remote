@@ -3,9 +3,25 @@
 #
 #   .\build.ps1                  # self-contained single exe (no .NET needed to run)
 #   .\build.ps1 -Framework       # small exe, requires the .NET 8 Desktop Runtime
-#   .\build.ps1 -Compress        # smaller exe, much larger resting memory (see below)
+#   .\build.ps1 -Compress        # smaller exe, double the memory -- see the table
 #   .\build.ps1 -Zip             # also produce the release asset the updater looks for
 #   .\build.ps1 -Arch win-arm64  # ARM64 device
+#
+# Measured on 0.7.3, private bytes with the flyout open:
+#
+#              exe     memory   target machine needs
+#   default   166 MB    80 MB   nothing
+#   -Framework 25 MB    80 MB   .NET 8 Desktop Runtime
+#   -Compress  70 MB   160 MB   nothing
+#
+# -Compress saves 96 MB of download and costs 80 MB of memory for as long as the app is
+# running: a compressed bundle cannot be mapped, so every assembly loaded is decompressed
+# into private memory. Microsoft.Windows.SDK.NET.dll alone -- the Windows SDK's WinRT
+# projection, which this app touches only for toasts -- is 25 MB of that.
+#
+# -Framework and the default cost exactly the same memory, because both map their
+# assemblies off disk. The 6.6x size difference is the whole of what separates them, and
+# it is paid on every update the built-in updater downloads.
 #
 # ASCII only, deliberately. Windows PowerShell 5.1 reads .ps1 files as ANSI unless they
 # carry a UTF-8 BOM, so on a non-Latin system locale a stray multi-byte character here is
