@@ -371,27 +371,62 @@ document.getElementById('relayToken').value = savedToken;
 
 
 
+// Back-button navigation — every view or overlay that covers the agent list
+// pushes a history entry when it opens, so the Android system back button (and
+// the browser's) dismisses the top layer instead of leaving the app.
+const navStack = [];
+
+function navPush(key, close) {
+  if (navStack.some(l => l.key === key)) return;
+  try { history.pushState({ herdrNav: key, depth: navStack.length + 1 }, ''); }
+  catch (e) { return; } // no History API here — nothing to intercept
+  navStack.push({ key, close });
+}
+
+// Dismiss a layer from the UI. Drops its history entry plus anything stacked on
+// top, so the two stacks stay in sync and a repeat tap can't over-rewind.
+function navClose(key, close) {
+  const i = navStack.findIndex(l => l.key === key);
+  if (i < 0) { close(); return; }
+  const dropped = navStack.splice(i);
+  history.go(-dropped.length);
+  for (const l of dropped) l.close();
+}
+
+// System / browser back: close every layer above the entry we landed on.
+addEventListener('popstate', () => {
+  const depth = history.state && history.state.herdrNav ? history.state.depth : 0;
+  while (navStack.length > depth) navStack.pop().close();
+});
+
 function toggleSettings() {
-  const s = document.getElementById('settingsView');
-  const show = s.style.display !== 'block';
-  s.style.display = show ? 'block' : 'none';
-  document.getElementById('agentListView').style.display = show ? 'none' : '';
+  if (document.getElementById('settingsView').style.display === 'block') { closePanel(); return; }
+  document.getElementById('settingsView').style.display = 'block';
   document.getElementById('timelineView').style.display = 'none';
-  if (show) {
-    document.getElementById('settingsStatus').innerHTML = ws && ws.readyState === 1
-      ? `<span style="color:var(--green)">● Connected</span> · ${agents.length} agents`
-      : `<span style="color:var(--red)">● Disconnected</span>`;
-    renderSessions();
-  }
+  document.getElementById('agentListView').style.display = 'none';
+  navPush('panel', hidePanel);
+  document.getElementById('settingsStatus').innerHTML = ws && ws.readyState === 1
+    ? `<span style="color:var(--green)">● Connected</span> · ${agents.length} agents`
+    : `<span style="color:var(--red)">● Disconnected</span>`;
+  renderSessions();
 }
 
 function toggleTimeline() {
-  const t = document.getElementById('timelineView');
-  const show = t.style.display !== 'block';
-  t.style.display = show ? 'block' : 'none';
-  document.getElementById('agentListView').style.display = show ? 'none' : '';
+  if (document.getElementById('timelineView').style.display === 'block') { closePanel(); return; }
+  document.getElementById('timelineView').style.display = 'block';
   document.getElementById('settingsView').style.display = 'none';
-  if (show) renderTimeline();
+  document.getElementById('agentListView').style.display = 'none';
+  navPush('panel', hidePanel);
+  renderTimeline();
+}
+
+// Settings and Timeline swap places over the agent list, so they share one
+// history entry: switching between them doesn't cost an extra back press.
+function closePanel() { navClose('panel', hidePanel); }
+function hidePanel() {
+  document.getElementById('settingsView').style.display = 'none';
+  document.getElementById('timelineView').style.display = 'none';
+  document.getElementById('agentListView').style.display = '';
 }
 
 function renderTimeline() {
@@ -922,6 +957,7 @@ function openTerminal(paneId) {
   document.getElementById('agentListView').style.display = 'none';
   if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
+  navPush('terminal', hideTerminal);
   const qa = document.getElementById('quickActions');
   const ak = document.getElementById('actionKeys');
   qa.replaceChildren();
@@ -973,7 +1009,9 @@ function openTerminal(paneId) {
   refreshInterval = setInterval(refreshPane, 3000);
 }
 
-function closeTerminal() {
+function closeTerminal() { navClose('terminal', hideTerminal); }
+
+function hideTerminal() {
   activePane = null; clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.remove('active');
   document.getElementById('agentListView').style.display = '';
@@ -1004,14 +1042,14 @@ function toggleSearch() {
 
 function toggleHistory() {
   const panel = document.getElementById('termHistory');
-  if (panel.style.display === 'none') {
-    panel.style.display = 'flex';
-    document.getElementById('termSearch').style.display = 'none'; // close search if open
-    loadHistory();
-  } else {
-    panel.style.display = 'none';
-  }
+  if (panel.style.display !== 'none') { navClose('history', hideHistory); return; }
+  panel.style.display = 'flex';
+  document.getElementById('termSearch').style.display = 'none'; // close search if open
+  navPush('history', hideHistory);
+  loadHistory();
 }
+
+function hideHistory() { document.getElementById('termHistory').style.display = 'none'; }
 
 function loadHistory() {
   if (!ws || !activePane) return;
@@ -1174,11 +1212,14 @@ function showContextMenu(e, type, id, name) {
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
   menu.style.display = 'block';
+  navPush('ctxmenu', hideMenu);
   
   if (window.cue) cue('tick');
 }
 
-function hideContextMenu() {
+function hideContextMenu() { navClose('ctxmenu', hideMenu); }
+
+function hideMenu() {
   document.getElementById('contextMenu').style.display = 'none';
   contextTarget = null;
 }
@@ -1454,11 +1495,13 @@ function getAgentCommands() {
 function openCommandPalette() {
   if(window.cue) cue('page');
   document.getElementById('cmdPalette').style.display = '';
+  navPush('palette', hidePalette);
   document.getElementById('cmdSearch').value = '';
   filterCommands();
   document.getElementById('cmdSearch').focus();
 }
-function closePalette() { document.getElementById('cmdPalette').style.display = 'none'; }
+function closePalette() { navClose('palette', hidePalette); }
+function hidePalette() { document.getElementById('cmdPalette').style.display = 'none'; }
 
 function filterCommands() {
   const q = (document.getElementById('cmdSearch').value || '').toLowerCase();
