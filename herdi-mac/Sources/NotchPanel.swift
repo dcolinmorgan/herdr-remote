@@ -158,7 +158,7 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.handleScreenChange() }
+            Task { @MainActor [weak self] in self?.handleScreenChange() }
         }
 
         // Fullscreen space detection
@@ -166,7 +166,7 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.handleSpaceChange() }
+            Task { @MainActor [weak self] in self?.handleSpaceChange() }
         }
 
         // Global click: collapse expanded panel when clicking outside
