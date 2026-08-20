@@ -1271,6 +1271,7 @@ function setupLongPress(el, type, id, name) {
 }
 
 function sendText() {
+  if(imeComposing)return;
   const i=document.getElementById('termInput');
   if(!i.value||!ws||!activePane)return;
   const agent=agents.find(a=>a.pane_id===activePane);
@@ -1427,7 +1428,20 @@ function pressCtrl(label) {
 function toggleArrows(){}
 function hideArrows(){}
 function respond(t){if(!ws||!activePane)return;if(window.cue)cue('success');ws.send(JSON.stringify({type:'respond',pane_id:activePane,text:t}));document.getElementById('quickActions').innerHTML='';setTimeout(refreshPane,500);}
-document.getElementById('termInput').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendText();}});
+let imeComposing = false, imeEndedAt = 0;
+{
+  const ti = document.getElementById('termInput');
+  ti.addEventListener('compositionstart',()=>{imeComposing=true;});
+  ti.addEventListener('compositionend',()=>{imeComposing=false;imeEndedAt=Date.now();});
+  ti.addEventListener('keydown',e=>{
+    if(e.key!=='Enter')return;
+    // Enter belongs to the IME while composing - intercepting it drops the preedit
+    if(imeComposing||e.isComposing||e.keyCode===229)return;
+    // Some Chinese IMEs emit a stray Enter right after compositionend
+    if(Date.now()-imeEndedAt<80)return;
+    e.preventDefault();sendText();
+  });
+}
 document.getElementById('termContent').addEventListener('scroll', function() {
   const el = this;
   userScrolledUp = (el.scrollHeight - el.scrollTop - el.clientHeight) > 50;
