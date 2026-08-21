@@ -786,21 +786,36 @@ function renderSessionSelector() {
   btn.textContent = (local.active || 'default') + ' ▾';
 
   const multiSource = sources.length > 1;
+  const rowTargets = [];
   menu.innerHTML = sources.map(src => {
     const header = multiSource
-      ? `<div style="font-size:0.6rem;color:var(--muted);padding:2px 6px">${src.host}</div>`
+      ? `<div style="font-size:0.6rem;color:var(--muted);padding:2px 6px">${escapeHtml(src.host)}</div>`
       : '';
     const rows = src.sessions.map(s => {
       const active = (src.active || 'default') === s.name;
       const dim = s.running ? '' : 'opacity:0.55;';
+      rowTargets.push({ host: src.host, session: s.name });
       return `<div role="option" aria-selected="${active}" tabindex="0"
-                   onclick="switchSession('${src.host}','${s.name}')"
                    style="padding:4px 6px;cursor:pointer;${dim}">
-                ${active ? '✓' : ' '} ${s.name}${s.running ? '' : ' ·'}
+                ${active ? '✓' : ' '} ${escapeHtml(s.name)}${s.running ? '' : ' ·'}
               </div>`;
     }).join('');
     return header + rows;
   }).join('');
+
+  // Host/session go on via the dataset property setter, not string
+  // interpolation, so a name or host containing quotes or markup can't
+  // break out of an attribute or inject JS. Wired after innerHTML is set,
+  // since the rows above carry no onclick/onkeydown of their own.
+  menu.querySelectorAll('[role="option"]').forEach((row, i) => {
+    row.dataset.host = rowTargets[i].host;
+    row.dataset.session = rowTargets[i].session;
+    const activate = () => switchSession(row.dataset.host, row.dataset.session);
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); }
+    });
+  });
 }
 
 function toggleSessionMenu() {
