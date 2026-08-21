@@ -39,7 +39,7 @@ document.addEventListener('DOMContentLoaded', () => bind());
 *:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
 body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; }
 
-.header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
+.header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); position: relative; }
 .header h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
 .header button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 8px; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: color 0.15s, background 0.15s; }
 .header button:hover { color: var(--text); background: var(--border); }
@@ -180,7 +180,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
           aria-expanded="false" aria-label="Switch herdr session"
           style="display:none;font-size:0.7rem;font-weight:500;padding:2px 6px"></button>
   <div id="sessionMenu" role="listbox" aria-label="herdr sessions"
-       style="display:none;position:absolute;top:34px;left:8px;z-index:50;
+       style="display:none;position:absolute;top:100%;left:8px;z-index:50;
               background:var(--bg);border:1px solid var(--border);border-radius:6px;
               padding:4px;min-width:160px"></div>
   <span id="agentCount" style="font-size:0.7rem;color:var(--muted);margin-left:auto"></span>
