@@ -507,21 +507,53 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
     def test_apply_session_switch_rejects_unknown_session(self):
         # The value reaches a subprocess environment; it must be validated
-        # against discovered names, never passed through.
+        # against discovered names, never passed through. Names that merely
+        # differ in case or extend a valid name must also be rejected -- a
+        # denylist (e.g. a traversal/metacharacter filter) would let those
+        # through, so this pins the exact-match allowlist specifically.
         with loaded_relay() as relay:
+            relay.known_panes.add("w1:p1")
             before = dict(relay.ACTIVE_SESSIONS)
             with mock.patch.object(relay, "get_sessions", return_value=[
                         {"name": "personal", "running": True}]), \
                  mock.patch.object(relay, "audit"):
                 ok, err = relay.apply_session_switch("local", "../../etc/passwd")
+                self.assertFalse(ok)
+                self.assertIn("unknown session", err)
 
-            self.assertFalse(ok)
-            self.assertIn("unknown session", err)
+                ok, err = relay.apply_session_switch("local", "personal2")
+                self.assertFalse(ok)
+                self.assertIn("unknown session", err)
+
+                ok, err = relay.apply_session_switch("local", "Personal")
+                self.assertFalse(ok)
+                self.assertIn("unknown session", err)
+
+            self.assertEqual(relay.ACTIVE_SESSIONS, before)
+            self.assertIn("w1:p1", relay.known_panes)
+
+    def test_apply_session_switch_rejects_non_string_session(self):
+        # session ends up in `x not in names` against a set; a list or dict
+        # is unhashable there and must be rejected, not raise.
+        with loaded_relay() as relay:
+            before = dict(relay.ACTIVE_SESSIONS)
+            with mock.patch.object(relay, "get_sessions", return_value=[
+                        {"name": "personal", "running": True}]), \
+                 mock.patch.object(relay, "audit"):
+                ok, err = relay.apply_session_switch("local", ["personal"])
+                self.assertFalse(ok)
+                self.assertIn("unknown session", err)
+
+                ok, err = relay.apply_session_switch("local", {"name": "personal"})
+                self.assertFalse(ok)
+                self.assertIn("unknown session", err)
+
             self.assertEqual(relay.ACTIVE_SESSIONS, before)
 
     def test_apply_session_switch_rejects_unknown_host(self):
         with loaded_relay() as relay:
             relay.REMOTES.clear()
+            relay.known_panes.add("w1:p1")
             before = dict(relay.ACTIVE_SESSIONS)
             with mock.patch.object(relay, "audit"):
                 ok, err = relay.apply_session_switch("user@nope", "personal")
@@ -529,6 +561,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("unknown host", err)
             self.assertEqual(relay.ACTIVE_SESSIONS, before)
+            self.assertIn("w1:p1", relay.known_panes)
 
     def test_apply_session_switch_allows_stopped_session(self):
         with loaded_relay() as relay:
@@ -539,6 +572,56 @@ class RelaySessionSwitchTests(unittest.TestCase):
                 ok, err = relay.apply_session_switch("local", "default")
 
             self.assertTrue(ok)
+
+    def test_apply_session_switch_attributes_audit_to_caller(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "get_sessions", return_value=[
+                        {"name": "default", "running": True}]), \
+                 mock.patch.object(relay, "_save_active_sessions"), \
+                 mock.patch.object(relay, "audit") as audit_mock:
+                ok, err = relay.apply_session_switch(
+                    "local", "default", ip="10.0.0.5", device="phone")
+
+            self.assertTrue(ok)
+            audit_mock.assert_called_once_with(
+                "session_switch", "10.0.0.5", "phone", "",
+                "host=local session=default")
+
+    def test_apply_session_switch_completes_when_persistence_fails(self):
+        # A save failure must not leave the switch half-applied: pane state
+        # still has to reset and the action still has to audit, or a stale
+        # cache under the new session is exactly the cross-session leak the
+        # reset exists to prevent.
+        with loaded_relay() as relay:
+            relay.known_panes.add("w1:p1")
+            with mock.patch.object(relay, "get_sessions", return_value=[
+                        {"name": "default", "running": True}]), \
+                 mock.patch.object(relay, "_save_active_sessions",
+                                   side_effect=OSError("disk full")), \
+                 mock.patch.object(relay, "audit") as audit_mock:
+                ok, err = relay.apply_session_switch("local", "default")
+
+            self.assertTrue(ok)
+            self.assertEqual(err, "")
+            self.assertEqual(relay.ACTIVE_SESSIONS[None], "default")
+            self.assertEqual(relay.known_panes, set())   # reset still happened
+            audit_mock.assert_called_once()
+
+    def test_apply_session_switch_is_noop_when_already_active(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "get_sessions", return_value=[
+                        {"name": "default", "running": True}]), \
+                 mock.patch.object(relay, "_save_active_sessions"), \
+                 mock.patch.object(relay, "audit"):
+                ok, err = relay.apply_session_switch("local", "default")
+                self.assertTrue(ok)
+
+                relay.known_panes.add("w1:p1")
+                ok, err = relay.apply_session_switch("local", "default")
+
+            self.assertTrue(ok)
+            self.assertEqual(err, "")
+            self.assertIn("w1:p1", relay.known_panes)
 
 
 class RelayResponseTests(unittest.TestCase):

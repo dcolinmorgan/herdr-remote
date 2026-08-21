@@ -462,22 +462,39 @@ def _source_key(host):
     raise KeyError(host)
 
 
-def apply_session_switch(host, session):
+def apply_session_switch(host, session, ip="", device=""):
     """Point one source at a session. Returns (ok, error_message)."""
     try:
         source = _source_key(host)
     except KeyError:
         return False, f"unknown host: {host}"
 
+    # Re-selecting the already-active session is a no-op: skip the blocking
+    # `herdr session list` call and, crucially, the pane-state reset below.
+    # `source in ACTIVE_SESSIONS` (not `.get()`) matters here -- a key that
+    # has never been set is not the same thing as an explicit None value.
+    if source in ACTIVE_SESSIONS and ACTIVE_SESSIONS[source] == session:
+        return True, ""
+
     if session is not None:
+        if not isinstance(session, str):
+            # session lands in a set-membership check next; a list/dict is
+            # unhashable there and would raise instead of being rejected.
+            return False, f"unknown session: {session}"
         names = {s["name"] for s in get_sessions(remote=source)}
         if session not in names:
             return False, f"unknown session: {session}"
 
     ACTIVE_SESSIONS[source] = session
-    _save_active_sessions()
+    try:
+        _save_active_sessions()
+    except Exception:
+        # A save failure must not half-apply the switch: pane state still
+        # has to reset and the action still has to audit, or stale
+        # pane-keyed state survives under the newly active session.
+        log.exception("failed to persist active sessions: host=%s session=%s", host, session)
     reset_pane_state()
-    audit("session_switch", "", "", "", f"host={host} session={session}")
+    audit("session_switch", ip, device, "", f"host={host} session={session}")
     log.info("session switch: host=%s session=%s", host, session)
     return True, ""
 
