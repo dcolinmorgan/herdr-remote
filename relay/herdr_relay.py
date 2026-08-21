@@ -499,6 +499,25 @@ def apply_session_switch(host, session, ip="", device=""):
     return True, ""
 
 
+SESSION_REFRESH_EVERY = 15   # poll cycles; 30s at POLL_INTERVAL=2
+
+
+def sessions_message():
+    """Per-source session lists and the active selection for each."""
+    sources = []
+    for source in [None, *REMOTES]:
+        sources.append({
+            "host": "local" if source is None else source,
+            "active": active_session_for(source),
+            "sessions": get_sessions(remote=source),
+        })
+    return {"type": "sessions", "sources": sources}
+
+
+async def broadcast_sessions():
+    await broadcast(sessions_message())
+
+
 def read_pane(pane_id, remote=None):
     raw = run_herdr("pane", "read", pane_id, "--lines", "100", "--source", "recent", remote=remote)
     lines = [l for l in raw.splitlines() if l.strip() and not CHROME_RE.search(l)]
@@ -766,6 +785,7 @@ async def broadcast(msg):
     clients.difference_update(dead)
 
 async def send_current_snapshot(ws):
+    await ws.send(json.dumps(sessions_message()))
     agents = get_all_agents()
     update_pane_maps(agents)
     await ws.send(json.dumps({"type": "agents", "agents": agents}))
@@ -783,11 +803,15 @@ async def send_current_snapshot(ws):
 
 
 async def poll_loop():
+    cycle = 0
     while True:
         try:
             await _poll_once()
+            if cycle % SESSION_REFRESH_EVERY == 0:
+                await broadcast_sessions()
         except Exception:
             log.exception("poll cycle failed; retrying")
+        cycle += 1
         await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -1147,6 +1171,24 @@ async def handle_client(ws):
                 if request_id:
                     response["request_id"] = request_id
                 await ws.send(json.dumps(response))
+            elif msg_type == "session_switch":
+                request_id = msg.get("request_id")
+                ok, err = apply_session_switch(msg.get("host"), msg.get("session"), ip, device)
+                if not ok:
+                    response = {"type": "error", "message": err}
+                    if request_id:
+                        response["request_id"] = request_id
+                    await ws.send(json.dumps(response))
+                else:
+                    if request_id:
+                        await ws.send(json.dumps({
+                            "type": "command_result",
+                            "command": "session_switch",
+                            "request_id": request_id,
+                            "ok": True,
+                        }))
+                    await broadcast_sessions()
+                    await _poll_once()
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
             elif msg_type == "read_pane":

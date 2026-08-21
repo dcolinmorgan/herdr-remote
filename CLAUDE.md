@@ -77,9 +77,9 @@ The web app is a single self-contained HTML file (`web/index.html`) with inline 
 
 Messages are JSON with a `type` field:
 
-**Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read)
+**Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection)
 
-**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline)
+**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default)
 
 ## Deployment
 

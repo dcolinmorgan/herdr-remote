@@ -623,6 +623,39 @@ class RelaySessionSwitchTests(unittest.TestCase):
             self.assertEqual(err, "")
             self.assertIn("w1:p1", relay.known_panes)
 
+    def test_sessions_message_shape(self):
+        with loaded_relay() as relay:
+            relay.REMOTES.clear()
+            relay.ACTIVE_SESSIONS.clear()
+            relay.ACTIVE_SESSIONS[None] = "personal"
+
+            with mock.patch.object(relay, "get_sessions", return_value=[
+                        {"name": "default", "running": False},
+                        {"name": "personal", "running": True}]):
+                message = relay.sessions_message()
+
+            self.assertEqual(message["type"], "sessions")
+            self.assertEqual(len(message["sources"]), 1)
+            source = message["sources"][0]
+            self.assertEqual(source["host"], "local")
+            self.assertEqual(source["active"], "personal")
+            self.assertEqual(
+                source["sessions"],
+                [{"name": "default", "running": False},
+                 {"name": "personal", "running": True}],
+            )
+
+    def test_sessions_message_includes_each_remote(self):
+        with loaded_relay() as relay:
+            relay.REMOTES[:] = ["user@host"]
+            relay.ACTIVE_SESSIONS.clear()
+
+            with mock.patch.object(relay, "get_sessions", return_value=[]):
+                message = relay.sessions_message()
+
+            self.assertEqual([s["host"] for s in message["sources"]],
+                             ["local", "user@host"])
+
 
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):
