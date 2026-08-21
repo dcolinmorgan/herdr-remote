@@ -273,6 +273,43 @@ class RelaySessionSwitchTests(unittest.TestCase):
                 captured["cmd"].index(relay.REMOTE_HERDR),
             )
 
+    def test_active_sessions_round_trip_through_state_file(self):
+        with loaded_relay() as relay:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "active_sessions.json")
+                with mock.patch.object(relay, "ACTIVE_SESSIONS_FILE", path):
+                    relay.ACTIVE_SESSIONS.clear()
+                    relay.ACTIVE_SESSIONS[None] = "default"
+                    relay.ACTIVE_SESSIONS["user@host"] = "personal"
+                    relay._save_active_sessions()
+
+                    # JSON has no null keys, so local is stored as "local".
+                    with open(path) as f:
+                        self.assertEqual(
+                            json.load(f), {"local": "default", "user@host": "personal"}
+                        )
+
+                    relay.ACTIVE_SESSIONS.clear()
+                    relay._load_active_sessions()
+                    self.assertEqual(
+                        relay.ACTIVE_SESSIONS,
+                        {None: "default", "user@host": "personal"},
+                    )
+
+    def test_load_active_sessions_tolerates_missing_and_corrupt_file(self):
+        for content in (None, "not json", "[1,2,3]"):
+            with self.subTest(content=content):
+                with loaded_relay() as relay:
+                    with tempfile.TemporaryDirectory() as tmp:
+                        path = os.path.join(tmp, "active_sessions.json")
+                        if content is not None:
+                            with open(path, "w") as f:
+                                f.write(content)
+                        with mock.patch.object(relay, "ACTIVE_SESSIONS_FILE", path):
+                            relay.ACTIVE_SESSIONS.clear()
+                            relay._load_active_sessions()
+                            self.assertEqual(relay.ACTIVE_SESSIONS, {})
+
 
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):

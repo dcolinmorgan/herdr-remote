@@ -103,6 +103,7 @@ VAPID_PRIVATE_KEY = os.environ.get("HERDR_VAPID_PRIVATE", "")
 VAPID_SUBJECT = os.environ.get("HERDR_VAPID_SUBJECT", "mailto:herdr@localhost")
 push_subscriptions = []  # list of PushSubscription dicts
 PUSH_SUBS_FILE = os.path.join(LOG_DIR, "push_subs.json")
+ACTIVE_SESSIONS_FILE = os.path.join(LOG_DIR, "active_sessions.json")
 
 if RELAY_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_TOKEN:
     raise SystemExit("HERDR_RELAY_TOKEN is required when HERDR_RELAY_HOST binds beyond loopback")
@@ -258,6 +259,27 @@ def _save_push_subs():
         json.dump(push_subscriptions, f)
 
 
+def _load_active_sessions():
+    """Restore session selection. Mirrors _load_push_subs: never raises."""
+    if not os.path.isfile(ACTIVE_SESSIONS_FILE):
+        return
+    try:
+        with open(ACTIVE_SESSIONS_FILE) as f:
+            stored = json.load(f)
+        if not isinstance(stored, dict):
+            return
+    except Exception:
+        return
+    for key, value in stored.items():
+        ACTIVE_SESSIONS[None if key == "local" else key] = value
+
+
+def _save_active_sessions():
+    payload = {("local" if k is None else k): v for k, v in ACTIVE_SESSIONS.items()}
+    with open(ACTIVE_SESSIONS_FILE, "w") as f:
+        json.dump(payload, f)
+
+
 async def send_web_push(title: str, body: str, url: str = "/", clear: bool = False):
     """Send push notification to all registered subscriptions.
     
@@ -296,6 +318,7 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
         _save_push_subs()
 
 _load_push_subs()
+_load_active_sessions()
 
 
 def _invoke_herdr(*args, remote=None):
