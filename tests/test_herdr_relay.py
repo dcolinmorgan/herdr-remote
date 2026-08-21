@@ -185,6 +185,90 @@ class RelayPaneStateTests(unittest.TestCase):
                 {"active-pane": {"pane_id": "active-pane", "remote": None}},
             )
 
+    @staticmethod
+    def _pane_list(label=None):
+        pane = {
+            "pane_id": "w1:p1",
+            "agent": "claude",
+            "agent_status": "idle",
+            "cwd": "/home/user/personal",
+            "workspace_id": "w1",
+            "tab_id": "w1:t1",
+        }
+        if label is not None:
+            pane["label"] = label
+        return json.dumps({"result": {"panes": [pane]}})
+
+    @staticmethod
+    def _workspace_list(label="central AC"):
+        return json.dumps({
+            "result": {"workspaces": [{"workspace_id": "w1", "label": label}]}
+        })
+
+    def test_workspace_name_is_exposed_to_clients(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(
+                relay,
+                "run_herdr",
+                side_effect=[self._pane_list(), self._workspace_list()],
+            ):
+                agents = relay.get_agents_from_host()
+
+            # Without this, clients fall back to the cwd basename ("personal").
+            self.assertEqual(agents[0]["workspace_label"], "central AC")
+
+    def test_workspace_name_does_not_overwrite_the_pane_label(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(
+                relay,
+                "run_herdr",
+                side_effect=[self._pane_list(label="pane name"), self._workspace_list()],
+            ):
+                agents = relay.get_agents_from_host()
+
+            # Tab chips key off label, so it must stay pane-scoped.
+            self.assertEqual(agents[0]["label"], "pane name")
+            self.assertEqual(agents[0]["workspace_label"], "central AC")
+
+    def test_pane_label_stays_empty_when_herdr_gives_none(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(
+                relay,
+                "run_herdr",
+                side_effect=[self._pane_list(), self._workspace_list()],
+            ):
+                agents = relay.get_agents_from_host()
+
+            self.assertEqual(agents[0]["label"], "")
+
+    def test_unusable_workspace_list_leaves_workspace_label_empty(self):
+        for raw in ("", "not json", json.dumps({"result": {}})):
+            with self.subTest(raw=raw):
+                with loaded_relay() as relay:
+                    with mock.patch.object(
+                        relay,
+                        "run_herdr",
+                        side_effect=[self._pane_list(), raw],
+                    ):
+                        agents = relay.get_agents_from_host()
+
+                    self.assertEqual(agents[0]["workspace_label"], "")
+                    self.assertEqual(agents[0]["project"], "personal")
+
+    def test_unusable_pane_list_skips_the_workspace_lookup(self):
+        with loaded_relay() as relay:
+            calls = []
+
+            def record(*args, **kwargs):
+                calls.append(args)
+                return "not json"
+
+            with mock.patch.object(relay, "run_herdr", side_effect=record):
+                self.assertEqual(relay.get_agents_from_host(), [])
+
+            # An unreachable SSH remote should not cost a second timeout.
+            self.assertEqual(calls, [("pane", "list")])
+
 
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):

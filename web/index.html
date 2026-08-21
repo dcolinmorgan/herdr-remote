@@ -677,7 +677,7 @@ function renderWorkspaces(workspaces) {
   for (const wsId of workspaces) {
     const wsAgents = agents.filter(a => a.workspace_id === wsId);
     const hasBlocked = wsAgents.some(a => a.status === 'blocked');
-    const name = wsAgents[0]?.project || wsId.slice(0, 8);
+    const name = wsAgents[0]?.workspace_label || wsAgents[0]?.project || wsId.slice(0, 8);
     html += `<button class="chip${activeWorkspace===wsId?' active':''}${hasBlocked?' alert':''}" onclick="selectWorkspace('${wsId}')">${name}</button>`;
   }
   html += `</div>`;
@@ -758,7 +758,7 @@ function agentCard(a) {
   const pulseClass = a.status==='working'?' pulse':'';
   const host = a.host&&a.host!=='local'?` <span style="color:var(--orange);font-size:0.6rem">@${a.host}</span>`:'';
   const cwd = a.cwd ? `<span style="font-family:monospace;opacity:0.7">${a.cwd.split('/').slice(-2).join('/')}</span>` : '';
-  const label = a.label||a.project||a.agent;
+  const label = a.label||a.workspace_label||a.project||a.agent;
   return `<div class="agent${a.status==='blocked'?' blocked':''}" role="button" tabindex="0" aria-label="${label}, ${a.status}" data-pane-id="${a.pane_id}" data-agent-name="${label}" onclick="openTerminal('${a.pane_id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${a.pane_id}')}">
     <span class="dot${pulseClass}" style="background:${color}" aria-hidden="true"></span>
     <div class="info"><div class="project">${label}${host}</div><div class="meta">${a.agent} · ${cwd}</div></div>
@@ -774,7 +774,7 @@ function section(title, color, list) {
 function openTerminal(paneId) {
   activePane = paneId; paneLines = 200; userScrolledUp = false;
   const a = agents.find(x => x.pane_id===paneId);
-  document.getElementById('termTitle').textContent = a?`${a.label||a.project} · ${a.agent}`:paneId;
+  document.getElementById('termTitle').textContent = a?`${a.label||a.workspace_label||a.project} · ${a.agent}`:paneId;
   document.getElementById('agentListView').style.display = 'none';
   if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
