@@ -810,7 +810,7 @@ function renderSessionSelector() {
   menu.querySelectorAll('[role="option"]').forEach((row, i) => {
     row.dataset.host = rowTargets[i].host;
     row.dataset.session = rowTargets[i].session;
-    const activate = () => switchSession(row.dataset.host, row.dataset.session);
+    const activate = () => switchHerdrSession(row.dataset.host, row.dataset.session);
     row.addEventListener('click', activate);
     row.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); }
@@ -827,7 +827,7 @@ function toggleSessionMenu() {
 
 let switchingSession = false;
 
-function switchSession(host, session) {
+function switchHerdrSession(host, session) {
   document.getElementById('sessionMenu').style.display = 'none';
   document.getElementById('sessionSelector').setAttribute('aria-expanded', 'false');
   // A switch clears relay state and re-polls; a bare empty list would read as
