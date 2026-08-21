@@ -454,6 +454,27 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
             self.assertEqual(relay.last_blocked_prompts, {})
 
+    def test_reset_pane_state_drains_queued_events(self):
+        # An event queued before a switch (never dequeued by event_push)
+        # must not survive the switch to be processed afterward.
+        with loaded_relay() as relay:
+            event = {
+                "type": "agent_event",
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "blocked",
+                "cwd": "/tmp/x",
+                "project": "x",
+                "host": "local",
+            }
+            relay.event_queue.put_nowait(event)
+
+            relay.reset_pane_state()
+
+            self.assertTrue(relay.event_queue.empty())
+            self.assertEqual(relay.agent_cache, {})
+            self.assertEqual(relay.last_blocked_prompts, {})
+
 
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):
