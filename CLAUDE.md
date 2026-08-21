@@ -68,6 +68,9 @@ cd herdi-ios && xcodegen generate
 | `HERDR_REMOTES` | Comma-separated SSH targets to poll |
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
+| `HERDR_SESSION` | Boot-time default herdr session; a client can override it per source at runtime via `session_switch` |
+
+Runtime session overrides (per source) are persisted to `active_sessions.json` inside `HERDR_LOG_DIR`, so they survive relay restarts.
 
 ## Web App
 
