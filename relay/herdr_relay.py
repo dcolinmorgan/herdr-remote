@@ -67,6 +67,36 @@ POLL_INTERVAL = 2
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Optional: shared secret for relay auth
 TRUSTED_ORIGINS = [o.strip().lower() for o in os.environ.get("HERDR_TRUSTED_ORIGINS", "").split(",") if o.strip()]
 
+# Session selection per source. Key is None for local, else the "user@host"
+# string from HERDR_REMOTES. Value is a session name, or None to follow
+# herdr's own default session.
+DEFAULT_LOCAL_SESSION = os.environ.get("HERDR_SESSION") or None
+ACTIVE_SESSIONS = {}
+
+
+def active_session_for(remote=None):
+    """Session name for one source, or None for herdr's default session."""
+    if remote in ACTIVE_SESSIONS:
+        return ACTIVE_SESSIONS[remote]
+    return DEFAULT_LOCAL_SESSION if remote is None else None
+
+
+def _herdr_env(session):
+    """Child environment targeting one session.
+
+    Returning the inherited environment is wrong for the default session: the
+    relay's own env pins HERDR_SESSION via config.env, and HERDR_SOCKET_PATH is
+    present whenever the relay runs inside a herdr pane. Both must be removed.
+    """
+    env = os.environ.copy()
+    if session:
+        env["HERDR_SESSION"] = session
+        env.pop("HERDR_SOCKET_PATH", None)
+    else:
+        env.pop("HERDR_SESSION", None)
+        env.pop("HERDR_SOCKET_PATH", None)
+    return env
+
 # VAPID Web Push
 VAPID_PUBLIC_KEY = os.environ.get("HERDR_VAPID_PUBLIC", "")
 VAPID_PRIVATE_KEY = os.environ.get("HERDR_VAPID_PRIVATE", "")
@@ -269,8 +299,13 @@ _load_push_subs()
 
 
 def _invoke_herdr(*args, remote=None):
+    session = active_session_for(remote)
     if remote:
-        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, REMOTE_HERDR, *args]
+        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote]
+        if session:
+            # An env= would not survive ssh; the remote shell applies this.
+            cmd.append(f"HERDR_SESSION={session}")
+        cmd += [REMOTE_HERDR, *args]
         with _remote_locks_guard:
             remote_lock = _remote_locks.get(remote)
             if remote_lock is None:
@@ -280,7 +315,10 @@ def _invoke_herdr(*args, remote=None):
             return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
 
     cmd = [HERDR, *args]
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+    return subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=15, env=_herdr_env(session),
+    )
 
 
 def run_herdr_result(*args, remote=None):

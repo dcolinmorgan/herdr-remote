@@ -211,6 +211,68 @@ class RelaySessionSwitchTests(unittest.TestCase):
                     with mock.patch.object(relay, "run_herdr", return_value=raw):
                         self.assertEqual(relay.get_sessions(), [])
 
+    def test_herdr_env_sets_session_when_active(self):
+        with loaded_relay() as relay:
+            env = relay._herdr_env("personal")
+            self.assertEqual(env["HERDR_SESSION"], "personal")
+
+    def test_herdr_env_strips_inherited_session_for_default(self):
+        # The relay's own env pins a session via config.env. Following herdr's
+        # default session means removing it, not inheriting it.
+        with loaded_relay() as relay:
+            with mock.patch.dict(
+                relay.os.environ,
+                {"HERDR_SESSION": "personal", "HERDR_SOCKET_PATH": "/tmp/x.sock"},
+            ):
+                env = relay._herdr_env(None)
+
+            self.assertNotIn("HERDR_SESSION", env)
+            self.assertNotIn("HERDR_SOCKET_PATH", env)
+
+    def test_active_session_falls_back_to_env_default_for_local(self):
+        with loaded_relay() as relay:
+            relay.ACTIVE_SESSIONS.clear()
+            relay.DEFAULT_LOCAL_SESSION = "personal"
+
+            self.assertEqual(relay.active_session_for(None), "personal")
+            # A remote has no env default; it follows its own default session.
+            self.assertIsNone(relay.active_session_for("user@host"))
+
+    def test_active_session_prefers_explicit_selection(self):
+        with loaded_relay() as relay:
+            relay.DEFAULT_LOCAL_SESSION = "personal"
+            relay.ACTIVE_SESSIONS[None] = "default"
+
+            self.assertEqual(relay.active_session_for(None), "default")
+
+    def test_explicit_none_overrides_env_default(self):
+        # Selecting "herdr's default session" must not fall back to the env.
+        with loaded_relay() as relay:
+            relay.DEFAULT_LOCAL_SESSION = "personal"
+            relay.ACTIVE_SESSIONS[None] = None
+
+            self.assertIsNone(relay.active_session_for(None))
+
+    def test_remote_invocation_prefixes_session_assignment(self):
+        with loaded_relay() as relay:
+            relay.ACTIVE_SESSIONS["user@host"] = "personal"
+            captured = {}
+
+            def fake_run(cmd, **kwargs):
+                captured["cmd"] = cmd
+                captured["env"] = kwargs.get("env")
+                return types.SimpleNamespace(stdout="", returncode=0)
+
+            with mock.patch.object(relay.subprocess, "run", side_effect=fake_run):
+                relay._invoke_herdr("pane", "list", remote="user@host")
+
+            self.assertIn("HERDR_SESSION=personal", captured["cmd"])
+            # The assignment must precede the binary in the remote argv.
+            self.assertLess(
+                captured["cmd"].index("HERDR_SESSION=personal"),
+                captured["cmd"].index(relay.REMOTE_HERDR),
+            )
+
 
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):
