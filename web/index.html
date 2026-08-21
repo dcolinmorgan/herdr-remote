@@ -585,6 +585,14 @@ function handleMessage(msg) {
     renderSessionSelector();
     return;
   }
+  if (msg.type === 'error') {
+    // A rejected session_switch must not leave the UI stuck on
+    // "switching…" forever. Minimum handling only: no toast UI, since
+    // nothing else in this file renders errors.
+    switchingSession = false;
+    render();
+    return;
+  }
   if (msg.type === 'agents') {
     switchingSession = false;
     // Track timeline on status changes
@@ -742,8 +750,11 @@ function renderAgentList(list) {
 
 function emptyStateHtml() {
   if (switchingSession) return '<div class="empty">switching…</div>';
-  const local = sessionState?.sources?.find(s => s.host === 'local');
-  if (local) {
+  // Only meaningful with exactly one source: with remotes configured,
+  // "local" being idle says nothing about why the list is empty overall.
+  const sources = sessionState?.sources || [];
+  if (sources.length === 1) {
+    const local = sources[0];
     const active = local.active || 'default';
     const entry = local.sessions.find(s => s.name === active);
     // Same wording herdr-remote-session prints, so CLI and UI agree.
@@ -782,10 +793,23 @@ function renderSessionSelector() {
   if (total < 2) { btn.style.display = 'none'; menu.style.display = 'none'; return; }
   btn.style.display = '';
 
-  const local = sources.find(s => s.host === 'local') || sources[0];
-  btn.textContent = (local.active || 'default') + ' ▾';
-
   const multiSource = sources.length > 1;
+  if (multiSource) {
+    // The trigger used to show local's session unconditionally, so with
+    // remotes configured switching a remote looked like it did nothing.
+    // Stay neutral instead of naming one specific source's session.
+    btn.textContent = 'sessions ▾';
+  } else {
+    const local = sources[0];
+    const active = local.active || 'default';
+    const entry = local.sessions.find(s => s.name === active);
+    // Fall back to the raw active value when nothing matches, so a
+    // mismatch (e.g. herdr's default session not literally named
+    // "default") degrades to a correct-but-unticked label rather than a
+    // confidently wrong one.
+    btn.textContent = (entry ? entry.name : local.active) + ' ▾';
+  }
+
   const rowTargets = [];
   menu.innerHTML = sources.map(src => {
     const header = multiSource
@@ -828,11 +852,14 @@ function toggleSessionMenu() {
 let switchingSession = false;
 
 function switchHerdrSession(host, session) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   document.getElementById('sessionMenu').style.display = 'none';
   document.getElementById('sessionSelector').setAttribute('aria-expanded', 'false');
   // A switch clears relay state and re-polls; a bare empty list would read as
   // breakage. Routed through the existing render path, not by poking the DOM —
-  // there is no #agentList element.
+  // there is no #agentList element. Mutate local state only after we know
+  // the send will happen, so a dead socket can't leave the UI stuck showing
+  // "switching…" forever.
   switchingSession = true;
   agents = [];
   render();
