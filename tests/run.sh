@@ -75,9 +75,15 @@ WEB="$DIR/web/index.html"
 grep -q "WebSocket" "$WEB" && grep -q "theme" "$WEB" && grep -q "sendKey" "$WEB"
 assert_eq "$?" "0" "has WebSocket, themes, keyboard"
 
-grep -q 'id="sessionSelector"' "$DIR/web/index.html" && \
-grep -q "session_switch" "$DIR/web/index.html"
+echo "9b. web app has session selector"
+grep -q 'id="sessionSelector"' "$WEB" && \
+grep -q "session_switch" "$WEB"
 assert_eq "$?" "0" "web app has session selector"
+
+echo "9c. web app has no duplicate function declarations"
+DUP_FUNCS=$(grep -oE '^[[:space:]]*function [A-Za-z0-9_]+\(' "$WEB" | grep -oE '[A-Za-z0-9_]+\(' | sort | uniq -d)
+[ -z "$DUP_FUNCS" ]
+assert_eq "$?" "0" "no duplicate function declarations"
 
 echo "10. web app no hardcoded secrets"
 ! grep -q "c4a2385e" "$WEB" && ! grep -q "graffold" "$WEB"
