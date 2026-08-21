@@ -14,6 +14,7 @@ log = logging.getLogger("herdr-demo-tg")
 
 TOKEN = os.environ.get("HERDR_DEMO_TG_TOKEN", "")
 DEMO_RELAY = "wss://herdr-remote-demo.yyrzrh5wfg.workers.dev"
+PANE_READ_TIMEOUT = 15  # was 5 messages * 3s; kept as one deadline instead
 
 if not TOKEN:
     print("Set HERDR_DEMO_TG_TOKEN")
@@ -94,12 +95,24 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             async with websockets.connect(DEMO_RELAY) as ws:
                 await ws.send(json.dumps({"type": "read_pane", "pane_id": data["pane_id"]}))
-                for _ in range(5):
-                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + PANE_READ_TIMEOUT
+                # The connect preamble (sessions/agents/one-blocked-per-blocked-
+                # agent) can put any number of unrelated messages ahead of
+                # pane_content. Skip by deadline, not by a fixed message count
+                # -- same fix as herdr_telegram.py's read_pane; this relay
+                # happens to never emit `sessions` today, but a fixed count
+                # is one relay change away from breaking here too.
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
                     msg = json.loads(raw)
                     if msg.get("type") == "pane_content":
                         await query.message.reply_text(msg.get("content", "(empty)"))
                         return
+            await query.message.reply_text("(demo read timeout)")
         except:
             await query.message.reply_text("(demo read timeout)")
         return
