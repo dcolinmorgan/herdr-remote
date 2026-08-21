@@ -186,6 +186,32 @@ class RelayPaneStateTests(unittest.TestCase):
             )
 
 
+class RelaySessionSwitchTests(unittest.TestCase):
+    SESSION_LIST = (
+        "name                 status   directory                socket\n"
+        "default              stopped  /home/u/.config/herdr    /home/u/.config/herdr/herdr.sock\n"
+        "personal             running  /home/u/.config/herdr/s  /home/u/.config/herdr/s/herdr.sock\n"
+    )
+
+    def test_get_sessions_parses_name_and_running_state(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=self.SESSION_LIST):
+                sessions = relay.get_sessions()
+
+            self.assertEqual(
+                sessions,
+                [{"name": "default", "running": False},
+                 {"name": "personal", "running": True}],
+            )
+
+    def test_get_sessions_returns_empty_on_unusable_output(self):
+        for raw in ("", "   ", "name status\n", "garbage"):
+            with self.subTest(raw=raw):
+                with loaded_relay() as relay:
+                    with mock.patch.object(relay, "run_herdr", return_value=raw):
+                        self.assertEqual(relay.get_sessions(), [])
+
+
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):
         with loaded_relay() as relay:

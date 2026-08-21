@@ -333,6 +333,18 @@ def get_all_agents():
     return agents
 
 
+def get_sessions(remote=None):
+    """List herdr sessions for one source as [{"name", "running"}]."""
+    raw = run_herdr("session", "list", remote=remote)
+    sessions = []
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[0] == "name":
+            continue
+        sessions.append({"name": parts[0], "running": parts[1] == "running"})
+    return sessions
+
+
 def update_pane_maps(agents):
     current_pane_ids = {agent["pane_id"] for agent in agents}
     for agent in agents:
