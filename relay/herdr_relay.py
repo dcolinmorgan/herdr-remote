@@ -453,6 +453,35 @@ def reset_pane_state():
     POLL_GENERATION += 1
 
 
+def _source_key(host):
+    """Map a client-supplied host to a source key, or raise KeyError."""
+    if host in (None, "", "local"):
+        return None
+    if host in REMOTES:
+        return host
+    raise KeyError(host)
+
+
+def apply_session_switch(host, session):
+    """Point one source at a session. Returns (ok, error_message)."""
+    try:
+        source = _source_key(host)
+    except KeyError:
+        return False, f"unknown host: {host}"
+
+    if session is not None:
+        names = {s["name"] for s in get_sessions(remote=source)}
+        if session not in names:
+            return False, f"unknown session: {session}"
+
+    ACTIVE_SESSIONS[source] = session
+    _save_active_sessions()
+    reset_pane_state()
+    audit("session_switch", "", "", "", f"host={host} session={session}")
+    log.info("session switch: host=%s session=%s", host, session)
+    return True, ""
+
+
 def read_pane(pane_id, remote=None):
     raw = run_herdr("pane", "read", pane_id, "--lines", "100", "--source", "recent", remote=remote)
     lines = [l for l in raw.splitlines() if l.strip() and not CHROME_RE.search(l)]
