@@ -204,6 +204,39 @@ class RelaySessionSwitchTests(unittest.TestCase):
                  {"name": "personal", "running": True}],
             )
 
+    def test_get_sessions_forwards_remote_to_run_herdr(self):
+        # The one unpinned hop: a regression that dropped `remote=` here
+        # would validate a *remote* switch against *local* session names --
+        # a validation bypass. Not caught by shape alone; pin the call arg.
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=self.SESSION_LIST) as run_herdr:
+                relay.get_sessions(remote="user@host")
+
+            run_herdr.assert_called_once_with("session", "list", remote="user@host")
+
+    def test_get_sessions_caches_within_ttl(self):
+        # sessions_message() calls this once per source on every client
+        # connect, each a blocking subprocess; a second call within the TTL
+        # must not pay for another one.
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=self.SESSION_LIST) as run_herdr:
+                first = relay.get_sessions(remote="user@host")
+                second = relay.get_sessions(remote="user@host")
+
+            self.assertEqual(first, second)
+            run_herdr.assert_called_once_with("session", "list", remote="user@host")
+
+    def test_reset_pane_state_clears_session_list_cache(self):
+        # A real switch must always validate and display against a freshly
+        # read session list, never a pre-switch one still inside its TTL.
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=self.SESSION_LIST) as run_herdr:
+                relay.get_sessions(remote="user@host")
+                relay.reset_pane_state()
+                relay.get_sessions(remote="user@host")
+
+            self.assertEqual(run_herdr.call_count, 2)
+
     def test_get_sessions_returns_empty_on_unusable_output(self):
         for raw in ("", "   ", "name status\n", "garbage"):
             with self.subTest(raw=raw):
@@ -260,7 +293,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
             def fake_run(cmd, **kwargs):
                 captured["cmd"] = cmd
-                captured["env"] = kwargs.get("env")
+                captured["kwargs"] = kwargs
                 return types.SimpleNamespace(stdout="", returncode=0)
 
             with mock.patch.object(relay.subprocess, "run", side_effect=fake_run):
@@ -272,6 +305,9 @@ class RelaySessionSwitchTests(unittest.TestCase):
                 captured["cmd"].index("HERDR_SESSION=personal"),
                 captured["cmd"].index(relay.REMOTE_HERDR),
             )
+            # An env= kwarg would not survive ssh; the remote session
+            # assignment must travel via argv only, never the child env.
+            self.assertNotIn("env", captured["kwargs"])
 
     def test_active_sessions_round_trip_through_state_file(self):
         with loaded_relay() as relay:
@@ -295,6 +331,22 @@ class RelaySessionSwitchTests(unittest.TestCase):
                         relay.ACTIVE_SESSIONS,
                         {None: "default", "user@host": "personal"},
                     )
+
+    def test_load_active_sessions_ignores_non_string_values(self):
+        # {"local": 5} parses and is a dict, but 5 would flow into
+        # _herdr_env and make subprocess.run(env=...) raise TypeError,
+        # which run_herdr swallows -- silently zeroing the agent list
+        # forever, surviving every restart. The valid sibling entry must
+        # still load: this isn't a whole-file reject, just a per-value one.
+        with loaded_relay() as relay:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "active_sessions.json")
+                with open(path, "w") as f:
+                    json.dump({"local": 5, "user@host": "personal"}, f)
+                with mock.patch.object(relay, "ACTIVE_SESSIONS_FILE", path):
+                    relay.ACTIVE_SESSIONS.clear()
+                    relay._load_active_sessions()
+                    self.assertEqual(relay.ACTIVE_SESSIONS, {"user@host": "personal"})
 
     def test_load_active_sessions_tolerates_missing_and_corrupt_file(self):
         for content in (None, "not json", "[1,2,3]"):
@@ -486,10 +538,11 @@ class RelaySessionSwitchTests(unittest.TestCase):
                  mock.patch.object(relay, "_save_active_sessions",
                                    side_effect=lambda: saved.update(relay.ACTIVE_SESSIONS)), \
                  mock.patch.object(relay, "audit"):
-                ok, err = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch("local", "default")
 
             self.assertTrue(ok)
             self.assertEqual(err, "")
+            self.assertTrue(changed)
             self.assertEqual(relay.ACTIVE_SESSIONS[None], "default")
             self.assertEqual(saved[None], "default")
             self.assertEqual(relay.known_panes, set())   # reset happened
@@ -500,9 +553,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
                         {"name": "personal", "running": True}]), \
                  mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit"):
-                ok, err = relay.apply_session_switch("local", None)
+                ok, err, changed = relay.apply_session_switch("local", None)
 
             self.assertTrue(ok)
+            self.assertTrue(changed)
             self.assertIsNone(relay.ACTIVE_SESSIONS[None])
 
     def test_apply_session_switch_rejects_unknown_session(self):
@@ -517,16 +571,19 @@ class RelaySessionSwitchTests(unittest.TestCase):
             with mock.patch.object(relay, "get_sessions", return_value=[
                         {"name": "personal", "running": True}]), \
                  mock.patch.object(relay, "audit"):
-                ok, err = relay.apply_session_switch("local", "../../etc/passwd")
+                ok, err, changed = relay.apply_session_switch("local", "../../etc/passwd")
                 self.assertFalse(ok)
+                self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
-                ok, err = relay.apply_session_switch("local", "personal2")
+                ok, err, changed = relay.apply_session_switch("local", "personal2")
                 self.assertFalse(ok)
+                self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
-                ok, err = relay.apply_session_switch("local", "Personal")
+                ok, err, changed = relay.apply_session_switch("local", "Personal")
                 self.assertFalse(ok)
+                self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
             self.assertEqual(relay.ACTIVE_SESSIONS, before)
@@ -540,12 +597,14 @@ class RelaySessionSwitchTests(unittest.TestCase):
             with mock.patch.object(relay, "get_sessions", return_value=[
                         {"name": "personal", "running": True}]), \
                  mock.patch.object(relay, "audit"):
-                ok, err = relay.apply_session_switch("local", ["personal"])
+                ok, err, changed = relay.apply_session_switch("local", ["personal"])
                 self.assertFalse(ok)
+                self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
-                ok, err = relay.apply_session_switch("local", {"name": "personal"})
+                ok, err, changed = relay.apply_session_switch("local", {"name": "personal"})
                 self.assertFalse(ok)
+                self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
             self.assertEqual(relay.ACTIVE_SESSIONS, before)
@@ -556,9 +615,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
             relay.known_panes.add("w1:p1")
             before = dict(relay.ACTIVE_SESSIONS)
             with mock.patch.object(relay, "audit"):
-                ok, err = relay.apply_session_switch("user@nope", "personal")
+                ok, err, changed = relay.apply_session_switch("user@nope", "personal")
 
             self.assertFalse(ok)
+            self.assertFalse(changed)
             self.assertIn("unknown host", err)
             self.assertEqual(relay.ACTIVE_SESSIONS, before)
             self.assertIn("w1:p1", relay.known_panes)
@@ -569,9 +629,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
                         {"name": "default", "running": False}]), \
                  mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit"):
-                ok, err = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch("local", "default")
 
             self.assertTrue(ok)
+            self.assertTrue(changed)
 
     def test_apply_session_switch_attributes_audit_to_caller(self):
         with loaded_relay() as relay:
@@ -579,10 +640,11 @@ class RelaySessionSwitchTests(unittest.TestCase):
                         {"name": "default", "running": True}]), \
                  mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit") as audit_mock:
-                ok, err = relay.apply_session_switch(
+                ok, err, changed = relay.apply_session_switch(
                     "local", "default", ip="10.0.0.5", device="phone")
 
             self.assertTrue(ok)
+            self.assertTrue(changed)
             audit_mock.assert_called_once_with(
                 "session_switch", "10.0.0.5", "phone", "",
                 "host=local session=default")
@@ -599,10 +661,11 @@ class RelaySessionSwitchTests(unittest.TestCase):
                  mock.patch.object(relay, "_save_active_sessions",
                                    side_effect=OSError("disk full")), \
                  mock.patch.object(relay, "audit") as audit_mock:
-                ok, err = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch("local", "default")
 
             self.assertTrue(ok)
             self.assertEqual(err, "")
+            self.assertTrue(changed)
             self.assertEqual(relay.ACTIVE_SESSIONS[None], "default")
             self.assertEqual(relay.known_panes, set())   # reset still happened
             audit_mock.assert_called_once()
@@ -613,14 +676,16 @@ class RelaySessionSwitchTests(unittest.TestCase):
                         {"name": "default", "running": True}]), \
                  mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit"):
-                ok, err = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch("local", "default")
                 self.assertTrue(ok)
+                self.assertTrue(changed)   # the real switch
 
                 relay.known_panes.add("w1:p1")
-                ok, err = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch("local", "default")
 
             self.assertTrue(ok)
             self.assertEqual(err, "")
+            self.assertFalse(changed)   # the no-op re-selection
             self.assertIn("w1:p1", relay.known_panes)
 
     def test_sessions_message_shape(self):
@@ -694,7 +759,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
             def fake_apply(host, session, ip, device):
                 order.append(("apply", host, session, ip, device))
-                return True, ""
+                return True, "", True
 
             async def fake_broadcast_sessions():
                 order.append(("broadcast_sessions",))
@@ -742,7 +807,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
             with mock.patch.object(
                         relay, "apply_session_switch",
-                        return_value=(False, "unknown host: bogus")) as apply_mock, \
+                        return_value=(False, "unknown host: bogus", False)) as apply_mock, \
                  mock.patch.object(relay, "broadcast_sessions", new=mock.AsyncMock()) as broadcast_mock, \
                  mock.patch.object(relay, "_poll_once", new=mock.AsyncMock()) as poll_mock:
                 asyncio.run(relay.handle_client(ws))
@@ -758,6 +823,44 @@ class RelaySessionSwitchTests(unittest.TestCase):
             )
             broadcast_mock.assert_not_awaited()
             poll_mock.assert_not_awaited()
+
+    def test_session_switch_noop_acks_without_broadcast_or_repoll(self):
+        # apply_session_switch's own no-op short-circuit (skipping the
+        # blocking `herdr session list` call and the pane-state reset) is
+        # defeated if the handler runs the broadcast + re-poll anyway --
+        # those are exactly the expensive part `changed` exists to let the
+        # handler skip.
+        with loaded_relay() as relay:
+            request_id = "switch-3"
+            ws = _FakeWebSocket(
+                [json.dumps({
+                    "type": "session_switch",
+                    "host": "local",
+                    "session": "default",
+                    "request_id": request_id,
+                })],
+                headers={"X-Herdr-Remote-Command": "1"},
+            )
+
+            with mock.patch.object(
+                        relay, "apply_session_switch",
+                        return_value=(True, "", False)) as apply_mock, \
+                 mock.patch.object(relay, "broadcast_sessions", new=mock.AsyncMock()) as broadcast_mock, \
+                 mock.patch.object(relay, "_poll_once", new=mock.AsyncMock()) as poll_mock:
+                asyncio.run(relay.handle_client(ws))
+
+            apply_mock.assert_called_once_with("local", "default", "127.0.0.1", "script")
+            broadcast_mock.assert_not_awaited()
+            poll_mock.assert_not_awaited()
+            self.assertEqual(
+                json.loads(ws.sent[-1]),
+                {
+                    "type": "command_result",
+                    "command": "session_switch",
+                    "request_id": request_id,
+                    "ok": True,
+                },
+            )
 
 
 class RelayResponseTests(unittest.TestCase):

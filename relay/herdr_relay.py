@@ -137,6 +137,7 @@ known_panes = set()
 agent_cache = {}
 _remote_locks = {}
 _remote_locks_guard = threading.Lock()
+_session_list_cache = {}  # source -> (monotonic_timestamp, sessions_list)
 
 
 SAFE_RESPONSES = {
@@ -260,7 +261,19 @@ def _save_push_subs():
 
 
 def _load_active_sessions():
-    """Restore session selection. Mirrors _load_push_subs: never raises."""
+    """Restore session selection. Mirrors _load_push_subs: never raises.
+
+    Values are restricted to str or None: a hand-edited or corrupted entry
+    like {"local": 5} would otherwise land in ACTIVE_SESSIONS[None] as-is,
+    then _herdr_env(5) sets env["HERDR_SESSION"] = 5 and
+    subprocess.run(env=...) raises TypeError -- which run_herdr swallows,
+    so the relay silently reports zero agents forever, surviving every
+    restart. This is also the one place a persisted value reaches
+    _invoke_herdr's remote branch (which interpolates it straight into the
+    ssh argv) without ever passing through apply_session_switch's
+    get_sessions() allowlist, so gating the type on load is the load-time
+    half of keeping that argv interpolation sane.
+    """
     if not os.path.isfile(ACTIVE_SESSIONS_FILE):
         return
     try:
@@ -271,6 +284,8 @@ def _load_active_sessions():
     except Exception:
         return
     for key, value in stored.items():
+        if value is not None and not isinstance(value, str):
+            continue
         ACTIVE_SESSIONS[None if key == "local" else key] = value
 
 
@@ -395,7 +410,20 @@ def get_all_agents():
 
 
 def get_sessions(remote=None):
-    """List herdr sessions for one source as [{"name", "running"}]."""
+    """List herdr sessions for one source as [{"name", "running"}].
+
+    Cached per source for SESSION_LIST_CACHE_TTL: sessions_message() calls
+    this once per source on every client connect, each a blocking
+    subprocess (ssh with up to a 15s timeout for remotes) on the event
+    loop, and herdr_telegram.py opens a fresh WebSocket per button press
+    with no X-Herdr-Remote-Command header -- so every press previously
+    paid N+1 of these. apply_session_switch()'s validation also goes
+    through this cache, which keeps it checking against the same list the
+    user was actually shown rather than a fresher one they never saw.
+    """
+    cached = _session_list_cache.get(remote)
+    if cached is not None and time.monotonic() - cached[0] < SESSION_LIST_CACHE_TTL:
+        return cached[1]
     raw = run_herdr("session", "list", remote=remote)
     sessions = []
     for line in raw.splitlines():
@@ -403,6 +431,7 @@ def get_sessions(remote=None):
         if len(parts) < 2 or parts[0] == "name":
             continue
         sessions.append({"name": parts[0], "running": parts[1] == "running"})
+    _session_list_cache[remote] = (time.monotonic(), sessions)
     return sessions
 
 
@@ -438,6 +467,10 @@ def reset_pane_state():
     Also drains event_queue: a pre-switch agent_event dequeued after this call
     must not be able to re-seed state under a stale pane_id. Must only ever
     be called from the event-loop thread; POLL_GENERATION += 1 is not atomic.
+
+    Also clears _session_list_cache: a real switch must always be validated
+    and displayed against a freshly read session list, never a pre-switch
+    one still inside its TTL.
     """
     global POLL_GENERATION
     known_panes.clear()
@@ -445,6 +478,7 @@ def reset_pane_state():
     pane_remote_map.clear()
     last_statuses.clear()
     last_blocked_prompts.clear()
+    _session_list_cache.clear()
     while True:
         try:
             event_queue.get_nowait()
@@ -463,27 +497,34 @@ def _source_key(host):
 
 
 def apply_session_switch(host, session, ip="", device=""):
-    """Point one source at a session. Returns (ok, error_message)."""
+    """Point one source at a session. Returns (ok, error_message, changed).
+
+    `changed` is False on the no-op path (already-active selection) and on
+    any rejection, True only when ACTIVE_SESSIONS was actually mutated.
+    Callers must skip the broadcast + re-poll when it's False -- that's the
+    expensive part the no-op short-circuit below exists to avoid, and it is
+    defeated if the caller runs it anyway.
+    """
     try:
         source = _source_key(host)
     except KeyError:
-        return False, f"unknown host: {host}"
+        return False, f"unknown host: {host}", False
 
     # Re-selecting the already-active session is a no-op: skip the blocking
     # `herdr session list` call and, crucially, the pane-state reset below.
     # `source in ACTIVE_SESSIONS` (not `.get()`) matters here -- a key that
     # has never been set is not the same thing as an explicit None value.
     if source in ACTIVE_SESSIONS and ACTIVE_SESSIONS[source] == session:
-        return True, ""
+        return True, "", False
 
     if session is not None:
         if not isinstance(session, str):
             # session lands in a set-membership check next; a list/dict is
             # unhashable there and would raise instead of being rejected.
-            return False, f"unknown session: {session}"
+            return False, f"unknown session: {session}", False
         names = {s["name"] for s in get_sessions(remote=source)}
         if session not in names:
-            return False, f"unknown session: {session}"
+            return False, f"unknown session: {session}", False
 
     ACTIVE_SESSIONS[source] = session
     try:
@@ -496,10 +537,11 @@ def apply_session_switch(host, session, ip="", device=""):
     reset_pane_state()
     audit("session_switch", ip, device, "", f"host={host} session={session}")
     log.info("session switch: host=%s session=%s", host, session)
-    return True, ""
+    return True, "", True
 
 
 SESSION_REFRESH_EVERY = 15   # poll cycles; 30s at POLL_INTERVAL=2
+SESSION_LIST_CACHE_TTL = SESSION_REFRESH_EVERY * POLL_INTERVAL   # 30s
 
 
 def sessions_message():
@@ -517,6 +559,18 @@ def sessions_message():
 async def broadcast_sessions():
     gen = POLL_GENERATION
     msg = sessions_message()
+    # This guard cannot fire today: sessions_message -> get_sessions ->
+    # run_herdr -> subprocess.run is entirely synchronous, so nothing can
+    # bump POLL_GENERATION between the two lines above. It stays correct
+    # and becomes load-bearing the moment that chain gains an await (e.g.
+    # a future to_thread fix for the blocking subprocess call).
+    #
+    # It does NOT cover the real staleness window: broadcast() below awaits
+    # ws.send() once per client, so a switch landing mid fan-out can still
+    # let a client late in that loop see a pre-switch `active` value. That
+    # window is shared by every message type, self-heals within one
+    # refresh cycle (~30s), and closing it means touching broadcast()
+    # itself.
     if gen != POLL_GENERATION:
         return          # a switch landed while building this; the message is stale
     await broadcast(msg)
@@ -916,6 +970,12 @@ async def event_push():
                 host,
                 content or agent_data.get("prompt", "Agent is blocked"),
             )
+            # Unreachable with a mismatch today: whichever branch got here
+            # did so with no await since the last gen check (the "agents"
+            # broadcast above already `continue`s on staleness before this
+            # point, and read_pane/blocked_message are synchronous), so gen
+            # cannot have changed. Kept as a guard for a future refactor
+            # that inserts an await between this check and the writes below.
             if gen != POLL_GENERATION:
                 continue        # a switch landed; this event is stale
             last_blocked_prompts[pane_id] = (
@@ -1177,14 +1237,18 @@ async def handle_client(ws):
                 await ws.send(json.dumps(response))
             elif msg_type == "session_switch":
                 request_id = msg.get("request_id")
-                ok, err = apply_session_switch(msg.get("host"), msg.get("session"), ip, device)
+                ok, err, changed = apply_session_switch(msg.get("host"), msg.get("session"), ip, device)
                 if not ok:
                     response = {"type": "error", "message": err}
                     if request_id:
                         response["request_id"] = request_id
                     await ws.send(json.dumps(response))
                 else:
-                    await broadcast_sessions()
+                    # A no-op switch (already-active selection) still acks,
+                    # but must skip the broadcast and re-poll -- that's the
+                    # expensive part `changed` exists to let us avoid.
+                    if changed:
+                        await broadcast_sessions()
                     if request_id:
                         await ws.send(json.dumps({
                             "type": "command_result",
@@ -1192,7 +1256,11 @@ async def handle_client(ws):
                             "request_id": request_id,
                             "ok": True,
                         }))
-                    await _poll_once()
+                    if changed:
+                        try:
+                            await _poll_once()
+                        except Exception:
+                            log.exception("post-switch poll failed")
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
             elif msg_type == "read_pane":
