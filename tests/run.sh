@@ -75,6 +75,10 @@ WEB="$DIR/web/index.html"
 grep -q "WebSocket" "$WEB" && grep -q "theme" "$WEB" && grep -q "sendKey" "$WEB"
 assert_eq "$?" "0" "has WebSocket, themes, keyboard"
 
+grep -q 'id="sessionSelector"' "$DIR/web/index.html" && \
+grep -q "session_switch" "$DIR/web/index.html"
+assert_eq "$?" "0" "web app has session selector"
+
 echo "10. web app no hardcoded secrets"
 ! grep -q "c4a2385e" "$WEB" && ! grep -q "graffold" "$WEB"
 assert_eq "$?" "0" "no secrets in web app"

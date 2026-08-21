@@ -176,6 +176,13 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   <span class="dot" id="statusDot"></span>
   <h1>herdr</h1>
   <span id="connLabel" style="font-size:0.65rem;font-weight:500"></span>
+  <button id="sessionSelector" onclick="toggleSessionMenu()" aria-haspopup="listbox"
+          aria-expanded="false" aria-label="Switch herdr session"
+          style="display:none;font-size:0.7rem;font-weight:500;padding:2px 6px"></button>
+  <div id="sessionMenu" role="listbox" aria-label="herdr sessions"
+       style="display:none;position:absolute;top:34px;left:8px;z-index:50;
+              background:var(--bg);border:1px solid var(--border);border-radius:6px;
+              padding:4px;min-width:160px"></div>
   <span id="agentCount" style="font-size:0.7rem;color:var(--muted);margin-left:auto"></span>
   <button onclick="toggleTimeline()" aria-label="Timeline"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
   <button onclick="toggleSettings()" aria-label="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button>
@@ -573,7 +580,13 @@ function ansiFragment(input) {
 }
 
 function handleMessage(msg) {
+  if (msg.type === 'sessions') {
+    sessionState = msg;
+    renderSessionSelector();
+    return;
+  }
   if (msg.type === 'agents') {
+    switchingSession = false;
     // Track timeline on status changes
     for (const a of msg.agents) {
       const prev = prevStatuses[a.pane_id];
@@ -722,9 +735,23 @@ function renderAgentList(list) {
   if (working.length) html += section('Working', 'var(--green)', working);
   if (done.length) html += section('Done', 'var(--muted)', done);
   if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  if (!list.length) html = '<div class="empty">Waiting for agents…</div>';
+  if (!list.length) html = emptyStateHtml();
   document.getElementById('agents').innerHTML = html;
   bindLongPressHandlers();
+}
+
+function emptyStateHtml() {
+  if (switchingSession) return '<div class="empty">switching…</div>';
+  const local = sessionState?.sources?.find(s => s.host === 'local');
+  if (local) {
+    const active = local.active || 'default';
+    const entry = local.sessions.find(s => s.name === active);
+    // Same wording herdr-remote-session prints, so CLI and UI agree.
+    if (entry && !entry.running) {
+      return `<div class="empty">session '${active}' is not running</div>`;
+    }
+  }
+  return '<div class="empty">Waiting for agents…</div>';
 }
 
 function bindLongPressHandlers() {
@@ -743,6 +770,60 @@ function bindLongPressHandlers() {
 }
 
 function selectWorkspace(id) { activeWorkspace = id; activeTab = null; render(); }
+
+let sessionState = null;
+
+function renderSessionSelector() {
+  const btn = document.getElementById('sessionSelector');
+  const menu = document.getElementById('sessionMenu');
+  const sources = sessionState?.sources || [];
+  const total = sources.reduce((n, s) => n + s.sessions.length, 0);
+  // Nothing to switch between: stay out of the way.
+  if (total < 2) { btn.style.display = 'none'; menu.style.display = 'none'; return; }
+  btn.style.display = '';
+
+  const local = sources.find(s => s.host === 'local') || sources[0];
+  btn.textContent = (local.active || 'default') + ' ▾';
+
+  const multiSource = sources.length > 1;
+  menu.innerHTML = sources.map(src => {
+    const header = multiSource
+      ? `<div style="font-size:0.6rem;color:var(--muted);padding:2px 6px">${src.host}</div>`
+      : '';
+    const rows = src.sessions.map(s => {
+      const active = (src.active || 'default') === s.name;
+      const dim = s.running ? '' : 'opacity:0.55;';
+      return `<div role="option" aria-selected="${active}" tabindex="0"
+                   onclick="switchSession('${src.host}','${s.name}')"
+                   style="padding:4px 6px;cursor:pointer;${dim}">
+                ${active ? '✓' : ' '} ${s.name}${s.running ? '' : ' ·'}
+              </div>`;
+    }).join('');
+    return header + rows;
+  }).join('');
+}
+
+function toggleSessionMenu() {
+  const menu = document.getElementById('sessionMenu');
+  const show = menu.style.display === 'none';
+  menu.style.display = show ? 'block' : 'none';
+  document.getElementById('sessionSelector').setAttribute('aria-expanded', String(show));
+}
+
+let switchingSession = false;
+
+function switchSession(host, session) {
+  document.getElementById('sessionMenu').style.display = 'none';
+  document.getElementById('sessionSelector').setAttribute('aria-expanded', 'false');
+  // A switch clears relay state and re-polls; a bare empty list would read as
+  // breakage. Routed through the existing render path, not by poking the DOM —
+  // there is no #agentList element.
+  switchingSession = true;
+  agents = [];
+  render();
+  ws.send(JSON.stringify({ type: 'session_switch', host, session }));
+}
+
 function backToWorkspaces() { activeWorkspace = null; activeTab = null; render(); }
 function selectTab(id) { activeTab = id; render(); }
 
