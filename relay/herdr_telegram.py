@@ -52,6 +52,7 @@ daily_stats: dict[str, dict] = {}  # pane_id -> {agent, project, blocked_count, 
 AGENT_PAGE_SIZE = 20
 PENDING_LIMIT = 500
 COMMAND_ACK_TIMEOUT = 20
+PANE_READ_TIMEOUT = 20
 STATUS_ORDER = {"blocked": 0, "working": 1, "done": 2, "idle": 3, "unknown": 3}
 STATUS_LABELS = {"blocked": "BLOCKED", "working": "WORKING", "done": "DONE", "idle": "IDLE", "unknown": "IDLE"}
 ACTION_CODES = {
@@ -130,17 +131,21 @@ async def read_pane(pane_id: str, lines: int = 15) -> str:
     try:
         async with websockets.connect(RELAY_WS) as ws:
             await ws.send(json.dumps({"type": "read_pane", "pane_id": pane_id, "lines": lines}))
-            raw = await asyncio.wait_for(ws.recv(), timeout=5)
-            msg = json.loads(raw)
-            # Might get an agents broadcast first, skip to pane_content
-            for _ in range(5):
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + PANE_READ_TIMEOUT
+            # The connect preamble (sessions/agents/one-blocked-per-blocked-
+            # agent) can put any number of unrelated messages ahead of
+            # pane_content. Skip by deadline, not by a fixed message count.
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return "(no response)"
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                msg = json.loads(raw)
                 if msg.get("type") == "pane_content":
                     return msg.get("content", "(empty)")
-                raw = await asyncio.wait_for(ws.recv(), timeout=3)
-                msg = json.loads(raw)
     except Exception as e:
         return f"(error reading pane: {scrub(e)})"
-    return "(no response)"
 
 
 async def send_text_to_relay(pane_id: str, text: str):

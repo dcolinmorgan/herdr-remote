@@ -515,7 +515,11 @@ def sessions_message():
 
 
 async def broadcast_sessions():
-    await broadcast(sessions_message())
+    gen = POLL_GENERATION
+    msg = sessions_message()
+    if gen != POLL_GENERATION:
+        return          # a switch landed while building this; the message is stale
+    await broadcast(msg)
 
 
 def read_pane(pane_id, remote=None):
@@ -1180,6 +1184,7 @@ async def handle_client(ws):
                         response["request_id"] = request_id
                     await ws.send(json.dumps(response))
                 else:
+                    await broadcast_sessions()
                     if request_id:
                         await ws.send(json.dumps({
                             "type": "command_result",
@@ -1187,7 +1192,6 @@ async def handle_client(ws):
                             "request_id": request_id,
                             "ok": True,
                         }))
-                    await broadcast_sessions()
                     await _poll_once()
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)

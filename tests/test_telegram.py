@@ -466,6 +466,21 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "disallowed"):
                 await tg.send_keys_to_relay("w0:p1", ["1"])
 
+    async def test_read_pane_skips_arbitrarily_many_unrelated_messages(self):
+        # The connect preamble (sessions, agents, one `blocked` per blocked
+        # agent) can put any number of messages ahead of pane_content. A
+        # fixed-count skip budget breaks once there are enough blocked
+        # agents; the skip must be bounded by time, not by a message count.
+        preamble = [{"type": "sessions", "sources": []}, {"type": "agents", "agents": []}]
+        preamble += [{"type": "blocked", "pane_id": f"w{i}:p1"} for i in range(8)]
+        preamble.append({"type": "pane_content", "content": "hello from pane"})
+        connection = FakeRelayConnection(preamble)
+
+        with patch("websockets.connect", return_value=connection):
+            content = await tg.read_pane("w0:p1")
+
+        self.assertEqual(content, "hello from pane")
+
     def test_relay_allows_numeric_approval_keys_and_acknowledges_them(self):
         relay_path = ROOT / "relay" / "herdr_relay.py"
         source = relay_path.read_text(encoding="utf-8")

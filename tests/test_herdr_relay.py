@@ -650,11 +650,114 @@ class RelaySessionSwitchTests(unittest.TestCase):
             relay.REMOTES[:] = ["user@host"]
             relay.ACTIVE_SESSIONS.clear()
 
-            with mock.patch.object(relay, "get_sessions", return_value=[]):
+            with mock.patch.object(relay, "get_sessions", return_value=[]) as get_sessions:
                 message = relay.sessions_message()
 
             self.assertEqual([s["host"] for s in message["sources"]],
                              ["local", "user@host"])
+            # Pins per-source correctness: a call to get_sessions() with no
+            # `remote` (always listing LOCAL) would produce the same host
+            # list above but silently report local sessions under every
+            # remote's host.
+            get_sessions.assert_has_calls(
+                [mock.call(remote=None), mock.call(remote="user@host")]
+            )
+
+    def test_broadcast_sessions_skips_send_when_generation_changes_mid_build(self):
+        # get_sessions() is called synchronously while building the message;
+        # if a switch lands (bumping POLL_GENERATION) during that build, the
+        # message reflects a mix of pre/post-switch state and must not go out.
+        with loaded_relay() as relay:
+            def stale_get_sessions(remote=None):
+                relay.reset_pane_state()  # simulates a switch landing mid-build
+                return []
+
+            with mock.patch.object(relay, "get_sessions", side_effect=stale_get_sessions), \
+                 mock.patch.object(relay, "broadcast", new=mock.AsyncMock()) as broadcast_mock:
+                asyncio.run(relay.broadcast_sessions())
+
+            broadcast_mock.assert_not_awaited()
+
+    def test_session_switch_applies_with_caller_identity_then_broadcasts_acks_and_repolls(self):
+        with loaded_relay() as relay:
+            request_id = "switch-1"
+            ws = _FakeWebSocket(
+                [json.dumps({
+                    "type": "session_switch",
+                    "host": "user@host",
+                    "session": "personal",
+                    "request_id": request_id,
+                })],
+                headers={"X-Herdr-Remote-Command": "1"},
+            )
+            order = []
+
+            def fake_apply(host, session, ip, device):
+                order.append(("apply", host, session, ip, device))
+                return True, ""
+
+            async def fake_broadcast_sessions():
+                order.append(("broadcast_sessions",))
+
+            async def fake_poll_once():
+                order.append(("poll_once",))
+
+            async def record_send(message):
+                order.append(("send", message))
+
+            ws.send = record_send
+
+            with mock.patch.object(relay, "apply_session_switch", side_effect=fake_apply) as apply_mock, \
+                 mock.patch.object(relay, "broadcast_sessions", side_effect=fake_broadcast_sessions), \
+                 mock.patch.object(relay, "_poll_once", side_effect=fake_poll_once):
+                asyncio.run(relay.handle_client(ws))
+
+            apply_mock.assert_called_once_with("user@host", "personal", "127.0.0.1", "script")
+            self.assertEqual(
+                [step[0] for step in order],
+                ["apply", "broadcast_sessions", "send", "poll_once"],
+            )
+            self.assertEqual(
+                json.loads(order[2][1]),
+                {
+                    "type": "command_result",
+                    "command": "session_switch",
+                    "request_id": request_id,
+                    "ok": True,
+                },
+            )
+
+    def test_session_switch_rejected_sends_error_with_request_id_and_skips_broadcast(self):
+        with loaded_relay() as relay:
+            request_id = "switch-2"
+            ws = _FakeWebSocket(
+                [json.dumps({
+                    "type": "session_switch",
+                    "host": "bogus",
+                    "session": "default",
+                    "request_id": request_id,
+                })],
+                headers={"X-Herdr-Remote-Command": "1"},
+            )
+
+            with mock.patch.object(
+                        relay, "apply_session_switch",
+                        return_value=(False, "unknown host: bogus")) as apply_mock, \
+                 mock.patch.object(relay, "broadcast_sessions", new=mock.AsyncMock()) as broadcast_mock, \
+                 mock.patch.object(relay, "_poll_once", new=mock.AsyncMock()) as poll_mock:
+                asyncio.run(relay.handle_client(ws))
+
+            apply_mock.assert_called_once_with("bogus", "default", "127.0.0.1", "script")
+            self.assertEqual(
+                json.loads(ws.sent[-1]),
+                {
+                    "type": "error",
+                    "message": "unknown host: bogus",
+                    "request_id": request_id,
+                },
+            )
+            broadcast_mock.assert_not_awaited()
+            poll_mock.assert_not_awaited()
 
 
 class RelayResponseTests(unittest.TestCase):
