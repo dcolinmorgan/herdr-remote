@@ -310,6 +310,61 @@ class RelaySessionSwitchTests(unittest.TestCase):
                             relay._load_active_sessions()
                             self.assertEqual(relay.ACTIVE_SESSIONS, {})
 
+    def test_reset_pane_state_clears_only_pane_keyed_state(self):
+        with loaded_relay() as relay:
+            relay.known_panes.add("w1:p1")
+            relay.agent_cache["w1:p1"] = {"pane_id": "w1:p1"}
+            relay.pane_remote_map["w1:p1"] = None
+            relay.last_statuses["w1:p1"] = "working"
+            relay.last_blocked_prompts["w1:p1"] = ("pid", (), "prompt?")
+            relay.clients.add("sentinel-client")
+            relay.push_subscriptions.append({"endpoint": "x"})
+            before = relay.POLL_GENERATION
+
+            relay.reset_pane_state()
+
+            self.assertEqual(relay.known_panes, set())
+            self.assertEqual(relay.agent_cache, {})
+            self.assertEqual(relay.pane_remote_map, {})
+            self.assertEqual(relay.last_statuses, {})
+            self.assertEqual(relay.last_blocked_prompts, {})
+            # Not pane-keyed; must survive a switch.
+            self.assertIn("sentinel-client", relay.clients)
+            self.assertEqual(len(relay.push_subscriptions), 1)
+            self.assertEqual(relay.POLL_GENERATION, before + 1)
+
+    def test_switch_does_not_leak_blocked_prompt_across_sessions(self):
+        # w1:p1 exists in every session. update_pane_maps only prunes panes
+        # absent from the new list, so without an explicit reset the old
+        # fingerprint survives and suppresses a real notification.
+        with loaded_relay() as relay:
+            fingerprint = ("prompt-1", (), "Deploy to prod?")
+            relay.known_panes.add("w1:p1")
+            relay.last_blocked_prompts["w1:p1"] = fingerprint
+
+            relay.update_pane_maps([{"pane_id": "w1:p1", "remote": None}])
+            self.assertEqual(relay.last_blocked_prompts.get("w1:p1"), fingerprint)
+
+            relay.reset_pane_state()
+            self.assertIsNone(relay.last_blocked_prompts.get("w1:p1"))
+
+    def test_stale_poll_bails_without_mutating_state(self):
+        with loaded_relay() as relay:
+            agents = [{"pane_id": "w1:p1", "agent": "claude", "status": "idle",
+                       "cwd": "/tmp/x", "project": "x", "host": "local",
+                       "remote": None, "label": "", "workspace_label": "",
+                       "workspace_id": "w1", "tab_id": "w1:t1"}]
+
+            async def switch_mid_broadcast(_message):
+                relay.reset_pane_state()          # simulates a switch landing
+
+            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+                 mock.patch.object(relay, "broadcast", side_effect=switch_mid_broadcast):
+                asyncio.run(relay._poll_once())
+
+            # The poll must not repopulate state cleared by the switch.
+            self.assertEqual(relay.last_statuses, {})
+
 
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):

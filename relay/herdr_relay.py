@@ -424,6 +424,26 @@ def update_pane_maps(agents):
             agent_cache.pop(pane_id, None)
 
 
+POLL_GENERATION = 0
+
+
+def reset_pane_state():
+    """Drop all pane-keyed state and invalidate in-flight polls.
+
+    pane_id is session-local: w1:p1 exists in every session. update_pane_maps
+    prunes only panes absent from the new list, so a pane_id present in both
+    sessions would carry its state across a switch — suppressing a real blocked
+    notification, or letting a command route to the wrong session's agent.
+    """
+    global POLL_GENERATION
+    known_panes.clear()
+    agent_cache.clear()
+    pane_remote_map.clear()
+    last_statuses.clear()
+    last_blocked_prompts.clear()
+    POLL_GENERATION += 1
+
+
 def read_pane(pane_id, remote=None):
     raw = run_herdr("pane", "read", pane_id, "--lines", "100", "--source", "recent", remote=remote)
     lines = [l for l in raw.splitlines() if l.strip() and not CHROME_RE.search(l)]
@@ -717,10 +737,13 @@ async def poll_loop():
 
 
 async def _poll_once():
+        gen = POLL_GENERATION
         agents = get_all_agents()
         update_pane_maps(agents)
         # Always broadcast (even empty list) so clients stay in sync
         await broadcast({"type": "agents", "agents": agents})
+        if gen != POLL_GENERATION:
+            return          # a switch landed; this snapshot is stale
         for a in agents:
             pid, status = a["pane_id"], a["status"]
             if status == "blocked":
@@ -747,9 +770,13 @@ async def _poll_once():
                         body=content[:120],
                         url=f"/?pane={pid}",
                     )
+                    if gen != POLL_GENERATION:
+                        return
             else:
                 if last_statuses.get(pid) == "blocked":
                     await send_web_push("", "", clear=True)
+                    if gen != POLL_GENERATION:
+                        return
                 last_blocked_prompts.pop(pid, None)
             last_statuses[pid] = status
 async def event_push():
