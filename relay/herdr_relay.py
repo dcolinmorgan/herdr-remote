@@ -434,6 +434,10 @@ def reset_pane_state():
     prunes only panes absent from the new list, so a pane_id present in both
     sessions would carry its state across a switch — suppressing a real blocked
     notification, or letting a command route to the wrong session's agent.
+
+    Also drains event_queue: a pre-switch agent_event dequeued after this call
+    must not be able to re-seed state under a stale pane_id. Must only ever
+    be called from the event-loop thread; POLL_GENERATION += 1 is not atomic.
     """
     global POLL_GENERATION
     known_panes.clear()
@@ -441,6 +445,11 @@ def reset_pane_state():
     pane_remote_map.clear()
     last_statuses.clear()
     last_blocked_prompts.clear()
+    while True:
+        try:
+            event_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
     POLL_GENERATION += 1
 
 
@@ -782,6 +791,7 @@ async def _poll_once():
 async def event_push():
     while True:
         event = await event_queue.get()
+        gen = POLL_GENERATION
         pane_id = event.get("pane_id", "")
         update = None
         if pane_id and event.get("type") == "agent_event":
@@ -813,6 +823,8 @@ async def event_push():
                 })
             update_pane_maps(agents)
             await broadcast({"type": "agents", "agents": agents})
+            if gen != POLL_GENERATION:
+                continue        # a switch landed; this event is stale
             agent_cache[pane_id] = {**agent_cache.get(pane_id, {}), **agent_data}
             if status != "blocked":
                 await broadcast(update)
@@ -830,6 +842,8 @@ async def event_push():
                 host,
                 content or agent_data.get("prompt", "Agent is blocked"),
             )
+            if gen != POLL_GENERATION:
+                continue        # a switch landed; this event is stale
             last_blocked_prompts[pane_id] = (
                 message["prompt_id"],
                 tuple(message["selected_options"]),

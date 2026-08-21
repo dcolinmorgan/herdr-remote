@@ -365,6 +365,95 @@ class RelaySessionSwitchTests(unittest.TestCase):
             # The poll must not repopulate state cleared by the switch.
             self.assertEqual(relay.last_statuses, {})
 
+    def test_stale_poll_bails_after_blocked_broadcast_without_leaking_second_pane(self):
+        # Two blocked panes: the first pane's broadcast is where the switch
+        # lands. Without the post-broadcast/post-push generation check, the
+        # loop would carry on to the second pane and re-seed its fingerprint.
+        with loaded_relay() as relay:
+            agents = [
+                {"pane_id": "w1:p1", "agent": "claude", "status": "blocked",
+                 "cwd": "/tmp/x", "project": "x", "host": "local", "remote": None},
+                {"pane_id": "w1:p2", "agent": "claude", "status": "blocked",
+                 "cwd": "/tmp/y", "project": "y", "host": "local", "remote": None},
+            ]
+            calls = {"blocked_broadcasts": 0}
+
+            async def switch_on_first_blocked_broadcast(message):
+                if message.get("type") == "agents":
+                    return
+                calls["blocked_broadcasts"] += 1
+                if calls["blocked_broadcasts"] == 1:
+                    relay.reset_pane_state()          # simulates a switch landing
+
+            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+                 mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
+                 mock.patch.object(relay, "broadcast", side_effect=switch_on_first_blocked_broadcast), \
+                 mock.patch.object(relay, "send_web_push", new=mock.AsyncMock()):
+                asyncio.run(relay._poll_once())
+
+            # The switch must stop the poll before it re-seeds a second pane.
+            self.assertEqual(relay.last_blocked_prompts, {})
+
+    def test_stale_poll_bails_after_clear_push_without_restoring_status(self):
+        # last_statuses[pid] == "blocked" pre-set so the poll takes the
+        # clear-push branch; the switch lands during send_web_push. Without
+        # the post-push generation check, the trailing `last_statuses[pid] =
+        # status` line would restore an entry the reset just cleared.
+        with loaded_relay() as relay:
+            relay.last_statuses["w1:p1"] = "blocked"
+            agents = [{"pane_id": "w1:p1", "agent": "claude", "status": "idle",
+                       "cwd": "/tmp/x", "project": "x", "host": "local", "remote": None}]
+
+            async def switch_mid_clear_push(*args, **kwargs):
+                relay.reset_pane_state()          # simulates a switch landing
+
+            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+                 mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "send_web_push", side_effect=switch_mid_clear_push):
+                asyncio.run(relay._poll_once())
+
+            # The switch must stop the poll from restoring last_statuses.
+            self.assertEqual(relay.last_statuses, {})
+
+    def test_stale_event_does_not_reseed_blocked_prompt_after_switch(self):
+        # A queued agent_event that is already in hand (past reset's queue
+        # drain) but whose processing straddles a reset_pane_state() must not
+        # re-seed last_blocked_prompts with a stale fingerprint.
+        with loaded_relay() as relay:
+            event = {
+                "type": "agent_event",
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "blocked",
+                "cwd": "/tmp/x",
+                "project": "x",
+                "host": "local",
+            }
+
+            async def run_one_event():
+                switched = asyncio.Event()
+
+                async def switch_mid_broadcast(message):
+                    if message.get("type") == "agents":
+                        relay.reset_pane_state()          # simulates a switch landing
+                        switched.set()
+
+                with mock.patch.object(relay, "get_all_agents", return_value=[]), \
+                     mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
+                     mock.patch.object(relay, "broadcast", side_effect=switch_mid_broadcast):
+                    task = asyncio.create_task(relay.event_push())
+                    try:
+                        await relay.event_queue.put(event)
+                        await asyncio.wait_for(switched.wait(), timeout=1)
+                    finally:
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+
+            asyncio.run(run_one_event())
+
+            self.assertEqual(relay.last_blocked_prompts, {})
+
 
 class RelayResponseTests(unittest.TestCase):
     def test_respond_sends_correlated_acknowledgement(self):
