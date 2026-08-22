@@ -97,9 +97,9 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 #sessionMenu [role="option"]:hover { background: var(--border); }
 /* Fixed width so names align whether or not the row is ticked. */
 .session-mark { display: inline-block; width: 1.1em; }
-.agent .info { flex: 1; }
+.agent .info { flex: 1; min-width: 0; }
 .agent .project { font-size: 0.9rem; font-weight: 500; }
-.agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+.agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Terminal view */
 .terminal-view { display: none; flex-direction: column; position: fixed; inset: 0; top: 49px; background: var(--bg); z-index: 50; }
@@ -964,9 +964,15 @@ function agentCard(a) {
   const host = a.host&&a.host!=='local'?` <span style="color:var(--orange);font-size:0.6rem">@${a.host}</span>`:'';
   const cwd = a.cwd ? `<span style="font-family:monospace;opacity:0.7">${a.cwd.split('/').slice(-2).join('/')}</span>` : '';
   const label = a.label||a.workspace_label||a.project||a.agent;
+  // A working claude sets its terminal title to what it is doing right now ("fix P0, draft the P1
+  // plan"); it clears the title when it goes idle, so this field is present on working panes only
+  // -- live activity, not a durable session name. Worth preempting the cwd when it's there: the
+  // cwd tail is mostly the project name over again. Element content only, as escapeHtml leaves
+  // quotes alone.
+  const detail = a.title ? escapeHtml(a.title) : cwd;
   return `<div class="agent${a.status==='blocked'?' blocked':''}" role="button" tabindex="0" aria-label="${label}, ${a.status}" data-pane-id="${a.pane_id}" data-agent-name="${label}" onclick="openTerminal('${a.pane_id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${a.pane_id}')}">
     <span class="dot${pulseClass}" style="background:${color}" aria-hidden="true"></span>
-    <div class="info"><div class="project">${label}${host}</div><div class="meta">${a.agent} · ${cwd}</div></div>
+    <div class="info"><div class="project">${label}${host}</div><div class="meta">${a.agent} · ${detail}</div></div>
     <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
   </div>`;
 }
