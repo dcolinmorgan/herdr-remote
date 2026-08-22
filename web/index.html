@@ -89,7 +89,10 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 #sessionSelector { min-width: 0; min-height: 0; padding: 5px 12px; border-radius: 9999px; background: var(--border); color: var(--muted); font-size: 0.8rem; font-weight: 500; white-space: nowrap; }
 #sessionSelector:hover { color: var(--text); }
 #sessionSelector:active { transform: scale(0.95); }
-#sessionMenu { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 50; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-width: 160px; font-size: 0.8rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+/* 60 sits above .terminal-view (50), which starts below the header and so must
+   not cover a menu hanging off it. Deliberately below #cmdPalette (100) and
+   #contextMenu (200) — those are modals that should cover a dropdown. */
+#sessionMenu { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 60; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-width: 160px; font-size: 0.8rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
 #sessionMenu [role="option"] { padding: 6px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 #sessionMenu [role="option"]:hover { background: var(--border); }
 /* Fixed width so names align whether or not the row is ticked. */
