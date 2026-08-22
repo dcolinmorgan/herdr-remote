@@ -224,6 +224,17 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
 .nav-key:active { background: var(--border); transform: scale(0.97); }
 .mod-key { font-size: 12px; }
+/* The arrow cluster is laid out as the inverted T a keyboard has, so the gap above `down` is a
+   deliberate cell rather than a missing button. `up` shares its column with `down`, which is the
+   whole point -- the old pad ran Tab/left/down/up across one row and right/Shift/Ctrl across the
+   next, so the arrows neither aligned nor read in any keyboard order. PgUp/PgDn take the free
+   column beside them: same axis, same thumb. */
+.keys-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 4px;
+  grid-template-areas:
+    "esc   space space enter"
+    "pgup  .     up    tab"
+    "pgdn  left  down  right"
+    "shift shift ctrl  ctrl"; }
 .mod-key.armed { background: var(--blue); border-color: var(--blue); color: #fff; }
 .tab-btn { padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
 .tab-btn.active { background: var(--surface); color: var(--text); border-color: var(--blue); }
@@ -368,21 +379,19 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
     </div>
     <!-- Keys pad -->
     <div id="keysPad" style="width:100%">
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:4px">
-        <button class="nav-key" onclick="fireKey('Escape')">Esc</button>
-        <button class="nav-key" style="grid-column:span 2" onclick="fireKey('Space')">Space</button>
-        <button class="nav-key" onclick="fireKey('Enter')">⏎ Enter</button>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:4px">
-        <button class="nav-key" onclick="fireKey('Tab')">Tab</button>
-        <button class="nav-key" onclick="fireKey('Left')">←</button>
-        <button class="nav-key" onclick="fireKey('Down')">↓</button>
-        <button class="nav-key" onclick="fireKey('Up')">↑</button>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:4px">
-        <button class="nav-key" onclick="fireKey('Right')">→</button>
-        <button class="nav-key mod-key" id="modShift" onclick="armMod('shift')">⇧ Shift</button>
-        <button class="nav-key mod-key" id="modCtrl" onclick="armMod('ctrl')">Ctrl</button>
+      <div class="keys-grid">
+        <button class="nav-key" style="grid-area:esc" onclick="fireKey('Escape')">Esc</button>
+        <button class="nav-key" style="grid-area:space" onclick="fireKey('Space')">Space</button>
+        <button class="nav-key" style="grid-area:enter" onclick="fireKey('Enter')">⏎ Enter</button>
+        <button class="nav-key" style="grid-area:pgup" onclick="fireKey('PageUp')">PgUp</button>
+        <button class="nav-key" style="grid-area:up" onclick="fireKey('Up')">↑</button>
+        <button class="nav-key" style="grid-area:tab" onclick="fireKey('Tab')">Tab</button>
+        <button class="nav-key" style="grid-area:pgdn" onclick="fireKey('PageDown')">PgDn</button>
+        <button class="nav-key" style="grid-area:left" onclick="fireKey('Left')">←</button>
+        <button class="nav-key" style="grid-area:down" onclick="fireKey('Down')">↓</button>
+        <button class="nav-key" style="grid-area:right" onclick="fireKey('Right')">→</button>
+        <button class="nav-key mod-key" style="grid-area:shift" id="modShift" onclick="armMod('shift')">⇧ Shift</button>
+        <button class="nav-key mod-key" style="grid-area:ctrl" id="modCtrl" onclick="armMod('ctrl')">Ctrl</button>
       </div>
       <!-- Ctrl presets -->
       <div>
@@ -1976,6 +1985,10 @@ const CTRL_PRESETS = [
   {label:'Ctrl R', keys:['ctrl+r']},
   {label:'Ctrl L', keys:['ctrl+l']},
   {label:'Ctrl Z', keys:['ctrl+z'], danger:true},
+  // herdr's key validator refuses Home/End in every spelling; the relay turns these two into the
+  // CSI bytes a terminal sends (ESC[1;5H / ESC[1;5F) and delivers them as text instead.
+  {label:'Ctrl Home', keys:['ctrl+Home']},
+  {label:'Ctrl End', keys:['ctrl+End']},
 ];
 const DANGER_KEYS = new Set(['ctrl+c','ctrl+d','ctrl+z']);
 
