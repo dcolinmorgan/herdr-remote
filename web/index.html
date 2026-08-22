@@ -80,6 +80,20 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .chip:active { transform: scale(0.95); }
 .chip-add { border: 2px dashed var(--border); background: transparent; color: var(--muted); font-size: 1rem; padding: 4px 12px; }
 .chip-add:hover { border-color: var(--blue); color: var(--blue); }
+
+/* Session picker. The wrapper is the positioning context so the menu hangs
+   under the button rather than the header's left edge. */
+.session-picker { position: relative; display: inline-flex; align-items: center; }
+/* Pill styling borrowed from .chip so it reads as a control at rest; the id
+   beats .header button's 44px icon-button sizing. */
+#sessionSelector { min-width: 0; min-height: 0; padding: 5px 12px; border-radius: 9999px; background: var(--border); color: var(--muted); font-size: 0.8rem; font-weight: 500; white-space: nowrap; }
+#sessionSelector:hover { color: var(--text); }
+#sessionSelector:active { transform: scale(0.95); }
+#sessionMenu { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 50; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-width: 160px; font-size: 0.8rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+#sessionMenu [role="option"] { padding: 6px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+#sessionMenu [role="option"]:hover { background: var(--border); }
+/* Fixed width so names align whether or not the row is ticked. */
+.session-mark { display: inline-block; width: 1.1em; }
 .agent .info { flex: 1; }
 .agent .project { font-size: 0.9rem; font-weight: 500; }
 .agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
@@ -176,13 +190,11 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   <span class="dot" id="statusDot"></span>
   <h1>herdr</h1>
   <span id="connLabel" style="font-size:0.65rem;font-weight:500"></span>
-  <button id="sessionSelector" onclick="toggleSessionMenu()" aria-haspopup="listbox"
-          aria-expanded="false" aria-label="Switch herdr session"
-          style="display:none;font-size:0.7rem;font-weight:500;padding:2px 6px"></button>
-  <div id="sessionMenu" role="listbox" aria-label="herdr sessions"
-       style="display:none;position:absolute;top:100%;left:8px;z-index:50;
-              background:var(--bg);border:1px solid var(--border);border-radius:6px;
-              padding:4px;min-width:160px"></div>
+  <span class="session-picker" id="sessionPicker">
+    <button id="sessionSelector" onclick="toggleSessionMenu()" aria-haspopup="listbox"
+            aria-expanded="false" aria-label="Switch herdr session"></button>
+    <div id="sessionMenu" role="listbox" aria-label="herdr sessions"></div>
+  </span>
   <span id="agentCount" style="font-size:0.7rem;color:var(--muted);margin-left:auto"></span>
   <button onclick="toggleTimeline()" aria-label="Timeline"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
   <button onclick="toggleSettings()" aria-label="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button>
@@ -787,11 +799,13 @@ let sessionState = null;
 function renderSessionSelector() {
   const btn = document.getElementById('sessionSelector');
   const menu = document.getElementById('sessionMenu');
+  const picker = document.getElementById('sessionPicker');
   const sources = sessionState?.sources || [];
   const total = sources.reduce((n, s) => n + s.sessions.length, 0);
-  // Nothing to switch between: stay out of the way.
-  if (total < 2) { btn.style.display = 'none'; menu.style.display = 'none'; return; }
-  btn.style.display = '';
+  // Nothing to switch between: stay out of the way. Hide the wrapper, not just
+  // the button, or the header's flex gap leaves a stray space behind.
+  if (total < 2) { picker.style.display = 'none'; menu.style.display = 'none'; return; }
+  picker.style.display = '';
 
   const multiSource = sources.length > 1;
   if (multiSource) {
@@ -813,16 +827,17 @@ function renderSessionSelector() {
   const rowTargets = [];
   menu.innerHTML = sources.map(src => {
     const header = multiSource
-      ? `<div style="font-size:0.6rem;color:var(--muted);padding:2px 6px">${escapeHtml(src.host)}</div>`
+      ? `<div class="chip-label" style="padding:4px 8px">${escapeHtml(src.host)}</div>`
       : '';
     const rows = src.sessions.map(s => {
       const active = (src.active || 'default') === s.name;
       const dim = s.running ? '' : 'opacity:0.55;';
       rowTargets.push({ host: src.host, session: s.name });
-      return `<div role="option" aria-selected="${active}" tabindex="0"
-                   style="padding:4px 6px;cursor:pointer;${dim}">
-                ${active ? '✓' : ' '} ${escapeHtml(s.name)}${s.running ? '' : ' ·'}
-              </div>`;
+      // The tick lives in a fixed-width span so ticked and unticked names
+      // start at the same x. A bare space would collapse in HTML.
+      return `<div role="option" aria-selected="${active}" tabindex="0" style="${dim}"`
+           + `><span class="session-mark">${active ? '✓' : ''}</span>`
+           + `${escapeHtml(s.name)}${s.running ? '' : ' ·'}</div>`;
     }).join('');
     return header + rows;
   }).join('');
