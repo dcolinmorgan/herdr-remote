@@ -127,18 +127,75 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-history .hist-edge { color: var(--muted); font-size: 0.7rem; text-align: center; padding: 8px 4px; }
 .term-history .hist-more { display: block; width: 100%; padding: 8px; margin-bottom: 8px; background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--blue); font-size: 0.75rem; cursor: pointer; }
 .term-history .hist-more:disabled { color: var(--muted); cursor: default; }
-.term-history .msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
+/* A conversation, not a log: who said what has to read at a glance, so a person's turn is a
+   tinted bubble on its own side and the agent's is full width. Both are markdown (see
+   mdFragment), which is why nothing here sets `white-space: pre-wrap` on the whole block --
+   only fenced code and diffs keep their own whitespace. */
+.term-history .msg { padding: 8px 0; border-bottom: none; }
 .term-history .msg-role { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; display: flex; gap: 6px; align-items: baseline; }
 .term-history .msg-time { font-weight: 400; text-transform: none; color: var(--muted); font-size: 0.65rem; font-variant-numeric: tabular-nums; }
 .term-history .msg-user { color: var(--blue); }
 .term-history .msg-assistant { color: var(--green); }
-.term-history .msg-text { white-space: pre-wrap; word-break: break-word; }
-.term-history .msg.note .msg-text { color: var(--muted); font-size: 0.75rem; }
-/* A tool call is one dim monospace line: on the biggest session measured here 674 of 794 turns
-   were tool calls, so they only earn a line each. */
-.term-history .msg.tool { padding: 3px 0; border-bottom: none; }
-.term-history .msg.tool .msg-text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.7rem; color: var(--muted); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.term-history .msg-text { word-break: break-word; }
+.term-history .msg.user { max-width: 88%; margin-left: auto; }
+.term-history .msg.user .msg-role { justify-content: flex-end; }
+.term-history .msg.user .msg-text { background: color-mix(in srgb, var(--blue) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--border)); border-radius: 12px 12px 3px 12px; padding: 8px 11px; }
+.term-history .msg.assistant + .msg.assistant .msg-role { display: none; }
+.term-history .msg.note { max-width: 92%; margin: 0 auto; }
+.term-history .msg.note .msg-text { color: var(--muted); font-size: 0.75rem; border-left: 2px solid var(--border); padding-left: 8px; }
 .term-history .msg-clip { color: var(--orange); font-size: 0.65rem; }
+
+/* Markdown. Measured shares of the assistant text blocks on this machine: inline code 43.8%,
+   bold 32.6%, bullets 11.2%, headings 10.3%, tables 8.7%, ordered lists 5.7%, fences 5.2%. */
+.term-history .msg-text > :first-child { margin-top: 0; }
+.term-history .msg-text > :last-child { margin-bottom: 0; }
+.term-history .msg-text p { margin: 0 0 8px; line-height: 1.5; white-space: pre-wrap; }
+.term-history .msg-text .md-h { font-weight: 600; margin: 12px 0 6px; line-height: 1.3; }
+.term-history .msg-text .md-h1, .term-history .msg-text .md-h2 { font-size: 0.95rem; }
+.term-history .msg-text .md-h3 { font-size: 0.88rem; }
+.term-history .msg-text .md-h4, .term-history .msg-text .md-h5, .term-history .msg-text .md-h6 { font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.term-history .msg-text code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82em; background: color-mix(in srgb, var(--text) 8%, transparent); border-radius: 4px; padding: 1px 4px; }
+.term-history .msg-text pre { margin: 0 0 8px; padding: 9px 11px; background: color-mix(in srgb, var(--text) 6%, var(--bg)); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
+.term-history .msg-text pre code { background: none; padding: 0; font-size: 0.75rem; line-height: 1.45; white-space: pre; }
+.term-history .msg-text ul, .term-history .msg-text ol { margin: 0 0 8px; padding-left: 20px; line-height: 1.5; }
+.term-history .msg-text li { margin: 2px 0; }
+.term-history .msg-text blockquote { margin: 0 0 8px; padding: 2px 0 2px 10px; border-left: 3px solid color-mix(in srgb, var(--blue) 40%, var(--border)); color: var(--muted); white-space: pre-wrap; }
+.term-history .msg-text hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.term-history .msg-text a { color: var(--blue); }
+.term-history .msg-text .md-table { overflow-x: auto; margin: 0 0 8px; }
+.term-history .msg-text table { border-collapse: collapse; font-size: 0.78rem; }
+.term-history .msg-text th, .term-history .msg-text td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.term-history .msg-text th { background: color-mix(in srgb, var(--text) 6%, transparent); font-weight: 600; white-space: nowrap; }
+
+/* A tool call still earns one line -- on the biggest session measured here 674 of 794 turns were
+   tool calls -- but a file edit now opens into its diff. */
+.term-history .msg.tool { padding: 2px 0; }
+.term-history .msg.tool .tool-head { display: flex; align-items: baseline; gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.7rem; color: var(--muted); }
+.term-history details.msg.tool > .tool-head { cursor: pointer; list-style: none; }
+.term-history details.msg.tool > .tool-head::-webkit-details-marker { display: none; }
+.term-history details.msg.tool > .tool-head::before { content: '\25b8'; flex-shrink: 0; transition: transform 0.15s; }
+.term-history details.msg.tool[open] > .tool-head::before { transform: rotate(90deg); }
+.term-history .msg.tool .tool-name { color: var(--text); font-weight: 600; flex-shrink: 0; }
+.term-history .msg.tool.failed .tool-name { color: var(--red); }
+/* min-width: 0 or the target refuses to shrink and pushes the +/- count off the panel. */
+.term-history .msg.tool .tool-target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-history .msg.tool .tool-error { color: var(--red); flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-history .msg.tool .tool-stat { flex-shrink: 0; display: flex; gap: 4px; font-variant-numeric: tabular-nums; }
+.term-history .msg.tool .stat-add { color: var(--green); }
+.term-history .msg.tool .stat-del { color: var(--red); }
+
+/* The diff. Whitespace is load-bearing here, and the +/- marker lives in its own gutter so the
+   code keeps its real indentation. */
+.term-history .diff { margin: 4px 0 8px 14px; border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.7rem; line-height: 1.45; }
+.term-history .diff-line { white-space: pre; padding-right: 8px; }
+.term-history .diff-line::before { content: attr(data-mark); display: inline-block; width: 1.4em; text-align: center; color: var(--muted); user-select: none; }
+.term-history .diff-line.add { background: color-mix(in srgb, var(--green) 14%, transparent); }
+.term-history .diff-line.add::before { color: var(--green); }
+.term-history .diff-line.del { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.term-history .diff-line.del::before { color: var(--red); }
+.term-history .diff-line.gap { color: var(--muted); text-align: center; background: color-mix(in srgb, var(--text) 4%, transparent); }
+.term-history .diff-line.gap::before { content: none; }
+.term-history .diff-edge { font-size: 0.65rem; color: var(--orange); margin: -4px 0 8px 14px; }
 .term-search { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .term-search input { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
 .term-search input:focus { outline: none; border-color: var(--blue); }
@@ -663,6 +720,230 @@ function ansiFragment(input) {
   }
   append(input.slice(cursor));
   return fragment;
+}
+
+// ---------------------------------------------------------------- markdown, hand-rolled
+//
+// Agent prose IS markdown, and `## Heading` / `**bold**` read worse raw on a phone than they do
+// formatted. WHAT to support is measured rather than guessed: across the 2,572 assistant text
+// blocks (838KB) in the 25 largest transcripts on this machine, inline code appears in 43.8% of
+// them, bold in 32.6%, bullets 11.2%, headings 10.3%, GFM tables 8.7% -- more often than fenced
+// code at 5.2% -- ordered lists 5.7%, rules 2.5%, italics 2.4%, quotes 1.4%, links 1.3%.
+// Strikethrough appears in 0.1% and is not supported.
+//
+// NODES, NEVER HTML STRINGS. Every character of transcript text lands in a `textContent`, which is
+// the same boundary ansiFragment holds: nothing a transcript contains can become markup, and that
+// is provable by construction rather than by remembering to escape. It is also why this is
+// hand-rolled -- the page is one file with no build step, behind a CSP that blocks every CDN.
+//
+// TWO DELIBERATE OMISSIONS, because this content is code:
+//  - `_underscore_` emphasis, which would mangle snake_case_identifiers. Claude writes emphasis
+//    with asterisks anyway.
+//  - `*emphasis*` requires a non-space character just inside both delimiters, so `rename *.ts to
+//    *.tsx` is not swallowed into one italic run.
+// BLOCKS ARE FLAT: a table or a list inside a quote or a list item reads as the outer block's
+// text. Agents put both at the top level, which is where the collapse would have hurt.
+
+// A link is the one place this view could hand a URL to the browser, so only these become one.
+const MD_HREF_OK = /^(https?:|mailto:)/i;
+// Code first, so ``**`x`**`` finds the bold and recurses into the code rather than the reverse.
+const MD_INLINE = /(`+)([\s\S]*?)\1|\*\*(\S[\s\S]*?\S|\S)\*\*|\*(\S[\s\S]*?\S|\S)\*|\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+const MD_MAX_DEPTH = 6;
+
+function mdInline(parent, text, depth = 0) {
+  if (depth >= MD_MAX_DEPTH) { parent.appendChild(document.createTextNode(text)); return; }
+  let cursor = 0;
+  for (const m of String(text).matchAll(MD_INLINE)) {
+    if (m.index > cursor) parent.appendChild(document.createTextNode(text.slice(cursor, m.index)));
+    cursor = m.index + m[0].length;
+    if (m[2] !== undefined) {
+      // Verbatim by definition: never re-parsed, and the surrounding spaces GFM allows are trimmed.
+      const code = document.createElement('code');
+      code.textContent = m[2].replace(/^ (.*) $/s, '$1');
+      parent.appendChild(code);
+    } else if (m[3] !== undefined) {
+      const strong = document.createElement('strong');
+      mdInline(strong, m[3], depth + 1);
+      parent.appendChild(strong);
+    } else if (m[4] !== undefined) {
+      const em = document.createElement('em');
+      mdInline(em, m[4], depth + 1);
+      parent.appendChild(em);
+    } else {
+      const label = m[5], href = m[6];
+      if (MD_HREF_OK.test(href)) {
+        const a = document.createElement('a');
+        a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        mdInline(a, label, depth + 1);
+        parent.appendChild(a);
+      } else {
+        // Not a link -- and not silently dropped either: the reader still sees what was written.
+        parent.appendChild(document.createTextNode(m[0]));
+      }
+    }
+  }
+  if (cursor < text.length) parent.appendChild(document.createTextNode(text.slice(cursor)));
+}
+
+const MD_FENCE = /^\s*(```+|~~~+)\s*([\w.+#-]*)\s*$/;
+const MD_HEADING = /^(#{1,6})\s+(.*)$/;
+const MD_RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+const MD_BULLET = /^\s*[-*+]\s+(.*)$/;
+const MD_ORDERED = /^\s*\d+[.)]\s+(.*)$/;
+const MD_QUOTE = /^\s*>\s?(.*)$/;
+const MD_TABLE_RULE = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/;
+
+function mdCells(line) {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  return trimmed.split('|').map(cell => cell.trim());
+}
+
+function mdAlign(line) {
+  return mdCells(line).map(spec => {
+    const left = spec.startsWith(':'), right = spec.endsWith(':');
+    return right && left ? 'center' : right ? 'right' : left ? 'left' : '';
+  });
+}
+
+function mdFragment(text) {
+  const out = document.createDocumentFragment();
+  const lines = String(text ?? '').split('\n');
+  let i = 0;
+  const para = [];
+  const flush = () => {
+    if (!para.length) return;
+    const p = document.createElement('p');
+    mdInline(p, para.join('\n'));
+    out.appendChild(p);
+    para.length = 0;
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(MD_FENCE);
+    if (fence) {
+      flush();
+      const closer = fence[1][0];  // ``` is not closed by ~~~
+      const body = [];
+      i += 1;
+      while (i < lines.length) {
+        const end = lines[i].match(MD_FENCE);
+        if (end && end[1].startsWith(closer)) break;
+        body.push(lines[i]); i += 1;
+      }
+      i += 1;  // past the closing fence, or past the end of an unclosed block
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      if (fence[2]) code.dataset.lang = fence[2];
+      code.textContent = body.join('\n');
+      pre.appendChild(code);
+      out.appendChild(pre);
+      continue;
+    }
+    if (!line.trim()) { flush(); i += 1; continue; }
+    const heading = line.match(MD_HEADING);
+    if (heading) {
+      flush();
+      // Levels are relative to the panel, not the document: an agent's `#` is a section of one
+      // message, so h1 would outrank the panel's own title.
+      const h = document.createElement('div');
+      h.className = `md-h md-h${heading[1].length}`;
+      mdInline(h, heading[2]);
+      out.appendChild(h);
+      i += 1; continue;
+    }
+    if (MD_RULE.test(line)) { flush(); out.appendChild(document.createElement('hr')); i += 1; continue; }
+    // A table is its header row plus a delimiter row; without the delimiter it is just prose.
+    if (line.includes('|') && i + 1 < lines.length && MD_TABLE_RULE.test(lines[i + 1])) {
+      flush();
+      const align = mdAlign(lines[i + 1]);
+      const table = document.createElement('table');
+      const head = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      mdCells(line).forEach((cell, index) => {
+        const th = document.createElement('th');
+        if (align[index]) th.style.textAlign = align[index];
+        mdInline(th, cell);
+        headRow.appendChild(th);
+      });
+      head.appendChild(headRow); table.appendChild(head);
+      const body = document.createElement('tbody');
+      i += 2;
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+        const tr = document.createElement('tr');
+        mdCells(lines[i]).forEach((cell, index) => {
+          const td = document.createElement('td');
+          if (align[index]) td.style.textAlign = align[index];
+          mdInline(td, cell);
+          tr.appendChild(td);
+        });
+        body.appendChild(tr); i += 1;
+      }
+      table.appendChild(body);
+      const wrap = document.createElement('div');
+      wrap.className = 'md-table';
+      wrap.appendChild(table);
+      out.appendChild(wrap);
+      continue;
+    }
+    const bullet = line.match(MD_BULLET), ordered = !bullet && line.match(MD_ORDERED);
+    if (bullet || ordered) {
+      flush();
+      const list = document.createElement(bullet ? 'ul' : 'ol');
+      const rowRe = bullet ? MD_BULLET : MD_ORDERED;
+      while (i < lines.length) {
+        const item = lines[i].match(rowRe);
+        if (!item) break;
+        const li = document.createElement('li');
+        mdInline(li, item[1]);
+        list.appendChild(li); i += 1;
+      }
+      out.appendChild(list);
+      continue;
+    }
+    const quote = line.match(MD_QUOTE);
+    if (quote) {
+      flush();
+      const block = document.createElement('blockquote');
+      const body = [];
+      while (i < lines.length) {
+        const row = lines[i].match(MD_QUOTE);
+        if (!row) break;
+        body.push(row[1]); i += 1;
+      }
+      mdInline(block, body.join('\n'));
+      out.appendChild(block);
+      continue;
+    }
+    para.push(line); i += 1;
+  }
+  flush();
+  return out;
+}
+
+// ---------------------------------------------------------------- diffs
+//
+// The relay ships a file edit as `-`/`+`/context lines with no `@@` header, because Edit's two
+// sides are fragments of a file and any line number would be relative to the fragment (see
+// transcript.py). A jump between hunks arrives as a bare `...` row.
+function diffFragment(diff) {
+  const block = document.createElement('div');
+  block.className = 'diff';
+  for (const line of String(diff ?? '').split('\n')) {
+    const row = document.createElement('div');
+    if (line === '...') { row.className = 'diff-line gap'; row.textContent = '⋯'; }
+    else {
+      const mark = line[0];
+      row.className = 'diff-line ' + (mark === '+' ? 'add' : mark === '-' ? 'del' : 'ctx');
+      // The leading marker is carried by the row's colour and its own gutter cell, so the text
+      // keeps its real indentation instead of being shifted one column by a `+`.
+      row.textContent = (mark === '+' || mark === '-' || mark === ' ') ? line.slice(1) : line;
+      // The gutter is a fixed-width cell fed by `content: attr(data-mark)`, so a context
+      // line leaves it empty rather than carrying a space character in the source.
+      row.dataset.mark = mark === '+' ? '+' : mark === '-' ? '-' : '';
+    }
+    block.appendChild(row);
+  }
+  return block;
 }
 
 function handleMessage(msg) {
@@ -1305,18 +1586,103 @@ const HISTORY_UNAVAILABLE = {
 
 const HISTORY_ROLE_CLASS = { user: 'msg-user', assistant: 'msg-assistant' };
 
-function historyTurnHtml(turn) {
-  const role = turn.role || 'note';
-  const time = (turn.ts || '').slice(11, 16);
-  if (role === 'tool') {
-    return `<div class="msg tool"><div class="msg-text">${escapeHtml(turn.text || '')}</div></div>`;
+// A tool call the relay could turn into a diff opens on tap. Kept by turn uuid rather than in the
+// DOM, because typing in the filter re-renders the whole list on every keystroke and an open diff
+// snapping shut under you is worse than the state it saves.
+const historyOpen = new Set();
+
+function historyToolNode(turn) {
+  const row = document.createElement(turn.diff ? 'details' : 'div');
+  row.className = 'msg tool' + (turn.error ? ' failed' : '');
+  const head = document.createElement(turn.diff ? 'summary' : 'div');
+  head.className = 'tool-head';
+  const name = document.createElement('span');
+  name.className = 'tool-name';
+  name.textContent = turn.tool || 'tool';
+  head.appendChild(name);
+  const target = document.createElement('span');
+  target.className = 'tool-target';
+  const full = turn.target || turn.text || '';
+  // Verbatim -- this is a path or a shell command, and markdown would eat the asterisks in a
+  // glob. Paths are shortened here rather than by `direction: rtl`, which does keep the
+  // interesting end visible but reorders the punctuation at both ends of a path or a quoted
+  // command. The whole value stays in the tooltip.
+  target.textContent = shortenPath(full);
+  if (target.textContent !== full) target.title = full;
+  head.appendChild(target);
+  if (turn.error && turn.result) {
+    const why = document.createElement('span');
+    why.className = 'tool-error';
+    why.textContent = turn.result;
+    head.appendChild(why);
   }
-  return `<div class="msg ${role}">
-      <div class="msg-role ${HISTORY_ROLE_CLASS[role] || ''}">${escapeHtml(role)}` +
-      (time ? `<span class="msg-time">${escapeHtml(time)}</span>` : '') + `</div>
-      <div class="msg-text">${escapeHtml(turn.text || '')}` +
-      (turn.truncated ? '<span class="msg-clip"> …clipped</span>' : '') + `</div>
-    </div>`;
+  if (turn.diff) {
+    const stat = document.createElement('span');
+    stat.className = 'tool-stat';
+    // The counts are the whole change; the body below may be only its head (see diff_clipped).
+    const added = document.createElement('span');
+    added.className = 'stat-add'; added.textContent = `+${turn.added || 0}`;
+    const removed = document.createElement('span');
+    removed.className = 'stat-del'; removed.textContent = `\u2212${turn.removed || 0}`;
+    stat.append(added, removed);
+    head.appendChild(stat);
+  }
+  row.appendChild(head);
+  if (turn.diff) {
+    row.open = historyOpen.has(turn.uuid);
+    row.addEventListener('toggle', () => {
+      if (row.open) historyOpen.add(turn.uuid); else historyOpen.delete(turn.uuid);
+    });
+    row.appendChild(diffFragment(turn.diff));
+    if (turn.diff_clipped) {
+      const edge = document.createElement('div');
+      edge.className = 'diff-edge';
+      edge.textContent = `showing the first ${turn.diff.split('\n').length} lines`;
+      row.appendChild(edge);
+    }
+  }
+  return row;
+}
+
+// The last few segments of a path, which is the part that identifies the file. Anything without
+// a separator (a shell command, a search pattern) is left alone for CSS to ellipsize.
+function shortenPath(text) {
+  if (!text.includes('/') || text.includes(' ')) return text;
+  const parts = text.split('/').filter(Boolean);
+  return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : text;
+}
+
+const HISTORY_ROLE_LABEL = { user: 'you', assistant: 'agent', note: 'note' };
+
+function historyTurnNode(turn) {
+  const role = turn.role || 'note';
+  if (role === 'tool') return historyToolNode(turn);
+  const block = document.createElement('div');
+  block.className = `msg ${role}`;
+  const head = document.createElement('div');
+  head.className = `msg-role ${HISTORY_ROLE_CLASS[role] || ''}`;
+  head.textContent = HISTORY_ROLE_LABEL[role] || role;
+  const time = (turn.ts || '').slice(11, 16);
+  if (time) {
+    const stamp = document.createElement('span');
+    stamp.className = 'msg-time';
+    stamp.textContent = time;
+    head.appendChild(stamp);
+  }
+  block.appendChild(head);
+  const body = document.createElement('div');
+  body.className = 'msg-text';
+  // Agent prose is markdown, and so is much of what a person pastes into the composer. The
+  // renderer builds nodes, so nothing in a transcript can become markup on the way through.
+  body.appendChild(mdFragment(turn.text || ''));
+  if (turn.truncated) {
+    const clip = document.createElement('span');
+    clip.className = 'msg-clip';
+    clip.textContent = ' …clipped';
+    body.appendChild(clip);
+  }
+  block.appendChild(body);
+  return block;
 }
 
 function renderHistory() {
@@ -1341,15 +1707,27 @@ function renderHistory() {
     el.innerHTML = '<div class="hist-edge">This conversation has no turns yet.</div>';
     return;
   }
-  let head = '';
-  if (history_.loading) head = '<div class="hist-edge">Loading older…</div>';
-  else if (history_.hasMore) head = `<button class="hist-more" onclick="loadOlderHistory()">Load older turns</button>`;
-  else if (history_.fileTruncated) head = '<div class="hist-edge">Older turns were not fetched from this host.</div>';
-  else head = '<div class="hist-edge">Start of the conversation.</div>';
-  const body = shown.length
-    ? shown.map(historyTurnHtml).join('')
-    : '<div class="hist-edge">No loaded turn matches that.</div>';
-  el.innerHTML = head + body;
+  const out = document.createDocumentFragment();
+  if (history_.loading) out.appendChild(histEdge('Loading older…'));
+  else if (history_.hasMore) {
+    const more = document.createElement('button');
+    more.className = 'hist-more';
+    more.textContent = 'Load older turns';
+    more.addEventListener('click', loadOlderHistory);
+    out.appendChild(more);
+  }
+  else if (history_.fileTruncated) out.appendChild(histEdge('Older turns were not fetched from this host.'));
+  else out.appendChild(histEdge('Start of the conversation.'));
+  if (shown.length) shown.forEach(turn => out.appendChild(historyTurnNode(turn)));
+  else out.appendChild(histEdge('No loaded turn matches that.'));
+  el.replaceChildren(out);
+}
+
+function histEdge(text) {
+  const edge = document.createElement('div');
+  edge.className = 'hist-edge';
+  edge.textContent = text;
+  return edge;
 }
 
 function escapeHtml(text) {

@@ -108,6 +108,28 @@ Runtime session overrides (per source) are persisted to `active_sessions.json` i
 
 The web app is a single self-contained HTML file (`web/index.html`) with inline CSS and JS — no build step. It's deployed to Cloudflare Pages. It includes 11 color themes, a mobile terminal keyboard, PWA support, and agent-icon detection.
 
+The history panel renders a conversation, not a log: a person's turn is a tinted bubble, the
+agent's is full-width markdown, a tool call is one compact row, and a file edit opens into its
+diff. Two renderers do that work, and both build **DOM nodes, never HTML strings** — every
+character of transcript text lands in a `textContent`, which is the same boundary `ansiFragment`
+holds and is what makes the escaping provable rather than remembered.
+
+- `mdFragment` is a hand-rolled markdown subset (no build step, and the CSP blocks every CDN).
+  What it supports is measured, not guessed: across the 2,572 assistant text blocks (838KB) in
+  the 25 largest transcripts here, inline code appears in 43.8%, bold 32.6%, bullets 11.2%,
+  headings 10.3%, **GFM tables 8.7% — more often than fenced code at 5.2%** — ordered lists 5.7%,
+  rules 2.5%, italics 2.4%, quotes 1.4%, links 1.3%, strikethrough 0.1% (unsupported).
+  Deliberately absent: `_underscore_` emphasis, which would mangle `snake_case_identifiers`; and
+  `*emphasis*` requires non-space just inside both delimiters so `rename *.ts to *.tsx` survives.
+  Blocks are flat, links are `https?:`/`mailto:` only, and headings become `.md-h1`…`.md-h6` divs
+  rather than real `h1`s so an agent's `#` cannot outrank the panel's own title.
+- `diffFragment` colours `+`/`-`/context lines and moves the marker into its own gutter cell, so
+  the code keeps its real indentation instead of being shifted a column.
+- Renderer behaviour is tested in a real browser: `tests/test_web_history.py` loads
+  `web/index.html` over `file://` with playwright and asserts the DOM (skipped, not failed, where
+  playwright or chromium is missing; `tests/run.sh` step 9b runs it separately with playwright on
+  the path).
+
 ## WebSocket Protocol
 
 Messages are JSON with a `type` field:
