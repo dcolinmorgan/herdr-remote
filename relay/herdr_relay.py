@@ -151,6 +151,12 @@ pane_remote_map = {}
 pane_session_map = {}
 known_panes = set()
 agent_cache = {}
+# The tab/workspace hierarchy as herdr reports it, refreshed on its own slower cadence (see
+# SPACES_POLL_INTERVAL) and immediately after anything that changes it. `(host, id) -> remote`,
+# because ids are only unique within one herdr: every host numbers its own workspaces w1, w2, ...
+spaces_cache = {"workspaces": [], "tabs": []}
+workspace_remote_map = {}
+tab_remote_map = {}
 _remote_locks = {}
 _remote_locks_guard = threading.Lock()
 _session_list_cache = {}  # source -> (monotonic_timestamp, sessions_list)
@@ -668,6 +674,10 @@ def get_agents_from_host(remote=None):
             # nothing or the harness's own banner, which says less than the cwd it would
             # displace on a client, so activity_title drops those.
             "title": activity_title(p.get("terminal_title_stripped"), p.get("agent", "")),
+            # Which pane herdr itself has in front. Exactly one pane per host is focused, so a
+            # client can mark where the operator actually is, and offer to move them (see the
+            # `focus` message) instead of only ever listing.
+            "focused": bool(p.get("focused")),
             "scrollback": scroll.get("max_offset_from_bottom", 0),
             "viewport_rows": scroll.get("viewport_rows", 0),
             # Whether this pane names a transcript at all -- the client's cue for offering a
@@ -869,6 +879,152 @@ async def broadcast_sessions():
     if gen != POLL_GENERATION:
         return          # a switch landed while building this; the message is stale
     await broadcast(msg)
+
+
+# How often the tab/workspace hierarchy is re-read, in poll ticks. `pane list` already carries
+# every pane's workspace_id and tab_id, but only the ids: the labels the operator sees, the
+# numbering, and which one is focused live in `workspace list` and `tab list`. Two more CLI calls
+# per host -- 4ms each locally, one SSH round trip each remotely -- against a hierarchy that only
+# changes when someone creates, closes, renames or focuses something. So: its own slower cadence,
+# plus a forced refresh after any message that moves it (see spaces_dirty).
+SPACES_POLL_INTERVAL = 5
+spaces_dirty = True
+_spaces_ticks = 0
+
+
+def get_spaces_from_host(remote=None):
+    """The workspaces and tabs one herdr reports, flattened and tagged with their host."""
+    host_label = remote or "local"
+    workspaces = []
+    tabs = []
+
+    raw = run_herdr("workspace", "list", remote=remote)
+    try:
+        listed = json.loads(raw).get("result", {}).get("workspaces", [])
+    except (json.JSONDecodeError, AttributeError):
+        listed = []
+    for w in listed:
+        if not w.get("workspace_id"):
+            continue
+        worktree = w.get("worktree") or {}
+        workspaces.append({
+            "workspace_id": w["workspace_id"],
+            # herdr's own label -- the repo or directory name the operator named the space, not
+            # the basename of some pane's cwd, which is what a client has to guess from `agents`.
+            "label": w.get("label", ""),
+            "number": w.get("number", 0),
+            "focused": bool(w.get("focused")),
+            "tab_count": w.get("tab_count", 0),
+            # Every pane, agent or not. The relay only lists agent panes, so the difference is
+            # exactly how much of this workspace a client cannot see yet.
+            "pane_count": w.get("pane_count", 0),
+            "active_tab_id": w.get("active_tab_id", ""),
+            "repo": worktree.get("repo_name", ""),
+            "host": host_label,
+            "remote": remote,
+        })
+
+    raw = run_herdr("tab", "list", remote=remote)
+    try:
+        listed = json.loads(raw).get("result", {}).get("tabs", [])
+    except (json.JSONDecodeError, AttributeError):
+        listed = []
+    for t in listed:
+        if not t.get("tab_id"):
+            continue
+        tabs.append({
+            "tab_id": t["tab_id"],
+            "workspace_id": t.get("workspace_id", ""),
+            # Defaults to the tab number as a string, so it is only interesting once someone
+            # renames it -- but then it is the only place that name exists.
+            "label": t.get("label", ""),
+            "number": t.get("number", 0),
+            "focused": bool(t.get("focused")),
+            "pane_count": t.get("pane_count", 0),
+            "host": host_label,
+            "remote": remote,
+        })
+
+    return workspaces, tabs
+
+
+def get_all_spaces():
+    workspaces, tabs = get_spaces_from_host(remote=None)
+    for remote in REMOTES:
+        more_workspaces, more_tabs = get_spaces_from_host(remote=remote)
+        workspaces.extend(more_workspaces)
+        tabs.extend(more_tabs)
+    return {"workspaces": workspaces, "tabs": tabs}
+
+
+def update_space_maps(spaces):
+    workspace_remote_map.clear()
+    tab_remote_map.clear()
+    for w in spaces["workspaces"]:
+        workspace_remote_map[(w["host"], w["workspace_id"])] = w["remote"]
+    for t in spaces["tabs"]:
+        tab_remote_map[(t["host"], t["tab_id"])] = t["remote"]
+
+
+def refresh_spaces(force=False):
+    """Re-read the hierarchy when it is due, and return whatever the cache holds now."""
+    global spaces_dirty, _spaces_ticks
+    if force or spaces_dirty or _spaces_ticks % SPACES_POLL_INTERVAL == 0:
+        spaces = get_all_spaces()
+        # An empty result means the CLI call failed (herdr always has at least one workspace);
+        # keep the last good hierarchy rather than blanking every client's chip strip.
+        if spaces["workspaces"]:
+            spaces_cache["workspaces"] = spaces["workspaces"]
+            spaces_cache["tabs"] = spaces["tabs"]
+            update_space_maps(spaces_cache)
+        spaces_dirty = False
+    _spaces_ticks += 1
+    return spaces_cache
+
+
+def mark_spaces_dirty():
+    """Ask the next poll to re-read the hierarchy instead of waiting out the slow cadence."""
+    global spaces_dirty
+    spaces_dirty = True
+
+
+def resolve_space(kind, ident, host=""):
+    """Which host owns this workspace/tab id, as (ok, remote, error).
+
+    Ids are unique per herdr, not across hosts: two machines both call their first workspace w1.
+    A client that sees more than one host therefore has to say which one it means. Clients that
+    send no host are served while the id is unambiguous and refused when it is not -- guessing
+    would mutate a tab on the wrong machine.
+    """
+    table = workspace_remote_map if kind == "workspace" else tab_remote_map
+    if not ident:
+        return False, None, f"{kind}_id required"
+    if host:
+        if (host, ident) not in table:
+            return False, None, f"unknown {kind}_id"
+        return True, table[(host, ident)], ""
+    matches = {h: r for (h, i), r in table.items() if i == ident}
+    if not matches:
+        return False, None, f"unknown {kind}_id"
+    if len(matches) > 1:
+        return False, None, f"{kind}_id {ident} exists on {', '.join(sorted(matches))}; host required"
+    return True, next(iter(matches.values())), ""
+
+
+# A label a client wants written into herdr's own UI, or "" if it is not one.
+MAX_LABEL_LEN = 64
+
+
+def clean_label(label):
+    """Collapse a client-supplied name to something safe to hand a CLI as a positional argument.
+
+    A leading dash would be parsed as a flag, and a newline or control character would be written
+    straight into herdr's tab strip, so neither survives.
+    """
+    label = re.sub(r"[\x00-\x1f\x7f]", " ", str(label or "")).strip()
+    if not label or label.startswith("-") or len(label) > MAX_LABEL_LEN:
+        return ""
+    return label
 
 
 # Source for every read the relay makes on its own initiative (poll loop, respond, send_keys).
@@ -1163,7 +1319,10 @@ async def send_current_snapshot(ws):
     await ws.send(json.dumps(await asyncio.to_thread(sessions_message)))
     agents = await asyncio.to_thread(get_all_agents)
     update_pane_maps(agents)
-    await ws.send(json.dumps({"type": "agents", "agents": agents}))
+    # Force the hierarchy read: a client that just connected has no chip strip at all, and
+    # waiting out the slow cadence would show it agents filed under ids for a few seconds.
+    spaces = await asyncio.to_thread(refresh_spaces, True)
+    await ws.send(json.dumps({"type": "agents", "agents": agents, "spaces": spaces}))
     for agent in agents:
         if agent["status"] != "blocked":
             continue
@@ -1195,7 +1354,8 @@ async def _poll_once():
         agents = await asyncio.to_thread(get_all_agents)
         update_pane_maps(agents)
         # Always broadcast (even empty list) so clients stay in sync
-        await broadcast({"type": "agents", "agents": agents})
+        spaces = await asyncio.to_thread(refresh_spaces)
+        await broadcast({"type": "agents", "agents": agents, "spaces": spaces})
         if gen != POLL_GENERATION:
             return          # a switch landed; this snapshot is stale
         for a in agents:
@@ -1771,17 +1931,110 @@ async def handle_client(ws):
                 audit("agent_prompt", ip, device, pane_id, f"text={text[:100]!r}")
                 await asyncio.to_thread(run_herdr, "agent", "prompt", pane_id, text, remote=remote)
                 await ws.send(json.dumps({"type": "command_result", "command": "agent_prompt", "ok": True}))
+            elif msg_type == "focus":
+                # Move herdr's own focus. Which id the client sent says what to focus, so there is
+                # no separate kind field: `agent focus` takes a pane, and herdr walks up to the
+                # tab and workspace holding it. (A non-agent pane has no such command -- `pane
+                # focus` only steps to a neighbour by direction -- so focusing a shell pane will
+                # mean tab focus plus a walk when those panes are listed at all.)
+                target_kind, ident = "", ""
+                for kind, field in (("pane", "pane_id"), ("tab", "tab_id"), ("workspace", "workspace_id")):
+                    if msg.get(field):
+                        target_kind, ident = kind, msg[field]
+                        break
+                if not target_kind:
+                    await ws.send(json.dumps({"type": "error", "message": "pane_id, tab_id or workspace_id required"}))
+                    continue
+                if target_kind == "pane":
+                    if ident not in known_panes:
+                        await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                        continue
+                    remote = pane_remote_map.get(ident)
+                    args = ("agent", "focus", ident)
+                else:
+                    ok, remote, error = resolve_space(target_kind, ident, msg.get("host", ""))
+                    if not ok:
+                        await ws.send(json.dumps({"type": "error", "message": error}))
+                        continue
+                    args = (target_kind, "focus", ident)
+                log.info("Focus from %s (%s): %s=%s", ip, device, target_kind, ident)
+                audit("focus", ip, device, ident if target_kind == "pane" else "", f"{target_kind}={ident}")
+                moved = await asyncio.to_thread(
+                    _mutate_herdr, *args, remote=remote
+                )
+                # Focus is the one mutation whose whole effect is in the hierarchy, so the next
+                # broadcast has to carry it rather than wait out the slow cadence.
+                mark_spaces_dirty()
+                await ws.send(json.dumps({"type": "command_result", "command": "focus", "ok": moved}))
             elif msg_type == "create_tab":
                 workspace_id = msg.get("workspace_id", "")
-                if workspace_id:
-                    log.info("Create tab from %s (%s): workspace=%s", ip, device, workspace_id)
-                    audit("create_tab", ip, device, "", f"workspace={workspace_id}")
-                    await asyncio.to_thread(
-                        run_herdr, "tab", "create", "--workspace", workspace_id, "--focus"
-                    )
-                    await ws.send(json.dumps({"type": "tab_created", "ok": True}))
-                else:
-                    await ws.send(json.dumps({"type": "error", "message": "workspace_id required"}))
+                ok, remote, error = resolve_space("workspace", workspace_id, msg.get("host", ""))
+                if not ok:
+                    await ws.send(json.dumps({"type": "error", "message": error}))
+                    continue
+                label = clean_label(msg.get("label", ""))
+                log.info("Create tab from %s (%s): workspace=%s", ip, device, workspace_id)
+                audit("create_tab", ip, device, "", f"workspace={workspace_id}")
+                args = ["tab", "create", "--workspace", workspace_id, "--focus"]
+                if label:
+                    args += ["--label", label]
+                created = await asyncio.to_thread(
+                    _mutate_herdr, *args, remote=remote
+                )
+                mark_spaces_dirty()
+                await ws.send(json.dumps({"type": "tab_created", "ok": created}))
+            elif msg_type == "rename_tab":
+                tab_id = msg.get("tab_id", "")
+                ok, remote, error = resolve_space("tab", tab_id, msg.get("host", ""))
+                if not ok:
+                    await ws.send(json.dumps({"type": "error", "message": error}))
+                    continue
+                label = clean_label(msg.get("label", ""))
+                if not label:
+                    await ws.send(json.dumps({"type": "error", "message": f"label empty, leading dash, or over {MAX_LABEL_LEN} chars"}))
+                    continue
+                log.info("Rename tab from %s (%s): tab=%s label=%r", ip, device, tab_id, label)
+                audit("rename_tab", ip, device, "", f"tab={tab_id} label={label!r}")
+                renamed = await asyncio.to_thread(
+                    _mutate_herdr, "tab", "rename", tab_id, label, remote=remote
+                )
+                mark_spaces_dirty()
+                await ws.send(json.dumps({"type": "command_result", "command": "rename_tab", "ok": renamed}))
+            elif msg_type == "close_tab":
+                # Destructive, and the relay is the wrong place to second-guess it: closing a tab
+                # takes its panes with it. Clients confirm; this logs who asked.
+                tab_id = msg.get("tab_id", "")
+                ok, remote, error = resolve_space("tab", tab_id, msg.get("host", ""))
+                if not ok:
+                    await ws.send(json.dumps({"type": "error", "message": error}))
+                    continue
+                log.info("Close tab from %s (%s): tab=%s", ip, device, tab_id)
+                audit("close_tab", ip, device, "", f"tab={tab_id}")
+                closed = await asyncio.to_thread(
+                    _mutate_herdr, "tab", "close", tab_id, remote=remote
+                )
+                mark_spaces_dirty()
+                await ws.send(json.dumps({"type": "command_result", "command": "close_tab", "ok": closed}))
+            elif msg_type == "rename_agent":
+                # herdr's own label for the pane, which is what `agents` reports as `label` and
+                # what every client shows as the card title. Nothing is typed into the agent.
+                pane_id = msg.get("pane_id", "")
+                if pane_id not in known_panes:
+                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    continue
+                label = clean_label(msg.get("label", ""))
+                clear = bool(msg.get("clear"))
+                if not label and not clear:
+                    await ws.send(json.dumps({"type": "error", "message": f"label empty, leading dash, or over {MAX_LABEL_LEN} chars"}))
+                    continue
+                remote = pane_remote_map.get(pane_id)
+                log.info("Rename agent from %s (%s): pane=%s label=%r", ip, device, pane_id, label)
+                audit("rename_agent", ip, device, pane_id, f"label={label!r}" if label else "clear")
+                args = ("agent", "rename", pane_id, "--clear") if clear else ("agent", "rename", pane_id, label)
+                renamed = await asyncio.to_thread(
+                    _mutate_herdr, *args, remote=remote
+                )
+                await ws.send(json.dumps({"type": "command_result", "command": "rename_agent", "ok": renamed}))
             elif msg_type == "push_subscribe":
                 sub = msg.get("subscription")
                 if sub and sub not in push_subscriptions:

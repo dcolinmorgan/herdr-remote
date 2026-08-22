@@ -2175,6 +2175,244 @@ class RelayPaneFieldTests(unittest.TestCase):
         self.assertTrue(command[-1].startswith("sh -c "))
 
 
+class RelayTerminalTitleTests(unittest.TestCase):
+    """The title is live activity or it is the harness saying its own name -- never a session."""
+
+    def test_a_working_agents_activity_survives_and_the_banner_does_not(self):
+        with loaded_relay() as relay:
+            # What a working claude puts there.
+            self.assertEqual(relay.activity_title("fix P0, draft the P1 plan", "claude"),
+                             "fix P0, draft the P1 plan")
+            # What an idle or done one leaves behind. Measured on this host: of nine agent panes,
+            # seven reported no title and the two that did reported exactly this.
+            self.assertEqual(relay.activity_title("Claude Code", "claude"), "")
+            self.assertEqual(relay.activity_title("\u2733 Claude Code", "claude"), "")
+            # Prefix matching, so a new harness needs no entry in a list.
+            self.assertEqual(relay.activity_title("Codex", "codex"), "")
+            self.assertEqual(relay.activity_title("OpenCode", "opencode"), "")
+            self.assertEqual(relay.activity_title(None, "claude"), "")
+            # A title that merely mentions the harness is still a title.
+            self.assertEqual(relay.activity_title("porting the claude reader", "claude"),
+                             "porting the claude reader")
+
+
+class RelaySpacesTests(unittest.TestCase):
+    """`pane list` gives ids; the names, numbering and focus live in workspace/tab list."""
+
+    WORKSPACES = {"result": {"type": "workspace_list", "workspaces": [
+        {"workspace_id": "w1", "label": "herdr-remote", "number": 1, "focused": True,
+         "tab_count": 1, "pane_count": 3, "active_tab_id": "w1:t1", "agent_status": "idle",
+         "worktree": {"repo_name": "herdr-remote", "is_linked_worktree": False}},
+        {"workspace_id": "w2", "label": "kv-tool", "number": 2, "focused": False,
+         "tab_count": 2, "pane_count": 2, "active_tab_id": "w2:t2", "agent_status": "unknown"},
+    ]}}
+    TABS = {"result": {"type": "tab_list", "tabs": [
+        {"tab_id": "w1:t1", "workspace_id": "w1", "label": "1", "number": 1, "focused": True,
+         "pane_count": 3},
+        {"tab_id": "w2:t1", "workspace_id": "w2", "label": "1", "number": 1, "focused": False,
+         "pane_count": 1},
+        {"tab_id": "w2:t2", "workspace_id": "w2", "label": "feat/kv-tool-v2", "number": 2,
+         "focused": False, "pane_count": 1},
+    ]}}
+
+    @classmethod
+    def herdr_stub(cls, *args, remote=None, **kwargs):
+        if args[:2] == ("workspace", "list"):
+            return json.dumps(cls.WORKSPACES)
+        if args[:2] == ("tab", "list"):
+            return json.dumps(cls.TABS)
+        return ""
+
+    def test_labels_numbering_focus_and_the_full_pane_count_come_through(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                spaces = relay.get_all_spaces()
+
+        workspaces = spaces["workspaces"]
+        self.assertEqual([w["workspace_id"] for w in workspaces], ["w1", "w2"])
+        # The name the operator gave the space -- not the basename of some pane's cwd, which is
+        # all a client can guess from `agents`.
+        self.assertEqual(workspaces[0]["label"], "herdr-remote")
+        self.assertEqual(workspaces[0]["number"], 1)
+        self.assertTrue(workspaces[0]["focused"])
+        self.assertEqual(workspaces[0]["repo"], "herdr-remote")
+        # Every pane, not just the agent ones the relay lists: the difference is how much of the
+        # workspace a client still cannot see.
+        self.assertEqual(workspaces[0]["pane_count"], 3)
+        self.assertEqual(workspaces[1]["repo"], "")
+        self.assertEqual([w["host"] for w in workspaces], ["local", "local"])
+        # A renamed tab is the only place that name exists.
+        self.assertEqual([t["label"] for t in spaces["tabs"]], ["1", "1", "feat/kv-tool-v2"])
+        self.assertTrue(spaces["tabs"][0]["focused"])
+
+    def test_a_failed_hierarchy_read_keeps_the_last_good_one(self):
+        """herdr always has a workspace, so an empty list is the CLI failing -- not a client's
+        chip strip going blank until the next tick."""
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                relay.refresh_spaces(force=True)
+            self.assertEqual(len(relay.spaces_cache["workspaces"]), 2)
+            with mock.patch.object(relay, "run_herdr", return_value=""):
+                spaces = relay.refresh_spaces(force=True)
+            self.assertEqual(len(spaces["workspaces"]), 2)
+
+    def test_the_hierarchy_is_not_re_read_on_every_pane_poll(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub) as run:
+                for _ in range(relay.SPACES_POLL_INTERVAL):
+                    relay.refresh_spaces()
+                reads = [c.args[:2] for c in run.call_args_list]
+            # One pass of two calls for the whole interval, not one pass per tick.
+            self.assertEqual(reads, [("workspace", "list"), ("tab", "list")])
+
+    def test_a_mutation_refreshes_the_hierarchy_on_the_next_tick(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                relay.refresh_spaces(force=True)
+            relay.mark_spaces_dirty()
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub) as run:
+                relay.refresh_spaces()
+                self.assertEqual([c.args[:2] for c in run.call_args_list],
+                                 [("workspace", "list"), ("tab", "list")])
+
+    def test_the_agents_snapshot_carries_the_hierarchy(self):
+        with loaded_relay() as relay:
+            ws = _FakeWebSocket([])
+            with mock.patch.object(relay, "get_all_agents", return_value=[]), \
+                 mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                asyncio.run(relay.send_current_snapshot(ws))
+            # Not sent[0]: the snapshot opens with `sessions`, so pick the message by type
+            # rather than by position, which would break again the next time one is added.
+            sent = [json.loads(m) for m in ws.sent]
+            payload = next(m for m in sent if m["type"] == "agents")
+        self.assertEqual([w["label"] for w in payload["spaces"]["workspaces"]],
+                         ["herdr-remote", "kv-tool"])
+
+    def test_an_id_that_two_hosts_both_use_is_refused_rather_than_guessed(self):
+        """Every herdr numbers its own workspaces w1, w2, ... so an id alone is not an address."""
+        with loaded_relay() as relay:
+            relay.workspace_remote_map[("local", "w1")] = None
+            relay.workspace_remote_map[("build-box", "w1")] = "build-box"
+            ok, remote, error = relay.resolve_space("workspace", "w1")
+            self.assertFalse(ok)
+            self.assertIn("build-box", error)
+            self.assertIn("host required", error)
+            # With the host named it resolves, and to that host's remote.
+            self.assertEqual(relay.resolve_space("workspace", "w1", "build-box"),
+                             (True, "build-box", ""))
+            self.assertEqual(relay.resolve_space("workspace", "w1", "local"), (True, None, ""))
+            self.assertFalse(relay.resolve_space("workspace", "w9")[0])
+
+    def _run(self, relay, message):
+        ws = _FakeWebSocket([json.dumps(message)])
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+             mock.patch.object(relay, "run_herdr_result", return_value=completed) as run:
+            asyncio.run(relay.handle_client(ws))
+        calls = [c.args for c in run.call_args_list]
+        return [json.loads(m) for m in ws.sent], calls
+
+    def _relay_with_hierarchy(self, relay):
+        with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+            relay.refresh_spaces(force=True)
+
+    def test_focus_routes_by_which_id_the_client_sent(self):
+        with loaded_relay() as relay:
+            self._relay_with_hierarchy(relay)
+            relay.known_panes.add("w1:p1")
+
+            sent, calls = self._run(relay, {"type": "focus", "pane_id": "w1:p1"})
+            # A pane is focused through `agent focus`, which walks up to its tab and workspace.
+            self.assertEqual(calls, [("agent", "focus", "w1:p1")])
+            self.assertEqual(sent[-1], {"type": "command_result", "command": "focus", "ok": True})
+
+            _, calls = self._run(relay, {"type": "focus", "tab_id": "w2:t2"})
+            self.assertEqual(calls, [("tab", "focus", "w2:t2")])
+
+            _, calls = self._run(relay, {"type": "focus", "workspace_id": "w2"})
+            self.assertEqual(calls, [("workspace", "focus", "w2")])
+
+    def test_focus_refuses_ids_it_has_never_seen(self):
+        with loaded_relay() as relay:
+            self._relay_with_hierarchy(relay)
+            for message, expected in (
+                ({"type": "focus", "pane_id": "w9:p9"}, "unknown pane_id"),
+                ({"type": "focus", "tab_id": "w9:t9"}, "unknown tab_id"),
+                ({"type": "focus", "workspace_id": "w9"}, "unknown workspace_id"),
+                ({"type": "focus"}, "pane_id, tab_id or workspace_id required"),
+            ):
+                sent, calls = self._run(relay, message)
+                self.assertEqual(sent[-1], {"type": "error", "message": expected})
+                self.assertEqual(calls, [])
+
+    def test_create_tab_checks_the_workspace_exists_and_targets_its_host(self):
+        with loaded_relay() as relay:
+            self._relay_with_hierarchy(relay)
+            relay.workspace_remote_map[("build-box", "wZ")] = "build-box"
+
+            sent, calls = self._run(relay, {"type": "create_tab", "workspace_id": "made-up"})
+            # Was passed through to the CLI unchecked, which also meant a remote workspace id
+            # created its tab on the relay's own machine.
+            self.assertEqual(sent[-1], {"type": "error", "message": "unknown workspace_id"})
+            self.assertEqual(calls, [])
+
+            ws = _FakeWebSocket([json.dumps({"type": "create_tab", "workspace_id": "wZ"})])
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "run_herdr_result", return_value=completed) as run:
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(run.call_args.kwargs["remote"], "build-box")
+            self.assertEqual(json.loads(ws.sent[-1]), {"type": "tab_created", "ok": True})
+
+    def test_rename_and_close_tab_reach_herdr_at_all(self):
+        """Both messages were sent by the web client and handled by nobody."""
+        with loaded_relay() as relay:
+            self._relay_with_hierarchy(relay)
+
+            sent, calls = self._run(
+                relay, {"type": "rename_tab", "tab_id": "w2:t2", "label": "release prep"})
+            self.assertEqual(calls, [("tab", "rename", "w2:t2", "release prep")])
+            self.assertEqual(sent[-1],
+                             {"type": "command_result", "command": "rename_tab", "ok": True})
+
+            sent, calls = self._run(relay, {"type": "close_tab", "tab_id": "w2:t2"})
+            self.assertEqual(calls, [("tab", "close", "w2:t2")])
+            self.assertEqual(sent[-1],
+                             {"type": "command_result", "command": "close_tab", "ok": True})
+
+    def test_a_label_that_would_be_read_as_a_flag_or_a_newline_is_refused(self):
+        with loaded_relay() as relay:
+            self._relay_with_hierarchy(relay)
+            for label in ("", "   ", "--clear", "-x", "x" * (relay.MAX_LABEL_LEN + 1)):
+                sent, calls = self._run(
+                    relay, {"type": "rename_tab", "tab_id": "w2:t2", "label": label})
+                self.assertEqual(sent[-1]["type"], "error")
+                self.assertEqual(calls, [])
+            # A newline would be written straight into herdr's tab strip.
+            _, calls = self._run(
+                relay, {"type": "rename_tab", "tab_id": "w2:t2", "label": "one\ntwo"})
+            self.assertEqual(calls, [("tab", "rename", "w2:t2", "one two")])
+
+    def test_renaming_an_agent_asks_herdr_instead_of_typing_at_the_agent(self):
+        """The web client used to send `/rename x` as pane text: claude has no such command, so it
+        landed in the composer as literal characters."""
+        with loaded_relay() as relay:
+            relay.known_panes.add("w1:p1")
+            sent, calls = self._run(
+                relay, {"type": "rename_agent", "pane_id": "w1:p1", "label": "reader port"})
+            self.assertEqual(calls, [("agent", "rename", "w1:p1", "reader port")])
+            self.assertEqual(sent[-1],
+                             {"type": "command_result", "command": "rename_agent", "ok": True})
+
+            _, calls = self._run(relay, {"type": "rename_agent", "pane_id": "w1:p1", "clear": True})
+            self.assertEqual(calls, [("agent", "rename", "w1:p1", "--clear")])
+
+            sent, calls = self._run(
+                relay, {"type": "rename_agent", "pane_id": "nope", "label": "x"})
+            self.assertEqual(sent[-1], {"type": "error", "message": "unknown pane_id"})
+            self.assertEqual(calls, [])
+
+
 class RelaySshMultiplexingTests(unittest.TestCase):
     def test_remote_invocations_reuse_one_connection(self):
         with loaded_relay() as relay:

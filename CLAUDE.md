@@ -111,16 +111,26 @@ The web app is a single self-contained HTML file (`web/index.html`) with inline 
 
 Messages are JSON with a `type` field:
 
-**Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection), `history` (transcript turns, or `unavailable` with a reason)
+**Server → Client:** `agents` (complete state snapshot, plus the `spaces` hierarchy), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection), `history` (transcript turns, or `unavailable` with a reason), `command_result` / `tab_created` (did the mutation land), `error`
 
-**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `create_tab`, `push_subscribe`/`push_unsubscribe`
+**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `focus`, `create_tab`, `rename_tab`, `close_tab`, `rename_agent`, `push_subscribe`/`push_unsubscribe`
 
-An `agents` entry carries, per pane: `pane_id`, `agent`, `label`, `workspace_label`, `status`,
-`cwd`, `project`, `host`, `remote`, `workspace_id`, `tab_id`, `scrollback` + `viewport_rows` (from
-herdr's `scroll`), `has_session` (this pane names an agent transcript), and `title` — herdr's
-terminal title, which is **live activity, not a session name**. A working claude sets it to what it
-is doing; `activity_title` drops the harness's own banner, which is all an idle or done pane leaves
-there. The session ref itself stays server-side in `pane_session_map`.
+An `agents` entry carries, per pane: `pane_id`, `agent`, `label`, `workspace_label`, `title`
+(herdr's terminal title — live activity, not a session name: a working claude sets it to what it is
+doing, and `activity_title` drops the harness's own banner, which is all an idle or done pane
+leaves there. The durable title comes back from `get_history`), `status`, `cwd`, `project`, `host`,
+`remote`, `workspace_id`, `tab_id`, `focused` (the one pane per host herdr itself has in front),
+`scrollback` + `viewport_rows` (from herdr's `scroll`), and `has_session` (this pane names an agent
+transcript). The session ref itself stays server-side in `pane_session_map`.
+
+The same `agents` message carries `spaces` — `{workspaces: [...], tabs: [...]}` from
+`herdr workspace list` and `herdr tab list`. `pane list` gives every pane a `workspace_id` and a
+`tab_id`, but only the ids; the operator's label, their numbering, which one is focused, and the
+**total** pane count live in those two lists alone. Each entry is tagged with `host`/`remote`.
+Refreshed every `SPACES_POLL_INTERVAL` pane polls, immediately on connect, and immediately after
+any message that moves the hierarchy — two extra CLI calls per host (4ms each locally, one SSH
+round trip each remotely) against something that only changes when someone creates, closes,
+renames or focuses. A failed read keeps the last good hierarchy rather than blanking clients.
 
 ### Relay-side constraints clients must respect
 
@@ -128,6 +138,22 @@ there. The session ref itself stays server-side in `pane_session_map`.
 - **Keys use herdr's `+` grammar, validated by `key_is_allowed`, and `keys` must be a non-empty array.** Bare specials (`Enter` `Escape` `Tab` `Space` `Backspace` `Up`…`F12`), single characters, and `ctrl+`/`shift+`/`alt+` chords all pass — special names case-insensitively, so `esc` and `shift+tab` are fine. `C-c` also passes: live-verified as the one tmux-style spelling herdr 0.8.0 still aliases to interrupt (`C-u`, `M-x`, `BTab` do not). `BSpace`, `Insert` and `Delete` are rejected by herdr in any spelling.
 - **`PageUp`, `PageDown`, `Home` and `End` are sent as bytes, not as keys.** herdr's own validator refuses every spelling of them (re-probed on 0.8.2: `PgUp`, `pageup`, `Page_Up` and `ctrl+Home` all answer `unsupported key`), so `key_escape_sequence` turns them into the CSI bytes a terminal emits and the relay ships that through `pane send-text` instead — `pane send-text` is a byte channel and passes ESC verbatim. Modified forms are computed, not enumerated: xterm's `1 + shift(1) + alt(2) + ctrl(4)`, so `ctrl+Home` is `ESC[1;5H` and `shift+PageUp` is `ESC[5;2~`. A mixed `keys` array keeps its order — consecutive keys of one kind travel in one CLI call, so `[Escape, PageUp, PageDown, Enter]` becomes send-keys / send-text / send-keys, in that order. Clients still just send the key name.
 - **`question_toggle`/`question_submit` have no relay handler.** The web app, TUI, mac and iOS clients all send them; the relay ignores both, so multi-select questions cannot be answered from any client until it grows support.
+- **Workspace and tab ids are only unique within one host.** Every herdr numbers its own spaces
+  w1, w2, … so a client that watches more than one host must send `host` alongside
+  `workspace_id`/`tab_id`. `resolve_space` serves an id with no host while it is unambiguous and
+  refuses it when two hosts share it, rather than mutating a tab on the wrong machine. The relay
+  also refuses ids it has never listed — `create_tab` used to hand whatever the client sent
+  straight to the CLI, and always to the local host.
+- **`focus` says what to focus by which id it carries.** `{pane_id}` → `herdr agent focus`, which
+  walks up to the tab and workspace holding it; `{tab_id}` → `tab focus`; `{workspace_id}` →
+  `workspace focus`. There is no CLI for focusing an arbitrary *non-agent* pane — `pane focus`
+  only steps to a neighbour by `--direction` — so a shell pane will need `tab focus` plus a walk.
+- **Labels a client writes into herdr's UI are cleaned, not trusted.** `rename_tab` and
+  `rename_agent` (and `create_tab`'s optional `label`) go through `clean_label`: control
+  characters collapse to spaces, and an empty, over-64-char, or leading-dash label is refused
+  rather than handed to a CLI that would read it as a flag. `rename_agent` calls
+  `herdr agent rename`; typing `/rename x` at the pane instead just lands literal text in the
+  agent's composer.
 - **`read_pane` picks its own source.** `source` ∈ `visible | recent | recent-unwrapped | detection`
   (default `recent`), `lines` is clamped to 1000, `format` ∈ `text | ansi`.
 - **`get_history` reads the agent's own transcript, not the terminal.** Request:
@@ -178,8 +204,14 @@ there. The session ref itself stays server-side in `pane_session_map`.
   mouse-scroll interface, which measured 6.2s for 200 lines and 12.7s for 400 (~31ms/line), only
   works while the agent is idle, isn't deterministic, and visibly scrolls the operator's terminal up
   and back. `format: ansi` and `source: visible|detection` never harvest and return instantly.
-  **Anything on a timer must therefore read `visible`** (`PROMPT_READ_SOURCE`); a scrollback read
-  has to be user-initiated.
+  **Anything on a timer must therefore read `visible`** (`PROMPT_READ_SOURCE`); a scrollback read has to be user-initiated.
+- **The hierarchy commands exist and are separate from `pane list`** (checked on herdr 0.8.2):
+  `workspace list|create|get|focus|rename|close`, `tab list|create|get|focus|rename|close`, and
+  `agent … focus|rename`. `workspace list` reports `label`, `number`, `focused`, `tab_count`,
+  `pane_count`, `active_tab_id` and, for a git workspace, a `worktree` block; `tab list` reports
+  `label` (the tab's number as a string until someone renames it), `number`, `focused` and
+  `pane_count`. Measured on this host: 10 workspaces and 26 panes, of which 9 are agent panes —
+  so `pane list` alone hides two thirds of the panes and three workspaces entirely.
 - **`herdr agent history` does not exist.** `herdr agent` has
   list/get/read/send-keys/prompt/rename/focus/wait/attach/start/explain. Conversation history comes
   from the agent's own transcript (`~/.claude/projects/<mangled-cwd>/<session-uuid>.jsonl` for
