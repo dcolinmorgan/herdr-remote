@@ -97,6 +97,9 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 #sessionMenu [role="option"]:hover { background: var(--border); }
 /* Fixed width so names align whether or not the row is ticked. */
 .session-mark { display: inline-block; width: 1.1em; }
+/* Where herdr itself is pointed. Drawn inside the chip so it reads the same on the selected one. */
+.chip.focused { box-shadow: inset 0 0 0 1.5px var(--green); }
+.agent.focused { border-color: color-mix(in srgb, var(--green) 55%, var(--border)); background: color-mix(in srgb, var(--green) 4%, var(--surface)); }
 .agent .info { flex: 1; min-width: 0; }
 .agent .project { font-size: 0.9rem; font-weight: 500; }
 .agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -380,8 +383,15 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 
 let ws = null, agents = [], activePane = null, refreshInterval = null, userScrolledUp = false;
 let timeline = [], prevStatuses = {};
+// Selections are host-qualified keys, not bare ids: every herdr numbers its own workspaces w1,
+// w2, ... so on a relay watching two hosts an id alone picks out two different spaces.
 let activeWorkspace = null;
 let activeTab = null;
+// The hierarchy as herdr reports it -- real labels, the operator's numbering, which space is
+// focused, and how many panes each holds in total. Arrives with every `agents` broadcast; a relay
+// that predates it (and the demo worker) sends none, and then the ids carried on the agents
+// themselves are all there is to group by.
+let spaces = {workspaces: [], tabs: []};
 
 // Settings — auto-detect relay when served from same origin
 const autoRelayUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
@@ -671,6 +681,7 @@ function handleMessage(msg) {
   }
   if (msg.type === 'agents') {
     switchingSession = false;
+    if (msg.spaces) spaces = msg.spaces;
     // Track timeline on status changes
     for (const a of msg.agents) {
       const prev = prevStatuses[a.pane_id];
@@ -748,19 +759,75 @@ function handleMessage(msg) {
   }
 }
 
+function spaceKey(host, id) { return `${host || 'local'}|${id}`; }
+function agentWorkspaceKey(a) { return spaceKey(a.host, a.workspace_id); }
+function agentTabKey(a) { return spaceKey(a.host, a.tab_id); }
+
+function workspaceRows() {
+  if (spaces.workspaces.length) {
+    // herdr's own list: the label the operator gave the space, the number they see on it, and the
+    // full pane count -- including the shell panes the relay does not list, which is how a space
+    // can legitimately show up here holding no agents at all.
+    return spaces.workspaces.map(w => ({
+      key: spaceKey(w.host, w.workspace_id), id: w.workspace_id, host: w.host || 'local',
+      name: w.label || w.workspace_id, number: w.number || 0,
+      focused: !!w.focused, paneCount: w.pane_count || 0,
+    })).sort((a, b) => a.number - b.number);
+  }
+  // No hierarchy from this relay: group by the ids on the agents and name each space after a
+  // pane's project, which is the best guess available.
+  const seen = new Map();
+  for (const a of agents) {
+    if (!a.workspace_id) continue;
+    const key = agentWorkspaceKey(a);
+    if (!seen.has(key)) {
+      seen.set(key, {key, id: a.workspace_id, host: a.host || 'local',
+                     name: a.project || a.workspace_id, number: 0, focused: false, paneCount: 0});
+    }
+  }
+  return [...seen.values()];
+}
+
+function tabRows(workspaceKey) {
+  if (spaces.tabs.length) {
+    return spaces.tabs
+      .filter(t => spaceKey(t.host, t.workspace_id) === workspaceKey)
+      .map(t => ({
+        key: spaceKey(t.host, t.tab_id), id: t.tab_id, host: t.host || 'local',
+        // herdr labels a fresh tab with its own number, so a label worth showing is one that
+        // differs from it -- someone renamed it, and that name exists nowhere else.
+        name: (t.label && t.label !== String(t.number)) ? t.label : `Tab ${t.number}`,
+        number: t.number || 0, focused: !!t.focused, paneCount: t.pane_count || 0,
+      }))
+      .sort((a, b) => a.number - b.number);
+  }
+  const seen = new Map();
+  agents.filter(a => agentWorkspaceKey(a) === workspaceKey).forEach((a) => {
+    if (!a.tab_id || seen.has(agentTabKey(a))) return;
+    seen.set(agentTabKey(a), {key: agentTabKey(a), id: a.tab_id, host: a.host || 'local',
+                              name: a.label || `Tab ${seen.size + 1}`, number: seen.size + 1,
+                              focused: false, paneCount: 0});
+  });
+  return [...seen.values()];
+}
+
 function render() {
   document.getElementById('agentCount').textContent = agents.length ? `${agents.length}` : '';
-  const workspaces = [...new Set(agents.map(a => a.workspace_id).filter(Boolean))];
-  if (workspaces.length <= 1) {
+  const rows = workspaceRows();
+  // The strip appears exactly as often as it did before this view knew the real hierarchy: when
+  // the agents themselves span more than one space. Spaces holding only shell panes are worth
+  // showing once it is up, but not worth raising it on their own.
+  const occupied = new Set(agents.map(a => agentWorkspaceKey(a)).filter(k => !k.endsWith('|')));
+  if (occupied.size <= 1) {
     activeWorkspace = null;
     activeTab = null;
     renderAgentList(agents);
     return;
   }
-  renderWorkspaces(workspaces);
+  renderWorkspaces(rows);
 }
 
-function renderWorkspaces(workspaces) {
+function renderWorkspaces(rows) {
   let html = '';
   // Hoist blocked agents
   const blocked = agents.filter(a => a.status === 'blocked');
@@ -771,33 +838,36 @@ function renderWorkspaces(workspaces) {
   // Space chip strip
   html += `<div class="chip-strip"><span class="chip-label">Spaces</span>`;
   html += `<button class="chip${activeWorkspace===null?' active':''}" onclick="backToWorkspaces()">All</button>`;
-  for (const wsId of workspaces) {
-    const wsAgents = agents.filter(a => a.workspace_id === wsId);
+  for (const w of rows) {
+    const wsAgents = agents.filter(a => agentWorkspaceKey(a) === w.key);
     const hasBlocked = wsAgents.some(a => a.status === 'blocked');
-    const name = wsAgents[0]?.workspace_label || wsAgents[0]?.project || wsId.slice(0, 8);
-    html += `<button class="chip${activeWorkspace===wsId?' active':''}${hasBlocked?' alert':''}" onclick="selectWorkspace('${wsId}')">${name}</button>`;
+    const hint = w.paneCount && !wsAgents.length ? ` (${w.paneCount})` : '';
+    html += `<button class="chip${activeWorkspace===w.key?' active':''}${hasBlocked?' alert':''}${w.focused?' focused':''}"
+      onclick="selectWorkspace('${escapeAttr(w.key)}')" data-ws-key="${escapeAttr(w.key)}" data-ws-name="${escapeAttr(w.name)}"
+      title="${escapeAttr(w.focused ? w.name + ' — herdr is here' : w.name)}">${escapeHtml(w.name)}${hint}</button>`;
   }
   html += `</div>`;
   // Tab chip strip (always show when workspace selected)
   if (activeWorkspace) {
-    const wsTabs = [...new Set(agents.filter(a => a.workspace_id === activeWorkspace).map(a => a.tab_id).filter(Boolean))];
+    const wsTabs = tabRows(activeWorkspace);
     html += `<div class="chip-strip"><span class="chip-label">Tabs</span>`;
     if (wsTabs.length > 1) {
       html += `<button class="chip${!activeTab?' active':''}" onclick="selectTab(null)">All</button>`;
     }
-    wsTabs.forEach((tid, i) => {
-      const tabAgents = agents.filter(a => a.tab_id === tid);
+    for (const t of wsTabs) {
+      const tabAgents = agents.filter(a => agentTabKey(a) === t.key);
       const hasBlocked = tabAgents.some(a => a.status === 'blocked');
-      const tabLabel = tabAgents[0]?.label || 'Tab '+(i+1);
-      html += `<button class="chip${activeTab===tid?' active':''}${hasBlocked?' alert':''}" id="tab-${tid}" onclick="selectTab('${tid}')" data-tab-id="${tid}" data-tab-name="${tabLabel}">${tabLabel}</button>`;
-    });
-    html += `<button class="chip chip-add" onclick="createTab('${activeWorkspace}')">+</button>`;
+      html += `<button class="chip${activeTab===t.key?' active':''}${hasBlocked?' alert':''}${t.focused?' focused':''}"
+        onclick="selectTab('${escapeAttr(t.key)}')" data-tab-key="${escapeAttr(t.key)}" data-tab-name="${escapeAttr(t.name)}"
+        title="${escapeAttr(t.focused ? t.name + ' — herdr is here' : t.name)}">${escapeHtml(t.name)}</button>`;
+    }
+    html += `<button class="chip chip-add" onclick="createTab()" title="New tab here">+</button>`;
     html += `</div>`;
   }
   // Agent list (filtered)
   let filtered = agents;
-  if (activeWorkspace) filtered = filtered.filter(a => a.workspace_id === activeWorkspace);
-  if (activeTab) filtered = filtered.filter(a => a.tab_id === activeTab);
+  if (activeWorkspace) filtered = filtered.filter(a => agentWorkspaceKey(a) === activeWorkspace);
+  if (activeTab) filtered = filtered.filter(a => agentTabKey(a) === activeTab);
   // Don't re-show blocked that are already hoisted
   const working = filtered.filter(a => a.status==='working');
   const done = filtered.filter(a => a.status==='done');
@@ -805,8 +875,19 @@ function renderWorkspaces(workspaces) {
   if (working.length) html += section('Working', 'var(--green)', working);
   if (done.length) html += section('Done', 'var(--muted)', done);
   if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  if (!agents.length) html = '<div class="empty">Waiting for agents…</div>';
+  if (!filtered.length) html += emptySpaceNotice(rows);
+  if (!agents.length && !spaces.workspaces.length) html = '<div class="empty">Waiting for agents…</div>';
   document.getElementById('agents').innerHTML = html;
+  bindLongPressHandlers();
+}
+
+function emptySpaceNotice(rows) {
+  // A space can hold panes and still hold no agent -- shell panes, an editor, a build. Saying how
+  // many are there beats an empty list that reads as "nothing here".
+  const target = (activeTab ? tabRows(activeWorkspace) : rows).find(r => r.key === (activeTab || activeWorkspace));
+  const panes = target?.paneCount || 0;
+  if (!panes) return '<div class="empty">No agents here.</div>';
+  return `<div class="empty">${panes} pane${panes === 1 ? '' : 's'} here, none running an agent.</div>`;
 }
 
 function renderAgentList(list) {
@@ -842,11 +923,12 @@ function emptyStateHtml() {
 }
 
 function bindLongPressHandlers() {
-  // Bind to tabs
-  document.querySelectorAll('[data-tab-id]').forEach(el => {
-    const id = el.dataset.tabId;
-    const name = el.dataset.tabName;
-    setupLongPress(el, 'tab', id, name);
+  // Bind to spaces and tabs
+  document.querySelectorAll('[data-ws-key]').forEach(el => {
+    setupLongPress(el, 'workspace', el.dataset.wsKey, el.dataset.wsName);
+  });
+  document.querySelectorAll('[data-tab-key]').forEach(el => {
+    setupLongPress(el, 'tab', el.dataset.tabKey, el.dataset.tabName);
   });
   // Bind to agents
   document.querySelectorAll('[data-pane-id]').forEach(el => {
@@ -856,7 +938,7 @@ function bindLongPressHandlers() {
   });
 }
 
-function selectWorkspace(id) { activeWorkspace = id; activeTab = null; render(); }
+function selectWorkspace(key) { activeWorkspace = key; activeTab = null; render(); }
 
 let sessionState = null;
 
@@ -949,13 +1031,32 @@ function switchHerdrSession(host, session) {
 }
 
 function backToWorkspaces() { activeWorkspace = null; activeTab = null; render(); }
-function selectTab(id) { activeTab = id; render(); }
+function selectTab(key) { activeTab = key; render(); }
 
-function createTab(workspaceId) {
-  if (!ws) return;
+// A key is `host|id`; the relay wants those apart, since the id alone does not say which machine.
+function splitKey(key) {
+  const cut = (key || '').indexOf('|');
+  return cut < 0 ? {host: 'local', id: key || ''} : {host: key.slice(0, cut), id: key.slice(cut + 1)};
+}
+
+function createTab() {
+  if (!ws || !activeWorkspace) return;
+  const {host, id} = splitKey(activeWorkspace);
   if (window.cue) cue('sparkle');
-  ws.send(JSON.stringify({type:'create_tab', workspace_id: workspaceId}));
+  ws.send(JSON.stringify({type:'create_tab', workspace_id: id, host}));
   setTimeout(() => { activeTab = null; }, 1500);
+}
+
+// Move herdr's own focus to whatever was long-pressed. Which id field is sent tells the relay what
+// to focus, so a pane, a tab and a space all go through the one message.
+function focusItem() {
+  if (!contextTarget || !ws) return;
+  const {type, id} = contextTarget;
+  const {host, id: bare} = type === 'agent' ? {host: '', id} : splitKey(id);
+  const field = type === 'agent' ? 'pane_id' : type === 'tab' ? 'tab_id' : 'workspace_id';
+  ws.send(JSON.stringify({type: 'focus', [field]: bare, ...(host ? {host} : {})}));
+  if (window.cue) cue('toggle');
+  hideContextMenu();
 }
 
 function agentCard(a) {
@@ -964,15 +1065,19 @@ function agentCard(a) {
   const host = a.host&&a.host!=='local'?` <span style="color:var(--orange);font-size:0.6rem">@${a.host}</span>`:'';
   const cwd = a.cwd ? `<span style="font-family:monospace;opacity:0.7">${a.cwd.split('/').slice(-2).join('/')}</span>` : '';
   const label = a.label||a.workspace_label||a.project||a.agent;
+  const labelHtml = escapeHtml(label);
   // A working claude sets its terminal title to what it is doing right now ("fix P0, draft the P1
   // plan"); it clears the title when it goes idle, so this field is present on working panes only
   // -- live activity, not a durable session name. Worth preempting the cwd when it's there: the
   // cwd tail is mostly the project name over again. Element content only, as escapeHtml leaves
   // quotes alone.
   const detail = a.title ? escapeHtml(a.title) : cwd;
-  return `<div class="agent${a.status==='blocked'?' blocked':''}" role="button" tabindex="0" aria-label="${label}, ${a.status}" data-pane-id="${a.pane_id}" data-agent-name="${label}" onclick="openTerminal('${a.pane_id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${a.pane_id}')}">
+  // `focused` marks the pane herdr itself has in front -- one per host, so this is where the
+  // operator is standing rather than a state of the agent.
+  const focused = a.focused ? ' focused' : '';
+  return `<div class="agent${a.status==='blocked'?' blocked':''}${focused}" role="button" tabindex="0" aria-label="${escapeAttr(label)}, ${a.status}${a.focused?', focused in herdr':''}" data-pane-id="${escapeAttr(a.pane_id)}" data-agent-name="${escapeAttr(label)}" onclick="openTerminal('${escapeAttr(a.pane_id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(a.pane_id)}')}">
     <span class="dot${pulseClass}" style="background:${color}" aria-hidden="true"></span>
-    <div class="info"><div class="project">${label}${host}</div><div class="meta">${a.agent} · ${detail}</div></div>
+    <div class="info"><div class="project">${labelHtml}${host}</div><div class="meta">${escapeHtml(a.agent)} · ${detail}</div></div>
     <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
   </div>`;
 }
@@ -1253,6 +1358,14 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// For attribute values, which escapeHtml is not safe for: textContent leaves quotes alone, so a
+// name carrying one closes the attribute early. Names are herdr's, and herdr's are the operator's
+// -- a tab or agent can be renamed to anything from this very UI.
+function escapeAttr(text) {
+  return String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function doSearch() {
   const query = document.getElementById('searchInput').value.toLowerCase();
   const el = document.getElementById('termContent');
@@ -1356,9 +1469,16 @@ function showContextMenu(e, type, id, name) {
   const items = document.getElementById('contextMenuItems');
   contextTarget = { type, id, name };
   
+  // Focus first on every kind: it is the one action that answers "take me to it", and it is what
+  // the relay can do for a space that holds no agent at all.
+  const focusItemHtml = `
+      <div class="ctx-item" onclick="focusItem()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+        Focus in herdr
+      </div>`;
   let html = '';
   if (type === 'tab') {
-    html = `
+    html = `${focusItemHtml}
       <div class="ctx-item" onclick="renameItem()">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
         Rename Tab
@@ -1368,8 +1488,10 @@ function showContextMenu(e, type, id, name) {
         Close Tab
       </div>
     `;
+  } else if (type === 'workspace') {
+    html = focusItemHtml;
   } else if (type === 'agent') {
-    html = `
+    html = `${focusItemHtml}
       <div class="ctx-item" onclick="renameItem()">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
         Rename Agent
@@ -1405,9 +1527,13 @@ function renameItem() {
   const newName = prompt(`Rename ${contextTarget.type}:`, contextTarget.name || '');
   if (newName && ws) {
     if (contextTarget.type === 'tab') {
-      ws.send(JSON.stringify({ type: 'rename_tab', tab_id: contextTarget.id, label: newName }));
+      const {host, id} = splitKey(contextTarget.id);
+      ws.send(JSON.stringify({ type: 'rename_tab', tab_id: id, host, label: newName }));
     } else if (contextTarget.type === 'agent') {
-      ws.send(JSON.stringify({ type: 'send_text', pane_id: contextTarget.id, text: `/rename ${newName}` }));
+      // `herdr agent rename`, which sets the label every client shows. The old path typed
+      // `/rename <name>` into the pane, and claude has no such command -- it landed in the
+      // composer as literal text for the operator to clear by hand.
+      ws.send(JSON.stringify({ type: 'rename_agent', pane_id: contextTarget.id, label: newName }));
     }
     if (window.cue) cue('success');
   }
@@ -1417,7 +1543,8 @@ function renameItem() {
 function closeItem() {
   if (!contextTarget || contextTarget.type !== 'tab') return;
   if (confirm(`Close tab "${contextTarget.name || contextTarget.id}"?`)) {
-    if (ws) ws.send(JSON.stringify({ type: 'close_tab', tab_id: contextTarget.id }));
+    const {host, id} = splitKey(contextTarget.id);
+    if (ws) ws.send(JSON.stringify({ type: 'close_tab', tab_id: id, host }));
     if (window.cue) cue('droplet');
   }
   hideContextMenu();
