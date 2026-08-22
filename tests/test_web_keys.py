@@ -112,15 +112,16 @@ class WebKeyPadTests(unittest.TestCase):
     def test_the_pad_leaves_the_terminal_most_of_the_phone(self):
         """The complaint that started this: the dock ate a third of the screen, then half.
 
-        Measured on a 390x844 phone across three revisions: four rows of 44px was 271px closed and
+        Measured on a 390x844 phone across four revisions: four rows of 44px was 271px closed and
         415px with presets open; five columns and three rows was 205 / 301; seven columns and two
-        rows, with the pad switch and the presets disclosure sharing one line, is 121 / 201. The
-        ceilings are set just above the last of those, so the pad cannot grow back into the
-        terminal without a test saying so.
+        rows, with the pad switch and the presets disclosure sharing one line, was 121 / 201; and
+        trimming every key's own height and padding brought it to 111 / 183. The ceilings are set
+        just above the last of those, so the pad cannot grow back into the terminal without a test
+        saying so.
         """
         for label, expression, ceiling in (
-            ("closed", "() => 0", 0.16),
-            ("open", "() => toggleCtrlPresets()", 0.25),
+            ("closed", "() => 0", 0.14),
+            ("open", "() => toggleCtrlPresets()", 0.225),
         ):
             with self.subTest(presets=label):
                 self.page.evaluate(expression)
@@ -169,7 +170,55 @@ class WebKeyPadTests(unittest.TestCase):
         finally:
             self.page.evaluate("() => switchKeyTab('keys')")
         self.assertEqual(rows, 1)
-        self.assertLess(height, PHONE["height"] * 0.13)
+        self.assertLess(height, PHONE["height"] * 0.10)
+
+    def test_the_input_row_stays_short(self):
+        """It was 60px for one line of text and four icons, and stayed 60px after the stylesheet
+        rule was cut -- the two tallest children carried their padding INLINE, where no rule can
+        reach it, and the row is a flex box so every child stretches to the tallest. 43px now.
+        """
+        height = self.page.evaluate(
+            "() => document.querySelector('.term-input').getBoundingClientRect().height")
+        self.assertLess(height, 47, f"the input row is back up to {height}px")
+
+    def test_no_button_in_the_input_row_sets_its_own_padding(self):
+        """The trap above, closed: an inline padding outranks every stylesheet rule, so shrinking
+        the row silently does nothing. Style them by class or the height cannot be governed."""
+        offenders = self.page.evaluate(
+            """() => [...document.querySelectorAll('.term-input > *')]
+                 .filter(el => /padding/.test(el.getAttribute('style') || ''))
+                 .map(el => el.className || el.tagName)""")
+        self.assertEqual(offenders, [])
+
+    def test_the_letter_keys_carry_the_dock_theme(self):
+        """y / a / n had no CSS at all: three 11x19px native buttons in Chrome's own grey, unthemed
+        inside a dark dock. Injected here rather than driven through a blocked pane, because what
+        regressed is the stylesheet, not the rendering path."""
+        try:
+            got = self.page.evaluate("""() => {
+              const ak = document.getElementById('actionKeys');
+              ak.replaceChildren();
+              for (const cls of ['key-green', 'key-blue', 'key-red']) {
+                const b = document.createElement('button');
+                b.className = cls; b.textContent = cls[4];
+                ak.appendChild(b);
+              }
+              const surface = getComputedStyle(document.getElementById('termKeys')).backgroundColor;
+              return [...ak.children].map(b => {
+                const r = b.getBoundingClientRect(), cs = getComputedStyle(b);
+                return {w: Math.round(r.width), h: Math.round(r.height),
+                        themed: cs.backgroundColor !== 'rgb(239, 239, 239)',
+                        distinct: cs.borderTopColor !== surface};
+              });
+            }""")
+        finally:
+            self.page.evaluate("() => document.getElementById('actionKeys').replaceChildren()")
+        self.assertEqual(len(got), 3)
+        for key in got:
+            self.assertTrue(key["themed"], "a letter key still has the browser's default fill")
+            self.assertTrue(key["distinct"], "a letter key has no visible edge")
+            self.assertGreater(key["w"], 60, f"a letter key is only {key['w']}px wide")
+            self.assertGreaterEqual(key["h"], 28)
 
     def test_the_presets_disclosure_leaves_with_the_pad_it_opens(self):
         """It shares its line with the switch now, so it no longer hides along with the pad."""

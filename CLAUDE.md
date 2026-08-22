@@ -140,15 +140,29 @@ The key pad and the panel layering are geometry, so `tests/test_web_keys.py` mea
 than reading the CSS. The arrow keys sit in a `grid-template-areas` inverted T — `up` shares its
 column with `down`, and the empty cell is above `left`, where a keyboard has nothing either — and
 the test asserts the boxes, not the rule. The pad is **seven columns and two rows**, sized against
-measurements at 390×844 across three revisions: four rows of 44px was 271px closed / 415px with
-presets open, five columns and three rows was 205 / 301, and seven columns with the pad switch and
-the presets disclosure sharing one line is **121 / 201**. Twelve keys need thirteen cells because of
-the arrows' empty corner, which makes seven the narrowest grid that fits two rows; `Enter` spans
-both rows, and no label clips down to a 320px viewport (40px a cell). The same pass took the digit
-pad from 3×3 of 52px keys (164px, taller than the keys pad above it) to **one row of nine**, and the
-quick dock from two labelled sections of 44px buttons to a 3×2 grid — colour already said which two
-were the confirm pair. Tests hold the dock under 16% / 25% of the screen, count the rows, and check
-every label for clipping, so none of it can grow back quietly.
+measurements at 390×844 across four revisions: four rows of 44px was 271px closed / 415px with
+presets open, five columns and three rows was 205 / 301, seven columns with the pad switch and the
+presets disclosure sharing one line was 121 / 201, and trimming every key's own height and padding
+brought it to **111 / 183**. Twelve keys need thirteen cells because of the arrows' empty corner,
+which makes seven the narrowest grid that fits two rows; `Enter` spans both rows, and no label clips
+down to a 320px viewport (40px a cell). The same pass took the digit pad from 3×3 of 52px keys
+(164px, taller than the keys pad above it) to **one row of nine** (73px), and the quick dock from
+two labelled sections of 44px buttons to a 3×2 grid — colour already said which two were the
+confirm pair. Tests hold the dock under 14% / 22.5% of the screen, count the rows, and check every
+label for clipping, so none of it can grow back quietly.
+
+Two things were found by measuring rather than reading, both in the same trim pass:
+
+- **The input row is a flex box, so an inline `padding` on any child governs the whole row.** It
+  stayed 60px after `.term-input button:last-child`'s padding was cut, because the `/` and Send
+  buttons carried theirs inline where no rule reaches — every child stretches to the tallest. Both
+  moved into `.term-cmd` / `.term-send`, the row is 43px, and a test refuses any inline `padding`
+  under `.term-input` so the trap cannot be re-set.
+- **`key-green` / `key-blue` / `key-red` had no CSS at all.** The single-letter form of the three
+  approval answers rendered as 11×19px native buttons in Chrome's own grey, unthemed, in the middle
+  of a dark dock — unhittable, and invisible as a group. `#actionKeys` is now a 3-column grid of
+  30px keys tinted from the same accents as the answers above them; it costs the dock 14px while a
+  pane is blocked.
 
 Every toggle in the session view says whether its panel is open through **`aria-pressed`**, and the
 CSS fills the chip off that attribute alone — `setPressed` is the only writer, so the pixels and the

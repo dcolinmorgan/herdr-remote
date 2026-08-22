@@ -219,21 +219,22 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .session-name { font-weight: 500; flex: 1; }
 .session-url { font-size: 0.7rem; color: var(--muted); font-family: monospace; }
 .term-content { flex: 1; min-width: 0; overflow: auto; padding: 10px 12px; background: var(--term-bg); font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', 'SFMono-Regular', Consolas, monospace; font-size: clamp(0.68rem, 2.7vw, 0.8rem); line-height: 1.35; white-space: pre; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-.quick-actions { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
-.quick-actions button { padding: 10px 14px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.quick-actions { padding: 6px 10px; border-top: 1px solid var(--border); display: flex; gap: 5px; flex-wrap: wrap; flex-shrink: 0; }
+.quick-actions button { padding: 8px 12px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
 .btn-yes { background: var(--green); color: #fff; } .btn-trust { background: var(--blue); color: #fff; } .btn-no { background: var(--red); color: #fff; }
-.term-input { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; gap: 6px; background: var(--surface); flex-shrink: 0; }
-.term-input input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', Consolas, monospace; min-width: 0; }
-.term-input button:last-child { padding: 10px 14px; border-radius: 6px; border: none; background: var(--blue); color: #fff; font-weight: 700; font-size: 16px; flex-shrink: 0; }
+.term-input { border-top: 1px solid var(--border); padding: 5px 10px; display: flex; gap: 5px; background: var(--surface); flex-shrink: 0; }
+.term-input input { flex: 1; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', Consolas, monospace; min-width: 0; }
+.term-cmd { padding: 6px 11px; border-radius: 6px; border: 1px solid var(--blue); background: var(--bg); color: var(--blue); font-weight: 700; font-size: 14px; flex-shrink: 0; cursor: pointer; }
+.term-send { padding: 6px 13px; border-radius: 6px; border: none; background: var(--blue); color: #fff; flex-shrink: 0; cursor: pointer; display: flex; align-items: center; }
 /* The keys and quick-action docks are toggles too, and they were the worst of the set: pixel
    identical before and after a dock slid up right behind them. Same filled-chip vocabulary as the
    header, so "lit" means the same thing everywhere in the session view. The per-button colour has
    to live here rather than inline, or it would outrank the pressed rule. */
-.dock-toggle { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; flex-shrink: 0; display: flex; align-items: center; }
+.dock-toggle { padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; flex-shrink: 0; display: flex; align-items: center; }
 .dock-toggle.dock-quick { color: var(--orange); }
 .dock-toggle.dock-keys { color: var(--muted); }
 .dock-toggle[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
-.term-keys { border-top: 1px solid var(--border); padding: 6px 12px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; }
+.term-keys { border-top: 1px solid var(--border); padding: 5px 10px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; }
 .nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
 .nav-key:active { background: var(--border); transform: scale(0.97); }
 .mod-key { font-size: 12px; }
@@ -255,7 +256,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
     "ctrl shift pgdn  left  down  right enter"; }
 /* Scoped to the pad: the quick-action dock keeps the 44px target, but 12 keys at 44px is a third
    of a phone screen and the pad is aimed at, not read. */
-.keys-grid .nav-key { min-height: 38px; padding: 7px 2px; font-size: 12px; }
+.keys-grid .nav-key { min-height: 34px; padding: 4px 2px; font-size: 12px; }
 .keys-grid .mod-key { font-size: 11px; }
 /* Both control affordances on one line. The Keys/123 switch used to be a full 44px button row of
    its own and the Presets disclosure another line under the pad -- 62px of chrome around 122px of
@@ -264,11 +265,11 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .keys-bar .tab-btn { padding: 3px 14px; font-size: 11px; }
 .keys-bar .presets-btn { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; cursor: pointer; padding: 2px 4px; }
 .keys-bar .presets-btn[aria-pressed="true"] { color: var(--blue); }
-#ctrlPresets .ctrl-key { min-height: 36px; padding: 6px 2px; }
+#ctrlPresets .ctrl-key { min-height: 32px; padding: 4px 2px; font-size: 11px; }
 .mod-key.armed { background: var(--blue); border-color: var(--blue); color: #fff; }
 /* Same reasoning as the pad, plus a two-word phrase has to wrap rather than clip at a third of
    the dock's width. */
-#quickDock .nav-key { min-height: 38px; padding: 6px 4px; font-size: 12px; line-height: 1.2; text-align: center; }
+#quickDock .nav-key { min-height: 34px; padding: 4px 4px; font-size: 12px; line-height: 1.2; text-align: center; }
 .tab-btn { padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
 .tab-btn[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: var(--blue); }
 .ctrl-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer; min-height: 44px; }
@@ -278,7 +279,17 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .digit-key { padding: 14px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 18px; font-family: monospace; font-weight: 600; cursor: pointer; min-height: 52px; display: flex; align-items: center; justify-content: center; }
 .digit-key:active { background: var(--border); }
 /* One row of nine, so the pad below the keys grid is 44px rather than 164px. */
-#digitsPad .digit-key { min-height: 44px; padding: 10px 0; font-size: 16px; }
+#digitsPad .digit-key { min-height: 34px; padding: 6px 0; font-size: 15px; }
+/* y / a / n -- the single-letter form of the three approval answers rendered above them. These
+   carried no CSS at all: three 11x19px native browser buttons with Chrome's own grey, sitting
+   unthemed in the middle of a dark dock. Measured, not guessed; found while shrinking the rest of
+   the pad. Styling them costs the dock 14px while a pane is blocked, and is the difference between
+   three targets a thumb cannot hit and three it can. */
+#actionKeys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+#actionKeys button { min-height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; font-weight: 700; cursor: pointer; }
+#actionKeys .key-green { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, var(--border)); }
+#actionKeys .key-blue { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 40%, var(--border)); }
+#actionKeys .key-red { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--border)); }
 .queue-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: color-mix(in srgb, var(--text) 5%, var(--bg)); font-family: monospace; font-size: 12px; font-weight: 500; cursor: pointer; }
 .queue-chip:hover { border-color: var(--red); }
 .queue-chip.danger { border-color: color-mix(in srgb, var(--red) 40%, var(--border)); color: var(--red); }
@@ -306,8 +317,10 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   .header h1 { font-size: 0.9rem; }
   .agents { padding: 8px; }
   .agent { padding: 12px; }
-  .term-input { padding: 6px 8px; gap: 4px; }
-  .term-keys { padding: 6px 8px; }
+  /* The narrow phone only needs the horizontal saving now -- the vertical padding is already
+     at 5px for every width. */
+  .term-input { padding: 5px 8px; gap: 4px; }
+  .term-keys { padding: 5px 8px; }
 }
 @media (pointer: fine) {
   .quick-actions button { flex: none; min-width: auto; padding: 8px 18px; }
@@ -398,11 +411,11 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   <div class="term-content" id="termContent">Loading…</div>
   <div class="quick-actions" id="quickActions"></div>
   <div class="term-input">
-    <button onclick="openCommandPalette()" aria-label="Commands" style="padding:10px 12px;border-radius:6px;border:1px solid var(--blue);background:var(--bg);color:var(--blue);font-weight:700;font-size:14px;flex-shrink:0">/</button>
+    <button class="term-cmd" onclick="openCommandPalette()" aria-label="Commands">/</button>
     <input id="termInput" placeholder="Type…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
     <button class="dock-toggle dock-quick" id="quickDockBtn" aria-pressed="false" onclick="toggleQuickDock()" aria-label="Quick actions"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></button>
     <button class="dock-toggle dock-keys" id="keysDockBtn" aria-pressed="false" onclick="toggleKeysDock()" aria-label="Keys"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h.001M12 12h.001M16 12h.001M7 16h10"/></svg></button>
-    <button onclick="sendText()" aria-label="Send" style="padding:10px 14px;border-radius:6px;border:none;background:var(--blue);color:#fff;flex-shrink:0"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
+    <button class="term-send" onclick="sendText()" aria-label="Send"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
   </div>
   <div class="term-keys" id="termKeys" style="display:none">
     <!-- Key queue strip (visible when composing) -->
