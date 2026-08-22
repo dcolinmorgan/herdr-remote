@@ -136,6 +136,23 @@ there. The session ref itself stays server-side in `pane_session_map`.
   to false. Response: `{messages, total, has_more, title, agent, file_truncated, unavailable}`,
   where each message is `{uuid, role, text, ts, truncated}` and `role` ∈
   `user | assistant | note | tool`. Turns come back oldest-first.
+  - A `tool` turn carries more: `tool` (the name), `target` (the one argument worth showing —
+    `command` for Bash, `file_path` for Edit/Read/Write, else the first of `TOOL_TARGET_KEYS`),
+    and on a failure `error: true` plus `result` (the first line of the tool_result). `text` is
+    unchanged and still the whole one-line summary, because the macOS, iOS, Windows and TUI
+    clients render that string and know none of these fields.
+  - **A file edit carries its diff.** `Edit`, `MultiEdit` and `Write` ship `diff` plus `added` /
+    `removed` counts, and `diff_clipped` when the body is only the head of the change. Both sides
+    were always in the transcript — an Edit's input holds them verbatim — they just never survived
+    parsing. **The diff has no `@@` header and no line numbers**: `old_string` is a *fragment* of
+    the file, so every number difflib produces counts from the fragment and would not match the
+    editor the reader is about to open. A jump between hunks is a bare `...` row. The counts are
+    of the whole change even when the body is clipped, so a client can say "+200, showing 40".
+  - Ceilings are `DIFF_MAX_LINES` (40) and `DIFF_MAX_CHARS` (2000). Measured over the 1,840 Edit
+    calls in the 25 largest transcripts here: median 10 lines / 494 chars, p90 40 lines / 1.9KB,
+    max 321 lines / 14KB. A `Write`'s content is one side only — median 90 lines, up to 1,529 —
+    so it is always the head of the file. A diff spends from the same `PAGE_TEXT_BUDGET` as the
+    prose, which is why `include_tools: false` (the default) costs nothing.
   - The session uuid never crosses the wire. Clients send a `pane_id`; the relay resolves it
     through `pane_session_map` and validates the ref before it touches a path.
   - A page is bounded by turn count **and** by ~128K characters, whichever bites first — measured

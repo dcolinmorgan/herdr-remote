@@ -11,6 +11,7 @@ so that is what we read.
 Currently only Claude's JSONL is understood. Adding a harness means adding a locate+parse pair and
 one line in HARNESSES -- nothing else in here or in the relay is claude-specific.
 """
+import difflib
 import glob
 import json
 import os
@@ -89,6 +90,86 @@ def _first_line(text):
     return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
+# ---------------------------------------------------------------------------- diffs
+#
+# A file-editing tool call carries both sides of the change in its own input, so the diff is
+# already in the transcript -- it just never survived parsing. Measured over the 9,826 tool_use
+# blocks in the 25 largest transcripts on this machine: Bash 6109, Edit 1840, Read 943, Write 350,
+# everything else under 200. Edit is the file-modifying tool that matters, and the only one whose
+# input holds the before and the after verbatim.
+#
+# Ceilings: across those 1,840 Edit calls the diff runs 10 lines / 494 chars at the median, 40
+# lines / 1.9KB at p90, and 321 lines / 14KB at the top. 40 lines shows nine edits in ten whole
+# and keeps the tail from crowding out the rest of the page -- a diff spends from the same
+# PAGE_TEXT_BUDGET the prose does. A Write is the other shape: one side only, median 90 lines and
+# up to 1,529, so it is always the head of the file rather than all of it.
+DIFF_MAX_LINES = 40
+DIFF_MAX_CHARS = 2000
+DIFF_CONTEXT = 3
+# The gap between two hunks. Not "@@ -1,4 +1,6 @@": see _diff_lines.
+DIFF_GAP = "..."
+
+
+def _diff_lines(old, new):
+    """`-`/`+`/context lines for one before/after pair.
+
+    No `@@` header and no line numbers. Edit's old_string and new_string are FRAGMENTS of a file,
+    not the file, so every number difflib prints is relative to the fragment and would not match
+    the editor the reader is about to open. A jump between hunks becomes a bare `...` row instead,
+    which is the only thing in that header a reader actually needs.
+
+    The two header lines are skipped by position, not by prefix: a removed line whose own text
+    starts with `--` renders as `---...` and a prefix test would silently eat it.
+    """
+    out = []
+    for index, line in enumerate(difflib.unified_diff(
+            old.splitlines(), new.splitlines(), n=DIFF_CONTEXT, lineterm="")):
+        if index < 2:
+            continue  # the `--- ` / `+++ ` pair difflib always emits first
+        if line.startswith("@@"):
+            if out:
+                out.append(DIFF_GAP)
+            continue
+        out.append(line)
+    return out
+
+
+def _tool_diff(name, args):
+    """(text, added, removed, clipped) for a tool call that describes a file change, or None."""
+    if not isinstance(args, dict):
+        return None
+    if name == "Edit" and isinstance(args.get("old_string"), str):
+        lines = _diff_lines(args["old_string"], args.get("new_string") or "")
+    elif name == "MultiEdit" and isinstance(args.get("edits"), list):
+        lines = []
+        for edit in args["edits"]:
+            if not isinstance(edit, dict) or not isinstance(edit.get("old_string"), str):
+                continue
+            if lines:
+                lines.append(DIFF_GAP)
+            lines.extend(_diff_lines(edit["old_string"], edit.get("new_string") or ""))
+    elif name == "Write" and isinstance(args.get("content"), str):
+        # A whole new file (or a whole replaced one -- the input does not say which, and claiming
+        # either would be a guess). Every line is an addition.
+        lines = ["+" + line for line in args["content"].splitlines()]
+    else:
+        return None
+    if not lines:
+        return None
+    # Counted before clipping, so the header stays true when the body is cut.
+    added = sum(1 for line in lines if line.startswith("+"))
+    removed = sum(1 for line in lines if line.startswith("-"))
+    clipped = False
+    if len(lines) > DIFF_MAX_LINES:
+        lines = lines[:DIFF_MAX_LINES]
+        clipped = True
+    text = "\n".join(lines)
+    if len(text) > DIFF_MAX_CHARS:
+        text = text[:DIFF_MAX_CHARS]
+        clipped = True
+    return text, added, removed, clipped
+
+
 # ---------------------------------------------------------------------------- claude parser
 #
 # Row-type disposition, from the actual distribution in a 2747-row session on this machine
@@ -120,24 +201,52 @@ def _turn(row, role, text, index, limit=TEXT_LIMIT):
     }
 
 
+# The argument that says what a call was about, in the order we would rather have it. Read off the
+# real input shapes: Bash carries `command`, Edit/Read/Write `file_path`, Grep `pattern`, and the
+# rest fall back to their own JSON.
+TOOL_TARGET_KEYS = ("command", "file_path", "path", "pattern", "query", "url", "description",
+                    "prompt", "notebook_path", "skill")
+
+
+def _tool_target(args):
+    """The one argument worth showing next to the tool's name, flattened to a single line."""
+    if not isinstance(args, dict):
+        return ""
+    for key in TOOL_TARGET_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+    try:
+        return " ".join(json.dumps(args, ensure_ascii=False).split())
+    except (TypeError, ValueError):
+        return ""
+
+
 def _tool_summary(block):
     name = block.get("name")
     name = name if isinstance(name, str) and name else "tool"
-    args = block.get("input")
-    detail = ""
-    if isinstance(args, dict):
-        for key in ("command", "file_path", "path", "pattern", "query", "url", "description",
-                    "prompt", "notebook_path", "skill"):
-            value = args.get(key)
-            if isinstance(value, str) and value.strip():
-                detail = " ".join(value.split())
-                break
-        else:
-            try:
-                detail = " ".join(json.dumps(args, ensure_ascii=False).split())
-            except (TypeError, ValueError):
-                detail = ""
+    detail = _tool_target(block.get("input"))
     return f"{name}({detail})" if detail else name
+
+
+def _annotate_tool(turn, block):
+    """Structured fields beside the one-line summary, so a client can render the call instead of
+    re-parsing the sentence -- and so a file edit can be shown as a diff at all.
+
+    `text` is left exactly as it was: the macOS, iOS, Windows and TUI clients render that string,
+    and none of them knows about these fields.
+    """
+    name = block.get("name")
+    turn["tool"] = name if isinstance(name, str) and name else "tool"
+    args = block.get("input")
+    target = _tool_target(args)
+    if target:
+        turn["target"] = target[:TOOL_TEXT_LIMIT]
+    diff = _tool_diff(turn["tool"], args)
+    if diff:
+        turn["diff"], turn["added"], turn["removed"], clipped = diff
+        if clipped:
+            turn["diff_clipped"] = True
 
 
 def _fold_tool_result(block, tool_turns):
@@ -155,6 +264,11 @@ def _fold_tool_result(block, tool_turns):
         body = ""
     marker = "!" if block.get("is_error") else "→"
     head = _first_line(body)
+    if block.get("is_error"):
+        turn["error"] = True
+        # Duplicated from `text` on purpose, and only on the failures: a client showing the reason
+        # a call failed should not have to split the summary sentence back apart to find it.
+        turn["result"] = head[:TOOL_TEXT_LIMIT]
     if not head and not block.get("is_error"):
         return
     turn["text"], turn["truncated"] = clip(f"{turn['text']} {marker} {head or 'error'}", TOOL_TEXT_LIMIT)
@@ -178,6 +292,7 @@ def _parse_assistant(row, turns, tool_turns):
                 turns.append(_turn(row, role, text, index))
         elif kind == "tool_use":
             turn = _turn(row, "tool", _tool_summary(block), index, limit=TOOL_TEXT_LIMIT)
+            _annotate_tool(turn, block)
             turns.append(turn)
             tool_id = block.get("id")
             if isinstance(tool_id, str) and tool_id:
@@ -461,7 +576,10 @@ def paginate(turns, limit, before, include_tools):
     floor = max(0, end - max(1, limit))
     start, used = end, 0
     while start > floor:
-        cost = len(visible[start - 1]["text"]) + TURN_OVERHEAD
+        turn = visible[start - 1]
+        # A diff is payload like any other. Left out of the count, a page of file edits would
+        # quietly ship several times the budget it advertises.
+        cost = len(turn["text"]) + len(turn.get("diff") or "") + TURN_OVERHEAD
         if used + cost > PAGE_TEXT_BUDGET and start < end:
             break  # always yield at least the newest turn, however long it is
         used += cost

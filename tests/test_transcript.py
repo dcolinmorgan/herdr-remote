@@ -195,6 +195,112 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(turns[0]["text"], "Compacted")
 
 
+class ToolCallTests(unittest.TestCase):
+    """A file edit carries both sides in its own input; none of it used to survive parsing."""
+
+    def tool_turn(self, name, args):
+        turns, _ = parse([assistant_row(
+            [{"type": "tool_use", "id": "t1", "name": name, "input": args}], uuid="a1")])
+        self.assertEqual(len(turns), 1)
+        return turns[0]
+
+    def test_an_edit_becomes_a_diff_of_its_two_sides(self):
+        turn = self.tool_turn("Edit", {
+            "file_path": "/repo/relay/herdr_relay.py",
+            "old_string": "def a():\n    return 1\n\n\ndef b():\n    pass\n",
+            "new_string": "def a():\n    return 2\n\n\ndef b():\n    pass\n",
+        })
+        self.assertEqual(turn["tool"], "Edit")
+        self.assertEqual(turn["target"], "/repo/relay/herdr_relay.py")
+        self.assertEqual(turn["diff"].splitlines(),
+                         [" def a():", "-    return 1", "+    return 2", " ", " ", " def b():"])
+        self.assertEqual((turn["added"], turn["removed"]), (1, 1))
+        self.assertNotIn("diff_clipped", turn)
+        # The one-line summary is untouched: every other client renders that string and knows
+        # nothing about these fields.
+        self.assertEqual(turn["text"], "Edit(/repo/relay/herdr_relay.py)")
+
+    def test_no_line_numbers_are_invented_for_a_fragment(self):
+        """old_string is a fragment of the file, so difflib's @@ numbers count from the fragment --
+        they would not match the editor the reader is about to open. A gap becomes `...`."""
+        lines = [f"line {i:02d}" for i in range(40)]
+        changed = list(lines)
+        changed[2] = "CHANGED early"
+        changed[30] = "CHANGED late"
+        turn = self.tool_turn("Edit", {"file_path": "/repo/f", "old_string": "\n".join(lines),
+                                       "new_string": "\n".join(changed)})
+        self.assertNotIn("@@", turn["diff"])
+        self.assertIn(transcript.DIFF_GAP, turn["diff"].splitlines())
+        self.assertEqual((turn["added"], turn["removed"]), (2, 2))
+
+    def test_a_removed_line_that_starts_with_dashes_survives(self):
+        """It renders as `---flag=1`, which a prefix test for difflib's header would have eaten."""
+        turn = self.tool_turn("Edit", {"file_path": "/repo/f",
+                                       "old_string": "--flag=1\nkeep\n", "new_string": "keep\n"})
+        self.assertEqual(turn["diff"].splitlines(), ["---flag=1", " keep"])
+        self.assertEqual((turn["added"], turn["removed"]), (0, 1))
+
+    def test_a_write_is_all_additions_and_only_its_head(self):
+        content = "\n".join(f"line {i}" for i in range(200))
+        turn = self.tool_turn("Write", {"file_path": "/repo/new.py", "content": content})
+        lines = turn["diff"].splitlines()
+        self.assertEqual(len(lines), transcript.DIFF_MAX_LINES)
+        self.assertTrue(all(line.startswith("+") for line in lines))
+        # The count is the whole file even though the body is its head, so a client can say
+        # "+200, showing 40" rather than implying the file is 40 lines long.
+        self.assertEqual((turn["added"], turn["removed"]), (200, 0))
+        self.assertTrue(turn["diff_clipped"])
+
+    def test_a_single_enormous_line_is_capped_by_characters_too(self):
+        turn = self.tool_turn("Write", {"file_path": "/repo/bundle.js", "content": "x" * 9000})
+        self.assertLessEqual(len(turn["diff"]), transcript.DIFF_MAX_CHARS)
+        self.assertTrue(turn["diff_clipped"])
+
+    def test_multiedit_shows_every_edit_separated(self):
+        turn = self.tool_turn("MultiEdit", {"file_path": "/repo/f", "edits": [
+            {"old_string": "one\n", "new_string": "uno\n"},
+            {"old_string": "two\n", "new_string": "dos\n"},
+        ]})
+        self.assertEqual(turn["diff"].splitlines(),
+                         ["-one", "+uno", transcript.DIFF_GAP, "-two", "+dos"])
+        self.assertEqual((turn["added"], turn["removed"]), (2, 2))
+
+    def test_a_tool_that_changes_no_file_carries_no_diff(self):
+        turn = self.tool_turn("Bash", {"command": "ls -la", "description": "list"})
+        self.assertEqual(turn["tool"], "Bash")
+        self.assertEqual(turn["target"], "ls -la")
+        self.assertNotIn("diff", turn)
+        # A search leads with what it searched for, and a tool with none of the known keys falls
+        # back to its own JSON rather than showing just its name.
+        self.assertEqual(self.tool_turn("ToolSearch", {"query": "select:Read", "max_results": 2})
+                         ["target"], "select:Read")
+        self.assertEqual(self.tool_turn("Odd", {"weird": 3})["target"], '{"weird": 3}')
+
+    def test_a_malformed_edit_input_does_not_raise(self):
+        for args in ({"file_path": "/f"}, {"old_string": None, "new_string": "x"},
+                     {"edits": "not a list"}, {"edits": [None, {"old_string": 1}]}, "not a dict"):
+            turn = self.tool_turn("Edit", args)
+            self.assertNotIn("diff", turn)
+
+    def test_a_failed_tool_call_says_so(self):
+        turns, _ = parse([
+            assistant_row([{"type": "tool_use", "id": "t1", "name": "Bash",
+                            "input": {"command": "false"}}], uuid="a1"),
+            user_row([{"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+                       "content": "exit status 1"}], uuid="u2"),
+        ])
+        self.assertTrue(turns[0]["error"])
+        self.assertIn("!", turns[0]["text"])
+
+    def test_a_successful_tool_call_is_not_flagged(self):
+        turns, _ = parse([
+            assistant_row([{"type": "tool_use", "id": "t1", "name": "Bash",
+                            "input": {"command": "true"}}], uuid="a1"),
+            user_row([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}], uuid="u2"),
+        ])
+        self.assertNotIn("error", turns[0])
+
+
 class PaginationTests(unittest.TestCase):
     def turns(self, count=10, every_other_tool=True):
         rows = []
@@ -254,6 +360,41 @@ class PaginationTests(unittest.TestCase):
             page, _, has_more = transcript.paginate(turns, 200, None, False)
         self.assertEqual(len(page), 1)
         self.assertFalse(has_more)
+
+
+class DiffBudgetTests(unittest.TestCase):
+    def edits(self, count, lines_each):
+        """`count` Edit calls, each with a diff of roughly `lines_each` lines."""
+        rows = []
+        for index in range(count):
+            old = "\n".join(f"old {index} {i}" for i in range(lines_each))
+            new = "\n".join(f"new {index} {i}" for i in range(lines_each))
+            rows.append(assistant_row(
+                [{"type": "tool_use", "id": f"t{index}", "name": "Edit",
+                  "input": {"file_path": f"/repo/f{index}", "old_string": old,
+                            "new_string": new}}], uuid=f"a{index}"))
+        return parse(rows)[0]
+
+    def test_a_page_of_diffs_stays_inside_the_advertised_budget(self):
+        turns = self.edits(120, transcript.DIFF_MAX_LINES)
+        page, total, has_more = transcript.paginate(turns, 120, None, True)
+        self.assertEqual(total, 120)
+        payload = sum(len(t["text"]) + len(t.get("diff") or "") for t in page)
+        self.assertLessEqual(payload, transcript.PAGE_TEXT_BUDGET)
+        # Cut by the budget, not by the limit -- and the rest is still reachable.
+        self.assertLess(len(page), 120)
+        self.assertTrue(has_more)
+
+    def test_the_newest_turn_is_served_even_if_it_alone_blows_the_budget(self):
+        turns = self.edits(1, transcript.DIFF_MAX_LINES)
+        turns[0]["text"] = "x" * (transcript.PAGE_TEXT_BUDGET * 2)
+        page, _, _ = transcript.paginate(turns, 10, None, True)
+        self.assertEqual(len(page), 1)
+
+    def test_diffs_cost_nothing_when_tools_are_filtered_out(self):
+        turns = self.edits(120, transcript.DIFF_MAX_LINES)
+        page, total, has_more = transcript.paginate(turns, 120, None, False)
+        self.assertEqual((page, total, has_more), ([], 0, False))
 
 
 class LocateTests(unittest.TestCase):
