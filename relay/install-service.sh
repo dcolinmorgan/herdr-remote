@@ -1509,13 +1509,29 @@ echo ""
 # --- Smoke test ---
 
 echo "Running smoke test..."
-sleep "${HERDR_INSTALL_SETTLE_SECONDS:-3}"
 
-# 1. Check port is listening
-if ! lsof -iTCP:"$WS_PORT" -sTCP:LISTEN >/dev/null 2>&1 && \
-   ! ss -tlnp 2>/dev/null | grep -q ":$WS_PORT "; then
+# 1. Wait for the port to come up, then check it is listening.
+#
+# The relay is launched by launchd/systemd and its first `uv run` does a cold
+# dependency resolve that regularly takes well over the old fixed 3s wait - so a
+# single check after `sleep 3` reported FAIL on installs that were perfectly
+# healthy a few seconds later. Poll instead: check once per second up to
+# HERDR_INSTALL_SETTLE_SECONDS (default 30) and succeed as soon as the port is
+# up. The env var stays an override - raise it on a slow first run, lower it to
+# fail fast in CI.
+SETTLE_SECONDS="${HERDR_INSTALL_SETTLE_SECONDS:-30}"
+PORT_UP=0
+for _ in $(seq 1 "$SETTLE_SECONDS"); do
+    if lsof -iTCP:"$WS_PORT" -sTCP:LISTEN >/dev/null 2>&1 || \
+       ss -tlnp 2>/dev/null | grep -q ":$WS_PORT "; then
+        PORT_UP=1
+        break
+    fi
+    sleep 1
+done
+if [ "$PORT_UP" -ne 1 ]; then
     echo ""
-    echo "  FAIL: Port $WS_PORT is not listening after 3 seconds."
+    echo "  FAIL: Port $WS_PORT is not listening after ${SETTLE_SECONDS} seconds."
     echo "  Check logs: tail -20 $LOG_DIR/relay.log"
     exit 1
 fi
@@ -1641,6 +1657,15 @@ else
 fi
 [ "$TUNNEL_MODE" != "none" ] && echo "  Tunnel:     $TUNNEL_MODE"
 [ "$TUNNEL_MODE" = "named" ] && echo "  URL:        wss://$TUNNEL_HOSTNAME"
+if [ "$TUNNEL_MODE" = "aws" ]; then
+    # The URL and token are the exact two values the operator types into the
+    # phone web app (https://herdr-remote.pages.dev - tap the gear). The AWS
+    # path always has a token (the tunnel install refuses to run without one),
+    # so print it here rather than making the operator dig it out of secrets.env.
+    echo "  URL:        https://${HERDR_AWS_HOST:-<HERDR_AWS_HOST not set>}"
+    echo "  Token:      ${HERDR_RELAY_TOKEN}"
+    echo "  Open the web app, tap the gear, and paste the URL and token above."
+fi
 echo "  Logs:       $LOG_DIR/"
 echo "  Config:     $CONFIG_FILE"
 echo "  Secrets:    $SECRETS_FILE"

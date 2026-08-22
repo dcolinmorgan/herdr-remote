@@ -132,10 +132,13 @@ Resources:
           ToPort: 22
           CidrIp: !Ref SshAllowedCidr
           Description: Reverse tunnel from the Mac only
-      SecurityGroupEgress:
-        - IpProtocol: "-1"
-          CidrIp: 0.0.0.0/0
-          Description: Outbound for package installs and ACME
+      # No SecurityGroupEgress here on purpose. This template omits VpcId so the
+      # group lands in the region's default VPC (see README), and EC2 rejects
+      # "SecurityGroupEgress cannot be specified without VpcId" - so declaring it
+      # made every stack create fail and roll back. Omitting the block lets EC2
+      # add its own default egress rule (allow all traffic to 0.0.0.0/0), which is
+      # byte-for-byte the allow-all-outbound rule we would otherwise write for
+      # package installs and ACME. Egress posture is unchanged.
 
   TunnelEip:
     Type: AWS::EC2::EIP
@@ -159,6 +162,21 @@ Resources:
       ResourceRecords:
         - !Ref TunnelEip
 
+  # !!! UPDATE SEMANTICS - READ BEFORE CHANGING A PARAMETER ON A LIVE STACK !!!
+  # All host configuration (the Caddyfile hostname, the tunnel port, and the
+  # herdr-tunnel authorized_keys line) is baked into UserData below, and
+  # cloud-init runs UserData ONLY on the instance's first boot. A stack UPDATE
+  # rewrites the UserData attribute but does NOT re-run it and does NOT replace
+  # the instance, so changing HostnameFqdn, TunnelPort, or TunnelPublicKey on an
+  # existing stack reports "UPDATE_COMPLETE" while the running host keeps its old
+  # config. This is a SILENT no-op.
+  #   - HostnameFqdn / TunnelPort change  -> HTTPS stays on the old name/port.
+  #   - TunnelPublicKey rotation          -> SECURITY RELEVANT: the OLD key keeps
+  #     working and the NEW key is never installed. A rotation you believe
+  #     succeeded has not happened.
+  # To actually change any of these, DELETE and RECREATE the stack (or, if you
+  # cannot, re-run the instance's UserData over SSM by hand - see the README
+  # section "Changing a parameter after first boot").
   TunnelInstance:
     Type: AWS::EC2::Instance
     CreationPolicy:
