@@ -111,12 +111,31 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-header .search-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
 .term-header .search-btn:hover, .term-header .refresh-btn:hover, .term-header .history-btn:hover { color: var(--text); }
 .term-header .history-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
+/* top is set from the header's real height when the panel opens (positionHistoryPanel); 45px is
+   the phone-sized fallback for a first paint before JS runs. */
 .term-history { position: absolute; top: 45px; left: 0; right: 0; bottom: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
+.term-history .hist-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.term-history .hist-title { font-size: 0.8rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-history .hist-toggle { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 0.65rem; padding: 3px 8px; cursor: pointer; }
+.term-history .hist-toggle[aria-pressed="true"] { color: var(--text); border-color: var(--blue); }
+.term-history .hist-find { flex: 1; min-width: 0; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.8rem; }
+.term-history .hist-find:focus { outline: none; border-color: var(--blue); }
+.term-history .hist-count { font-size: 0.65rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.term-history .hist-edge { color: var(--muted); font-size: 0.7rem; text-align: center; padding: 8px 4px; }
+.term-history .hist-more { display: block; width: 100%; padding: 8px; margin-bottom: 8px; background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--blue); font-size: 0.75rem; cursor: pointer; }
+.term-history .hist-more:disabled { color: var(--muted); cursor: default; }
 .term-history .msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
-.term-history .msg-role { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+.term-history .msg-role { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; display: flex; gap: 6px; align-items: baseline; }
+.term-history .msg-time { font-weight: 400; text-transform: none; color: var(--muted); font-size: 0.65rem; font-variant-numeric: tabular-nums; }
 .term-history .msg-user { color: var(--blue); }
 .term-history .msg-assistant { color: var(--green); }
 .term-history .msg-text { white-space: pre-wrap; word-break: break-word; }
+.term-history .msg.note .msg-text { color: var(--muted); font-size: 0.75rem; }
+/* A tool call is one dim monospace line: on the biggest session measured here 674 of 794 turns
+   were tool calls, so they only earn a line each. */
+.term-history .msg.tool { padding: 3px 0; border-bottom: none; }
+.term-history .msg.tool .msg-text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.7rem; color: var(--muted); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.term-history .msg-clip { color: var(--orange); font-size: 0.65rem; }
 .term-search { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .term-search input { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
 .term-search input:focus { outline: none; border-color: var(--blue); }
@@ -163,7 +182,9 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 /* Desktop */
 @media (min-width: 768px) {
   body { max-width: 960px; margin: 0 auto; padding: 0 16px; }
-  .terminal-view { position: static; display: none; }
+  /* relative, not static: the history panel is absolutely positioned, and a static parent sent it
+     to the viewport instead -- full-bleed and over the app header. */
+  .terminal-view { position: relative; display: none; }
   .terminal-view.active { display: flex; height: calc(100dvh - 49px); }
   .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
   .section-header { grid-column: 1 / -1; }
@@ -250,9 +271,14 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
     <button class="refresh-btn" onclick="refreshPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
   </div>
   <div class="term-history" id="termHistory" style="display:none">
-    <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-      <span style="font-size:0.8rem;font-weight:600;flex:1">Conversation History</span>
-      <button onclick="toggleHistory()" style="background:none;border:none;color:var(--muted);cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    <div class="hist-bar">
+      <span class="hist-title" id="historyTitle">Conversation History</span>
+      <button class="hist-toggle" id="historyToolsBtn" aria-pressed="false" onclick="toggleHistoryTools()" title="Show tool calls">Tools</button>
+      <button onclick="toggleHistory()" aria-label="Close history" style="background:none;border:none;color:var(--muted);cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="hist-bar">
+      <input class="hist-find" id="historyFind" type="text" placeholder="Filter loaded turns..." autocomplete="off" oninput="renderHistory()" />
+      <span class="hist-count" id="historyCount"></span>
     </div>
     <div id="historyContent" style="flex:1;overflow-y:auto;padding:12px;font-size:0.8rem;line-height:1.5"></div>
   </div>
@@ -718,7 +744,7 @@ function handleMessage(msg) {
       el.scrollTop = el.scrollHeight;
     }
   } else if (msg.type === 'history' && msg.pane_id === activePane) {
-    renderHistory(msg.messages || []);
+    receiveHistory(msg);
   }
 }
 
@@ -951,9 +977,16 @@ function section(title, color, list) {
 }
 
 function openTerminal(paneId) {
-  activePane = paneId; paneLines = 200; userScrolledUp = false;
+  // Re-entered on every blocked event for the pane already open, so only a real switch closes the
+  // history panel -- it belongs to one conversation.
+  if (activePane !== paneId) hideHistory();
+  activePane = paneId; paneLines = PANE_LINES_BASE; userScrolledUp = false;
   const a = agents.find(x => x.pane_id===paneId);
   document.getElementById('termTitle').textContent = a?`${a.label||a.workspace_label||a.project} · ${a.agent}`:paneId;
+  // A pane that names no agent session has no transcript to show. `false` only -- undefined means
+  // the relay doesn't report it, and the button stays.
+  const historyBtn = document.querySelector('.history-btn');
+  if (historyBtn) historyBtn.style.display = (a && a.has_session === false) ? 'none' : '';
   document.getElementById('agentListView').style.display = 'none';
   if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
@@ -1017,9 +1050,36 @@ function hideTerminal() {
   document.getElementById('agentListView').style.display = '';
 }
 
-let paneLines = 200;
-function refreshPane() { if(ws&&ws.readyState===WebSocket.OPEN&&activePane) ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines,format:'ansi'})); }
-function loadMore() { paneLines = Math.min(paneLines + 500, 5000); refreshPane(); }
+// The mirror's scrollback window. herdr clamps pane.read at ~1000 lines and doesn't say so --
+// 1000, 1500 and 5000 all come back with the same 1000 rows -- so the old 5000 ceiling only ever
+// bought bigger requests that fetched nothing new.
+const PANE_LINES_BASE = 200, PANE_LINES_STEP = 400, PANE_LINES_MAX = 1000;
+let paneLines = PANE_LINES_BASE;
+
+// How deep a scrollback read on the open pane could ever go (relay: `scrollback`, from herdr's
+// scroll.max_offset_from_bottom). 0 means the pane runs on the alternate screen -- every agent TUI
+// does -- and herdr retained nothing behind the viewport, so "load older" can never return a line
+// it doesn't already have. undefined means an older relay that doesn't report it: stay permissive.
+function paneScrollback() {
+  const a = agents.find(x => x.pane_id === activePane);
+  return a ? a.scrollback : undefined;
+}
+function canLoadMore() {
+  if (paneScrollback() === 0) return false;
+  return paneLines < PANE_LINES_MAX;
+}
+function refreshPane() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !activePane) return;
+  // `visible` on a pane with no ring: same content, and it can never make the relay pay for
+  // herdr's multi-second scrollback harvest. `recent` only where there is a ring to read.
+  const source = paneScrollback() === 0 ? 'visible' : 'recent';
+  ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines,format:'ansi',source}));
+}
+function loadMore() {
+  if (!canLoadMore()) return;
+  paneLines = Math.min(paneLines + PANE_LINES_STEP, PANE_LINES_MAX);
+  refreshPane();
+}
 
 // Find in output
 let searchMatches = [];
@@ -1040,10 +1100,19 @@ function toggleSearch() {
   }
 }
 
+// The panel is absolutely positioned inside the terminal view and has to start below its header,
+// which is 45px tall on a phone and taller on a desktop where the layout has more room.
+function positionHistoryPanel() {
+  const panel = document.getElementById('termHistory');
+  const header = document.querySelector('.term-header');
+  if (panel.style.display !== 'none' && header) panel.style.top = header.offsetHeight + 'px';
+}
+
 function toggleHistory() {
   const panel = document.getElementById('termHistory');
   if (panel.style.display !== 'none') { navClose('history', hideHistory); return; }
   panel.style.display = 'flex';
+  positionHistoryPanel();
   document.getElementById('termSearch').style.display = 'none'; // close search if open
   navPush('history', hideHistory);
   loadHistory();
@@ -1051,24 +1120,125 @@ function toggleHistory() {
 
 function hideHistory() { document.getElementById('termHistory').style.display = 'none'; }
 
-function loadHistory() {
-  if (!ws || !activePane) return;
-  document.getElementById('historyContent').innerHTML = '<div style="color:var(--muted)">Loading...</div>';
-  ws.send(JSON.stringify({ type: 'get_history', pane_id: activePane }));
+// The conversation, read from the agent's own transcript rather than the terminal. The relay keeps
+// the session reference server-side; all we ever send is the pane and a cursor it gave us.
+const HISTORY_PAGE = 200;
+let history_ = { turns: [], total: 0, hasMore: false, fileTruncated: false,
+                 tools: false, loading: false, unavailable: null };
+
+function loadHistory(before) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !activePane) return;
+  if (history_.loading) return;
+  if (!before) {
+    history_ = { turns: [], total: 0, hasMore: false, fileTruncated: false,
+                 tools: history_.tools, loading: true, unavailable: null };
+    document.getElementById('historyFind').value = '';
+    document.getElementById('historyContent').innerHTML = '<div class="hist-edge">Loading…</div>';
+  } else {
+    history_.loading = true;
+    renderHistory();
+  }
+  ws.send(JSON.stringify({
+    type: 'get_history', pane_id: activePane, limit: HISTORY_PAGE,
+    include_tools: history_.tools, ...(before ? { before } : {}),
+  }));
 }
 
-function renderHistory(messages) {
+function loadOlderHistory() {
+  if (history_.loading || !history_.hasMore || !history_.turns.length) return;
+  loadHistory(history_.turns[0].uuid);
+}
+
+function toggleHistoryTools() {
+  history_.tools = !history_.tools;
+  document.getElementById('historyToolsBtn').setAttribute('aria-pressed', String(history_.tools));
+  loadHistory();  // the server pages with tools filtered out, so the whole view has to be refetched
+}
+
+// Merge a page in. `before` pages arrive as the turns immediately older than what we have, so they
+// go on the front; anything already held wins, in case a cursor was resolved loosely server-side.
+function receiveHistory(msg) {
+  const older = history_.turns.length > 0;
+  history_.loading = false;
+  history_.unavailable = msg.unavailable || null;
+  history_.total = msg.total || 0;
+  history_.hasMore = !!msg.has_more;
+  history_.fileTruncated = !!msg.file_truncated;
+  const incoming = (msg.messages || []).filter(Boolean);
+  if (history_.unavailable) { history_.turns = []; }
+  else if (older) {
+    const held = new Set(history_.turns.map(t => t.uuid));
+    history_.turns = incoming.filter(t => !held.has(t.uuid)).concat(history_.turns);
+  } else {
+    history_.turns = incoming;
+  }
+  const title = (msg.title || '').trim();
+  document.getElementById('historyTitle').textContent = title || 'Conversation History';
   const el = document.getElementById('historyContent');
-  if (!messages || !messages.length) {
-    el.innerHTML = '<div style="color:var(--muted)">No conversation history available.<br><br>History is read from the agent\'s session log when supported.</div>';
+  // Anchor on content, not on offset: prepending older turns would otherwise yank the page out
+  // from under the reader's thumb.
+  const previousHeight = el.scrollHeight, previousTop = el.scrollTop;
+  renderHistory();
+  if (older) el.scrollTop = previousTop + (el.scrollHeight - previousHeight);
+  else el.scrollTop = el.scrollHeight;  // newest turn is at the bottom
+}
+
+// Why the history panel is empty, in the user's terms. Each is an ordinary state, not an error.
+const HISTORY_UNAVAILABLE = {
+  'no-session': 'This pane names no agent session, so there is no transcript to read.',
+  'no-log': 'No transcript file was found for this pane\'s session yet.',
+  'unsupported': 'This relay cannot read this agent\'s transcript format yet.',
+  'disabled': 'Transcript history is switched off on this relay.',
+  'error': 'Could not read the transcript. Pull back and try again.',
+};
+
+const HISTORY_ROLE_CLASS = { user: 'msg-user', assistant: 'msg-assistant' };
+
+function historyTurnHtml(turn) {
+  const role = turn.role || 'note';
+  const time = (turn.ts || '').slice(11, 16);
+  if (role === 'tool') {
+    return `<div class="msg tool"><div class="msg-text">${escapeHtml(turn.text || '')}</div></div>`;
+  }
+  return `<div class="msg ${role}">
+      <div class="msg-role ${HISTORY_ROLE_CLASS[role] || ''}">${escapeHtml(role)}` +
+      (time ? `<span class="msg-time">${escapeHtml(time)}</span>` : '') + `</div>
+      <div class="msg-text">${escapeHtml(turn.text || '')}` +
+      (turn.truncated ? '<span class="msg-clip"> …clipped</span>' : '') + `</div>
+    </div>`;
+}
+
+function renderHistory() {
+  const el = document.getElementById('historyContent');
+  const count = document.getElementById('historyCount');
+  if (history_.unavailable) {
+    const copy = HISTORY_UNAVAILABLE[history_.unavailable] || 'Conversation history is unavailable.';
+    el.innerHTML = `<div class="hist-edge">${escapeHtml(copy)}</div>`;
+    count.textContent = '';
     return;
   }
-  el.innerHTML = messages.map(m => `
-    <div class="msg">
-      <div class="msg-role ${m.role === 'user' ? 'msg-user' : 'msg-assistant'}">${m.role}</div>
-      <div class="msg-text">${escapeHtml(m.content || '').slice(0, 2000)}${(m.content?.length || 0) > 2000 ? '...' : ''}</div>
-    </div>
-  `).join('');
+  const needle = document.getElementById('historyFind').value.trim().toLowerCase();
+  const shown = needle
+    ? history_.turns.filter(t => (t.text || '').toLowerCase().includes(needle))
+    : history_.turns;
+  // Say what the filter covers: turns not yet paged in are not searched, and pretending otherwise
+  // would read as "no matches in this conversation".
+  count.textContent = needle
+    ? `${shown.length} in ${history_.turns.length} loaded`
+    : (history_.total ? `${history_.turns.length} of ${history_.total}` : '');
+  if (!history_.turns.length) {
+    el.innerHTML = '<div class="hist-edge">This conversation has no turns yet.</div>';
+    return;
+  }
+  let head = '';
+  if (history_.loading) head = '<div class="hist-edge">Loading older…</div>';
+  else if (history_.hasMore) head = `<button class="hist-more" onclick="loadOlderHistory()">Load older turns</button>`;
+  else if (history_.fileTruncated) head = '<div class="hist-edge">Older turns were not fetched from this host.</div>';
+  else head = '<div class="hist-edge">Start of the conversation.</div>';
+  const body = shown.length
+    ? shown.map(historyTurnHtml).join('')
+    : '<div class="hist-edge">No loaded turn matches that.</div>';
+  el.innerHTML = head + body;
 }
 
 function escapeHtml(text) {
@@ -1445,8 +1615,12 @@ let imeComposing = false, imeEndedAt = 0;
 document.getElementById('termContent').addEventListener('scroll', function() {
   const el = this;
   userScrolledUp = (el.scrollHeight - el.scrollTop - el.clientHeight) > 50;
-  if (el.scrollTop === 0 && paneLines < 5000) loadMore();
+  if (el.scrollTop === 0) loadMore();
 });
+document.getElementById('historyContent').addEventListener('scroll', function() {
+  if (this.scrollTop <= 4) loadOlderHistory();
+});
+window.addEventListener('resize', positionHistoryPanel);
 
 if (savedUrl) setTimeout(connect, 100); else showSetup();
 
