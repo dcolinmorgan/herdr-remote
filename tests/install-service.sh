@@ -287,6 +287,34 @@ assert_not_contains "$MAC_HOME/Library/LaunchAgents/com.herdr-remote.telegram.pl
 python3 -c 'import os, stat, sys; info = os.stat(sys.argv[1]); mode = stat.S_IMODE(info.st_mode); raise SystemExit(0 if mode == 0o600 and info.st_uid == os.getuid() else 1)' "$MAC_HOME/.config/herdr-remote/secrets.env"
 python3 -c 'import os, stat, sys; info = os.stat(sys.argv[1]); mode = stat.S_IMODE(info.st_mode); raise SystemExit(0 if mode == 0o644 and info.st_uid == os.getuid() else 1)' "$MAC_HOME/.config/herdr-remote/config.env"
 assert_contains "$TMP/mac-new.log" 'Telegram bot verified as @installer_test_bot'
+# The operator-facing CLI wrapper is symlinked onto PATH.
+[ -L "$MAC_HOME/.local/bin/herdr-remote" ] || {
+    echo "CLI wrapper was not symlinked into ~/.local/bin" >&2
+    exit 1
+}
+[ "$(readlink "$MAC_HOME/.local/bin/herdr-remote")" = "$ROOT/relay/herdr-remote" ] || {
+    echo "CLI wrapper symlink does not point at the canonical wrapper" >&2
+    exit 1
+}
+assert_contains "$TMP/mac-new.log" 'CLI installed:'
+
+# A pre-existing, DIFFERENT herdr-remote (e.g. a stale Cloudflare-only wrapper)
+# is warned about, backed up, and replaced by a symlink to the canonical copy.
+STALE_CLI_HOME="$TMP/stale-cli-home"
+mkdir -p "$STALE_CLI_HOME/.local/bin"
+printf '%s\n' '#!/bin/sh' '# stale cloudflare-only wrapper' 'echo old' \
+    > "$STALE_CLI_HOME/.local/bin/herdr-remote"
+run_install macos "$STALE_CLI_HOME" $'yy123456:ABC_def\n\nyn' > "$TMP/stale-cli.log" || {
+    cat "$TMP/stale-cli.log"
+    exit 1
+}
+assert_contains "$TMP/stale-cli.log" 'A DIFFERENT herdr-remote is already installed'
+assert_file "$STALE_CLI_HOME/.local/bin/herdr-remote.replaced-by-installer"
+assert_contains "$STALE_CLI_HOME/.local/bin/herdr-remote.replaced-by-installer" 'stale cloudflare-only wrapper'
+[ -L "$STALE_CLI_HOME/.local/bin/herdr-remote" ] || {
+    echo "stale CLI was not replaced by a symlink" >&2
+    exit 1
+}
 
 run_install macos "$MAC_HOME" 'yyyyn' > "$TMP/mac-retain.log" || {
     cat "$TMP/mac-retain.log"

@@ -1442,6 +1442,70 @@ echo ""
 echo "Services installed and started."
 echo ""
 
+# --- Install the operator-facing CLI wrapper ---
+#
+# relay/herdr-remote is the canonical start/stop/status wrapper. It is what the
+# operator actually types, and it is the only thing that knows how to boot the
+# launchd jobs out (a plain kill of the relay just gets restarted by KeepAlive).
+# If it is not installed onto PATH, the operator falls back to whatever stale
+# copy is already in ~/.local/bin - historically a pre-AWS, Cloudflare-only
+# wrapper whose `stop` greps for a cloudflared process, finds none under AWS,
+# kills only the relay, and reports "Stopped." while the public tunnel stays up.
+# We symlink (not copy) so the installed CLI can never fall behind the versioned
+# wrapper it points at, and warn loudly when a different file is already there.
+install_cli_wrapper() {
+    WRAPPER_SRC="$SCRIPT_DIR/herdr-remote"
+    BIN_DIR="$HOME/.local/bin"
+    WRAPPER_DEST="$BIN_DIR/herdr-remote"
+
+    if [ ! -f "$WRAPPER_SRC" ]; then
+        echo "  [warn] Canonical wrapper not found at $WRAPPER_SRC; skipping CLI install."
+        return 0
+    fi
+
+    chmod +x "$WRAPPER_SRC" 2>/dev/null || true
+    mkdir -p "$BIN_DIR"
+
+    if [ -L "$WRAPPER_DEST" ] && [ "$(readlink "$WRAPPER_DEST")" = "$WRAPPER_SRC" ]; then
+        echo "  [ok] CLI already linked: $WRAPPER_DEST -> $WRAPPER_SRC"
+    else
+        if [ -e "$WRAPPER_DEST" ] || [ -L "$WRAPPER_DEST" ]; then
+            # Something is already here that is not our symlink. Warn if it
+            # differs from the canonical wrapper (it almost always will - that
+            # stale copy is the whole reason this step exists), and preserve it.
+            if [ -L "$WRAPPER_DEST" ]; then
+                echo "  [warn] Replacing an existing herdr-remote at $WRAPPER_DEST"
+                echo "         (symlink -> $(readlink "$WRAPPER_DEST")) with a link to the canonical wrapper."
+            elif cmp -s "$WRAPPER_DEST" "$WRAPPER_SRC"; then
+                echo "  [note] $WRAPPER_DEST is an identical copy; converting it to a symlink so it stays in sync."
+            else
+                echo "  [warn] A DIFFERENT herdr-remote is already installed at $WRAPPER_DEST."
+                echo "         It does not match the canonical wrapper in this repo and is very likely a"
+                echo "         stale copy that mismanages the current tunnel backend (e.g. a Cloudflare-only"
+                echo "         'stop' that leaves an AWS tunnel serving publicly). Replacing it with a"
+                echo "         symlink to the versioned wrapper: $WRAPPER_SRC"
+                BACKUP="$WRAPPER_DEST.replaced-by-installer"
+                if cp -p "$WRAPPER_DEST" "$BACKUP" 2>/dev/null; then
+                    echo "         Previous file backed up to: $BACKUP"
+                fi
+            fi
+        fi
+        ln -sf "$WRAPPER_SRC" "$WRAPPER_DEST"
+        echo "  CLI installed: $WRAPPER_DEST -> $WRAPPER_SRC"
+    fi
+
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *)
+            echo "  [note] $BIN_DIR is not on your PATH. Add it so 'herdr-remote' resolves, e.g.:"
+            echo "         export PATH=\"$BIN_DIR:\$PATH\""
+            ;;
+    esac
+}
+install_cli_wrapper
+
+echo ""
+
 # --- Smoke test ---
 
 echo "Running smoke test..."
@@ -1580,6 +1644,7 @@ fi
 echo "  Logs:       $LOG_DIR/"
 echo "  Config:     $CONFIG_FILE"
 echo "  Secrets:    $SECRETS_FILE"
+[ -e "$HOME/.local/bin/herdr-remote" ] && echo "  CLI:        $HOME/.local/bin/herdr-remote (start | stop | status | url | token)"
 echo ""
 echo "Commands:"
 echo "  Relay log:    tail -f $LOG_DIR/relay.log"

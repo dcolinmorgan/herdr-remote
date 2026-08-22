@@ -15,7 +15,9 @@
 #
 # This is the canonical copy - keep it in the repo, not only in
 # ~/.local/bin, so it's versioned and reviewable like everything else
-# here. Symlink it into place:
+# here. relay/install-service.sh symlinks it onto PATH for you (at
+# ~/.local/bin/herdr-remote) and warns if a different file is already
+# there. To place it by hand instead:
 #   ln -sf "$(pwd)/relay/herdr-remote" ~/.local/bin/herdr-remote
 set -uo pipefail
 
