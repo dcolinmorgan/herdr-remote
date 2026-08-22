@@ -4,7 +4,7 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, hashlib, json, logging, os, re, shutil, signal, socket, subprocess, threading, time
+import asyncio, hashlib, json, logging, os, re, shlex, shutil, signal, socket, subprocess, threading, time
 
 try:
     from websockets.asyncio.server import serve
@@ -27,6 +27,18 @@ except ModuleNotFoundError:
     _agent_state_module = module_from_spec(_agent_state_spec)
     _agent_state_spec.loader.exec_module(_agent_state_module)
     complete_agent_update_message = _agent_state_module.complete_agent_update_message
+
+try:
+    import transcript
+except ModuleNotFoundError:
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    _transcript_spec = spec_from_file_location(
+        "herdr_remote_transcript",
+        os.path.join(os.path.dirname(__file__), "transcript.py"),
+    )
+    transcript = module_from_spec(_transcript_spec)
+    _transcript_spec.loader.exec_module(transcript)
 
 def _get_log_dir():
     if sys.platform == "darwin":
@@ -133,6 +145,10 @@ last_statuses = {}
 last_blocked_prompts = {}
 event_queue = asyncio.Queue()
 pane_remote_map = {}
+# pane_id -> the raw agent_session ref herdr reports (kind id|path + value). Kept server-side
+# rather than broadcast: it is the transcript lookup key, and no client needs to know a session
+# uuid to ask for that pane's history.
+pane_session_map = {}
 known_panes = set()
 agent_cache = {}
 _remote_locks = {}
@@ -457,6 +473,43 @@ _load_push_subs()
 _load_active_sessions()
 
 
+def _ssh_base_args():
+    """SSH options every remote invocation shares, with connection reuse where it is available.
+
+    The poll loop dials every configured host once per POLL_INTERVAL, and each dial used to be a
+    full TCP + auth handshake -- 30 handshakes a minute per host at a 2s interval. ControlMaster
+    keeps one connection alive across ticks instead. `%C` hashes user/host/port into a
+    fixed-width name so the control socket path stays inside the ~104-byte AF_UNIX limit; if the
+    path would still be too long, or we are on Windows (whose OpenSSH has no multiplexing), we
+    simply run without it rather than break every remote read.
+    """
+    base = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
+    if sys.platform == "win32":
+        return base
+    control_path = os.environ.get("HERDR_SSH_CONTROL_PATH") or os.path.join(LOG_DIR, "ssh-%C")
+    if len(control_path) > 90:
+        log.warning("SSH control path too long (%d chars); running without multiplexing", len(control_path))
+        return base
+    return base + [
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={control_path}",
+        "-o", "ControlPersist=60s",
+    ]
+
+
+SSH_BASE_ARGS = _ssh_base_args()
+
+
+def _remote_lock(remote):
+    """One lock per SSH target, so concurrent readers queue instead of racing the connection."""
+    with _remote_locks_guard:
+        remote_lock = _remote_locks.get(remote)
+        if remote_lock is None:
+            remote_lock = threading.Lock()
+            _remote_locks[remote] = remote_lock
+        return remote_lock
+
+
 def _invoke_herdr(*args, remote=None):
     """Run one herdr command, locally or over SSH. BLOCKING -- never call this from the loop.
 
@@ -470,17 +523,12 @@ def _invoke_herdr(*args, remote=None):
     """
     session = active_session_for(remote)
     if remote:
-        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote]
+        cmd = ["ssh", *SSH_BASE_ARGS, remote]
         if session:
             # An env= would not survive ssh; the remote shell applies this.
             cmd.append(f"HERDR_SESSION={session}")
         cmd += [REMOTE_HERDR, *args]
-        with _remote_locks_guard:
-            remote_lock = _remote_locks.get(remote)
-            if remote_lock is None:
-                remote_lock = threading.Lock()
-                _remote_locks[remote] = remote_lock
-        with remote_lock:
+        with _remote_lock(remote):
             return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
 
     cmd = [HERDR, *args]
@@ -488,6 +536,21 @@ def _invoke_herdr(*args, remote=None):
         cmd, capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=15, env=_herdr_env(session),
     )
+
+
+def transcript_ssh(remote, script, ssh_args=()):
+    """Run a transcript probe on a remote host, behind the same per-host lock as everything else.
+
+    Bytes, not text: the reply is a framed header plus a raw tail of the transcript, and the cut
+    has to be made on a byte boundary before anything tries to decode it.
+    """
+    cmd = ["ssh", *ssh_args, remote, "sh -c " + shlex.quote(script)]
+    with _remote_lock(remote):
+        proc = subprocess.run(cmd, capture_output=True, timeout=transcript.REMOTE_TIMEOUT)
+    if proc.returncode != 0:
+        log.warning("transcript ssh on %s exited %s: %s", remote, proc.returncode,
+                    proc.stderr.decode("utf-8", "replace").strip()[:200])
+    return proc.returncode, proc.stdout
 
 
 def run_herdr_result(*args, remote=None):
@@ -543,6 +606,25 @@ def activity_title(title, agent):
     return title
 
 
+def pane_session_ref(pane):
+    """The agent-session ref herdr reports for a pane, or None when it can't be trusted.
+
+    herdr keeps reporting the LAST session a pane announced, so relaunching a pane under a
+    different harness leaves the previous one's ref behind (a pane running pi still advertising a
+    claude uuid). The ref carries its own `agent` name, so compare it against the pane's before
+    believing it; a server that omits the field stays permissive.
+    """
+    session = pane.get("agent_session")
+    if not isinstance(session, dict):
+        return None
+    if session.get("kind") not in {"id", "path"} or not session.get("value"):
+        return None
+    reported = session.get("agent")
+    if reported and reported != pane.get("agent"):
+        return None
+    return session
+
+
 def get_agents_from_host(remote=None):
     raw = run_herdr("pane", "list", remote=remote)
     host_label = remote or "local"
@@ -550,30 +632,49 @@ def get_agents_from_host(remote=None):
         data = json.loads(raw)
         panes = data.get("result", {}).get("panes", [])
         workspace_labels = get_workspace_labels(remote=remote) if panes else {}
-        return [
-            {
-                "pane_id": p["pane_id"],
-                "agent": p.get("agent", ""),
-                "label": p.get("label", ""),
-                # Names the space, and stands in for panes that have no label.
-                "workspace_label": workspace_labels.get(p.get("workspace_id", ""), ""),
-                # A working claude sets its terminal title to what it is doing, so this is live
-                # activity rather than a stable session name. Idle and done panes report either
-                # nothing or the harness's own banner, which says less than the cwd it would
-                # displace on a client, so activity_title drops those.
-                "title": activity_title(p.get("terminal_title_stripped"), p.get("agent", "")),
-                "status": p.get("agent_status", "unknown"),
-                "cwd": p.get("cwd", ""),
-                "project": os.path.basename(p.get("cwd", "")),
-                "host": host_label,
-                "remote": remote,
-                "workspace_id": p.get("workspace_id", ""),
-                "tab_id": p.get("tab_id", ""),
-            }
-            for p in panes if p.get("agent")
-        ]
     except (json.JSONDecodeError, KeyError):
         return []
+
+    agents = []
+    for p in panes:
+        if not p.get("agent"):
+            continue
+        session = pane_session_ref(p)
+        if session:
+            pane_session_map[p["pane_id"]] = session
+        else:
+            pane_session_map.pop(p["pane_id"], None)
+        # `scroll` says what a scrollback read could ever yield: an agent on the alternate screen
+        # reports max_offset_from_bottom 0 (verified across every agent pane on this host), so a
+        # client can tell "nothing behind the viewport, don't offer to load older" from "there are
+        # 9k lines back there" without a probe read. Shell panes are the ones with a ring; they
+        # aren't listed yet, but the field is theirs too.
+        scroll = p.get("scroll") or {}
+        agents.append({
+            "pane_id": p["pane_id"],
+            "agent": p.get("agent", ""),
+            "label": p.get("label", ""),
+            # Names the space, and stands in for panes that have no label.
+            "workspace_label": workspace_labels.get(p.get("workspace_id", ""), ""),
+            "status": p.get("agent_status", "unknown"),
+            "cwd": p.get("cwd", ""),
+            "project": os.path.basename(p.get("cwd", "")),
+            "host": host_label,
+            "remote": remote,
+            "workspace_id": p.get("workspace_id", ""),
+            "tab_id": p.get("tab_id", ""),
+            # A working claude sets its terminal title to what it is doing, so this is live
+            # activity rather than a stable session name. Idle and done panes report either
+            # nothing or the harness's own banner, which says less than the cwd it would
+            # displace on a client, so activity_title drops those.
+            "title": activity_title(p.get("terminal_title_stripped"), p.get("agent", "")),
+            "scrollback": scroll.get("max_offset_from_bottom", 0),
+            "viewport_rows": scroll.get("viewport_rows", 0),
+            # Whether this pane names a transcript at all -- the client's cue for offering a
+            # history view. The ref itself stays in pane_session_map.
+            "has_session": session is not None,
+        })
+    return agents
 
 
 def get_all_agents():
@@ -622,6 +723,7 @@ def update_pane_maps(agents):
         known_panes.difference_update(stale)
         for pane_id in stale:
             pane_remote_map.pop(pane_id, None)
+            pane_session_map.pop(pane_id, None)
             last_statuses.pop(pane_id, None)
             last_blocked_prompts.pop(pane_id, None)
             agent_cache.pop(pane_id, None)
@@ -769,8 +871,30 @@ async def broadcast_sessions():
     await broadcast(msg)
 
 
+# Source for every read the relay makes on its own initiative (poll loop, respond, send_keys).
+#
+# `visible` -- the rendered viewport -- NOT `recent`. In text format a `recent` read of more lines
+# than the pane is tall makes herdr harvest an alt-screen agent's scrollback through the agent's
+# own mouse-scroll interface. Measured on herdr 0.8.0: 200 lines took 6.2s, 400 took 12.7s
+# (~31ms/line), it only works while the agent is idle, it is not even deterministic (a first
+# attempt returned the viewport and nothing else), and the operator watches their terminal scroll
+# up and snap back once per read. This function runs on every poll tick for every blocked pane and
+# again before every respond/send_keys, so it has to be free. `visible` is immune by construction:
+# it IS the rendered grid, clamped to it however many lines are asked for.
+#
+# The conversation history the harvest was reaching for is not this function's job -- see
+# get_history: it belongs in the agent's own transcript, which has real message boundaries and
+# costs nothing.
+PROMPT_READ_SOURCE = "visible"
+
+# Sources herdr accepts on `pane read` (CLI spelling -- the socket wants recent_unwrapped, the CLI
+# wants recent-unwrapped), and the line ceiling herdr silently enforces.
+READ_SOURCES = {"visible", "recent", "recent-unwrapped", "detection"}
+MAX_READ_LINES = 1000
+
+
 def read_pane(pane_id, remote=None):
-    raw = run_herdr("pane", "read", pane_id, "--lines", "100", "--source", "recent", remote=remote)
+    raw = run_herdr("pane", "read", pane_id, "--lines", "100", "--source", PROMPT_READ_SOURCE, remote=remote)
     lines = [l for l in raw.splitlines() if l.strip() and not CHROME_RE.search(l)]
     display_lines = lines[-50:]
     question = detect_question("\n".join(lines))
@@ -1477,15 +1601,31 @@ async def handle_client(ws):
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
-                lines = msg.get("lines", "30")
                 read_format = msg.get("format", "text")
                 if read_format not in {"text", "ansi"}:
                     await ws.send(json.dumps({"type": "error", "message": "invalid pane read format"}))
                     continue
+                # herdr clamps pane.read at ~1000 lines and does not say so (`truncated` stays
+                # true either way): 999/1000/1500/5000 all came back with the same 1000 rows.
+                # Asking for more only buys a bigger request, so refuse to pretend.
+                try:
+                    lines = max(1, min(int(msg.get("lines", 30)), MAX_READ_LINES))
+                except (TypeError, ValueError):
+                    await ws.send(json.dumps({"type": "error", "message": "invalid pane read lines"}))
+                    continue
+                # Clients pick the source: `visible` for a live mirror poll (free, viewport only),
+                # `recent`/`recent-unwrapped` when the user explicitly asks for scrollback. Note
+                # `recent` + text on an alt-screen agent pane is the multi-second harvest that
+                # scrolls the operator's terminal (see PROMPT_READ_SOURCE) -- it is allowed here
+                # because it is user-initiated, not because it is cheap.
+                read_source = str(msg.get("source", "recent")).replace("_", "-")
+                if read_source not in READ_SOURCES:
+                    await ws.send(json.dumps({"type": "error", "message": "invalid pane read source"}))
+                    continue
                 remote = pane_remote_map.get(pane_id)
                 content = await asyncio.to_thread(
                     run_herdr,
-                    "pane", "read", pane_id, "--lines", str(lines), "--source", "recent",
+                    "pane", "read", pane_id, "--lines", str(lines), "--source", read_source,
                     "--format", read_format, remote=remote
                 )
                 await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content}))
@@ -1494,18 +1634,42 @@ async def handle_client(ws):
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
-                remote = pane_remote_map.get(pane_id)
-                # Try to read conversation history from agent's session log
-                history = await asyncio.to_thread(
-                    run_herdr, "agent", "history", pane_id, "--format", "json", remote=remote
-                )
-                messages = []
+                # History comes from the agent's own transcript, not from the terminal: an agent
+                # TUI runs on the alternate screen, so herdr kept no scrollback for it, and the
+                # one read that does reach older rows costs ~31ms per line and scrolls the
+                # operator's terminal. What used to stand here called `herdr agent history`, a
+                # command that does not exist.
+                #
+                # The session uuid never crosses the wire in either direction: the client sends a
+                # pane_id, the relay looks the ref up in pane_session_map (which it populates from
+                # `pane list`), and transcript.history validates it before it touches a path.
                 try:
-                    data = json.loads(history) if history else {}
-                    messages = data.get("messages", data.get("history", []))
-                except Exception:
-                    pass
-                await ws.send(json.dumps({"type": "history", "pane_id": pane_id, "messages": messages}))
+                    limit = int(msg.get("limit", transcript.DEFAULT_LIMIT))
+                except (TypeError, ValueError):
+                    await ws.send(json.dumps({"type": "error", "message": "invalid history limit"}))
+                    continue
+                before = msg.get("before")
+                if before is not None and not isinstance(before, str):
+                    await ws.send(json.dumps({"type": "error", "message": "invalid history cursor"}))
+                    continue
+                remote = pane_remote_map.get(pane_id)
+                pane = agent_cache.get(pane_id) or {}
+                # Off the event loop: a cold read of the biggest transcript on this machine (33MB)
+                # measured 0.29s, and a remote one is an SSH round trip. Neighbouring handlers
+                # block the loop on their subprocess; this one is too slow to join them.
+                body = await asyncio.to_thread(
+                    transcript.history,
+                    pane_session_map.get(pane_id),
+                    remote=remote,
+                    limit=limit,
+                    before=before or None,
+                    include_tools=bool(msg.get("include_tools")),
+                    agent=pane.get("agent", ""),
+                    ssh_args=SSH_BASE_ARGS,
+                    remote_runner=transcript_ssh,
+                    log=log,
+                )
+                await ws.send(json.dumps({"type": "history", "pane_id": pane_id, **body}))
             elif msg_type == "send_keys":
                 pane_id = msg["pane_id"]
                 request_id = msg.get("request_id")

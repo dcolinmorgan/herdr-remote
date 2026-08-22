@@ -1051,9 +1051,10 @@ class RelayResponseTests(unittest.TestCase):
                  mock.patch.object(relay.subprocess, "run", return_value=completed) as run:
                 asyncio.run(relay.handle_client(ws))
 
-            command_prefix = [
-                "ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, relay.REMOTE_HERDR
-            ]
+            # Built from the relay's own option list: the flags are its business (it added
+            # connection multiplexing), the ORDER -- options, then target, then remote binary --
+            # is the contract this test is here to hold.
+            command_prefix = ["ssh", *relay.SSH_BASE_ARGS, remote, relay.REMOTE_HERDR]
             self.assertEqual(
                 [call.args[0] for call in run.call_args_list],
                 [
@@ -1810,8 +1811,9 @@ class RelaySubprocessConcurrencyTests(unittest.TestCase):
             def command_target(command):
                 if command[0] != "ssh":
                     return "local"
-                batch_mode_index = command.index("BatchMode=yes")
-                return command[batch_mode_index + 1]
+                # The SSH target sits directly after the shared option list, however long that
+                # list is (it grew when multiplexing was added).
+                return command[1 + len(relay.SSH_BASE_ARGS)]
 
             def fake_subprocess_run(command, **kwargs):
                 target = command_target(command)
@@ -1957,6 +1959,237 @@ def _dotted(node):
         parts.append(node.id)
         return ".".join(reversed(parts))
     return None
+
+
+
+
+class RelayPaneReadSourceTests(unittest.TestCase):
+    """Reads the relay makes on a timer must never harvest an agent's scrollback.
+
+    A `recent` read in text format walks the agent's own mouse-scroll interface: measured on herdr
+    0.8.0 at 6.2s for 200 lines, only while the agent is idle, and it scrolls the operator's
+    terminal. read_pane runs on every poll tick for every blocked pane.
+    """
+
+    def test_prompt_reads_use_the_rendered_viewport(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value="a question") as run:
+                relay.read_pane("w0:p1")
+            self.assertEqual(
+                run.call_args.args,
+                ("pane", "read", "w0:p1", "--lines", "100", "--source", "visible"),
+            )
+
+    def test_client_read_picks_its_own_source_and_is_clamped_to_herdrs_ceiling(self):
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({
+                "type": "read_pane", "pane_id": pane_id,
+                # `recent_unwrapped` is the socket spelling; the CLI wants the hyphen.
+                "lines": 9000, "source": "recent_unwrapped", "format": "ansi",
+            })])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "run_herdr", return_value="output") as run:
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(
+                run.call_args.args,
+                ("pane", "read", pane_id, "--lines", str(relay.MAX_READ_LINES),
+                 "--source", "recent-unwrapped", "--format", "ansi"),
+            )
+
+    def test_client_read_refuses_an_unknown_source(self):
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({
+                "type": "read_pane", "pane_id": pane_id, "source": "scrollback",
+            })])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "run_herdr") as run:
+                asyncio.run(relay.handle_client(ws))
+            run.assert_not_called()
+            self.assertEqual(
+                json.loads(ws.sent[0]),
+                {"type": "error", "message": "invalid pane read source"},
+            )
+
+
+class RelayPaneFieldTests(unittest.TestCase):
+    """`pane list` already reports these; dropping them cost the clients real capability."""
+
+    PANE_LIST = {
+        "result": {
+            "panes": [
+                {
+                    "pane_id": "w0:p1", "agent": "claude", "agent_status": "idle",
+                    "cwd": "/home/dev/project", "workspace_id": "w0", "tab_id": "w0:t1",
+                    # A working title, not the harness banner: activity_title drops the banner
+                    # (RelayTerminalTitleTests covers that), so a banner here would prove nothing
+                    # about whether the field is carried through at all.
+                    "terminal_title_stripped": "fix the poll tick",
+                    "agent_session": {"agent": "claude", "kind": "id", "value": "abc-123"},
+                    "scroll": {"offset_from_bottom": 0, "max_offset_from_bottom": 0,
+                               "viewport_rows": 67},
+                },
+                {
+                    # A shell pane: no agent, so it is still filtered out (that is P2's job), and
+                    # it is the pane shape that HAS a scrollback ring.
+                    "pane_id": "w0:p2", "agent": None, "agent_status": "unknown",
+                    "cwd": "/home/dev/project", "workspace_id": "w0", "tab_id": "w0:t1",
+                    "scroll": {"offset_from_bottom": 0, "max_offset_from_bottom": 9612,
+                               "viewport_rows": 33},
+                },
+            ]
+        }
+    }
+
+    def test_agent_entries_carry_scrollback_depth_title_and_session_presence(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=json.dumps(self.PANE_LIST)):
+                agents = relay.get_agents_from_host()
+
+            self.assertEqual([a["pane_id"] for a in agents], ["w0:p1"])
+            agent = agents[0]
+            self.assertEqual(agent["title"], "fix the poll tick")
+            # An agent TUI on the alternate screen: nothing behind the viewport, which is how a
+            # client knows not to offer "load older".
+            self.assertEqual(agent["scrollback"], 0)
+            self.assertEqual(agent["viewport_rows"], 67)
+            self.assertTrue(agent["has_session"])
+            # The ref itself stays server-side -- no client needs a session uuid.
+            self.assertNotIn("agent_session", agent)
+            self.assertEqual(relay.pane_session_map["w0:p1"]["value"], "abc-123")
+
+    def test_a_session_reported_for_a_different_harness_is_not_trusted(self):
+        """herdr keeps reporting the LAST session a pane announced, across harness swaps."""
+        panes = json.loads(json.dumps(self.PANE_LIST))
+        panes["result"]["panes"][0]["agent"] = "pi"
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=json.dumps(panes)):
+                agents = relay.get_agents_from_host()
+            self.assertFalse(agents[0]["has_session"])
+            self.assertNotIn("w0:p1", relay.pane_session_map)
+
+    def test_stale_panes_drop_their_session_ref(self):
+        with loaded_relay() as relay:
+            relay.known_panes.add("gone")
+            relay.pane_session_map["gone"] = {"kind": "id", "value": "abc-123"}
+            relay.update_pane_maps([])
+            self.assertNotIn("gone", relay.pane_session_map)
+
+    def test_get_history_reports_why_it_has_nothing_and_spawns_nothing(self):
+        """A pane that names no session gets that as the answer -- not a bare empty list, which
+        read as 'this pane has no history' on every pane of every relay."""
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({"type": "get_history", "pane_id": pane_id})])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "run_herdr") as run:
+                asyncio.run(relay.handle_client(ws))
+            # No herdr subprocess, and for a remote pane no SSH round trip: the answer comes from
+            # state the poll loop already has.
+            run.assert_not_called()
+            self.assertEqual(
+                json.loads(ws.sent[0]),
+                {"type": "history", "pane_id": pane_id, "messages": [], "total": 0,
+                 "has_more": False, "title": "", "agent": "", "file_truncated": False,
+                 "unavailable": "no-session"},
+            )
+
+    def test_get_history_reads_the_transcript_the_pane_names(self):
+        pane_id = "w0:p1"
+        session_id = "1b3d9f8a-2c4e-4a6b-8d0f-112233445566"
+        rows = [
+            {"type": "ai-title", "aiTitle": "porting the reader"},
+            {"type": "user", "uuid": "u1", "timestamp": "2026-08-21T00:00:00Z",
+             "message": {"role": "user", "content": "does this work?"}},
+            {"type": "assistant", "uuid": "a1", "timestamp": "2026-08-21T00:00:01Z",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "it does"}]}},
+        ]
+        with loaded_relay() as relay, tempfile.TemporaryDirectory() as root:
+            project = Path(root) / "-home-someone-project"
+            project.mkdir()
+            (project / f"{session_id}.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+            )
+            relay.transcript.LOCAL_ROOTS = [root]
+            relay.transcript.cache_clear()
+            relay.known_panes.add(pane_id)
+            relay.agent_cache[pane_id] = {"pane_id": pane_id, "agent": "claude"}
+            relay.pane_session_map[pane_id] = {"kind": "id", "value": session_id}
+            ws = _FakeWebSocket([json.dumps({"type": "get_history", "pane_id": pane_id})])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "run_herdr") as run:
+                asyncio.run(relay.handle_client(ws))
+            run.assert_not_called()
+            payload = json.loads(ws.sent[0])
+        self.assertEqual(payload["unavailable"], None)
+        self.assertEqual(payload["title"], "porting the reader")
+        self.assertEqual(payload["agent"], "claude")
+        self.assertEqual([(m["role"], m["text"]) for m in payload["messages"]],
+                         [("user", "does this work?"), ("assistant", "it does")])
+        self.assertEqual(payload["total"], 2)
+        self.assertFalse(payload["has_more"])
+
+    def test_get_history_refuses_a_nonsense_cursor_type(self):
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps(
+                {"type": "get_history", "pane_id": pane_id, "before": {"not": "a cursor"}}
+            )])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()):
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(json.loads(ws.sent[0]),
+                             {"type": "error", "message": "invalid history cursor"})
+
+    def test_get_history_on_a_remote_pane_runs_one_locked_ssh_probe(self):
+        pane_id = "w0:p1"
+        session_id = "1b3d9f8a-2c4e-4a6b-8d0f-112233445566"
+        row = json.dumps({"type": "user", "uuid": "u1", "timestamp": "2026-08-21T00:00:00Z",
+                          "message": {"role": "user", "content": "from the far side"}})
+        body = (f"SIZE {len(row) + 1}\n" + row + "\n").encode()
+        with loaded_relay() as relay:
+            relay.transcript.cache_clear()
+            relay.known_panes.add(pane_id)
+            relay.pane_remote_map[pane_id] = "build-box"
+            relay.agent_cache[pane_id] = {"pane_id": pane_id, "agent": "claude"}
+            relay.pane_session_map[pane_id] = {"kind": "id", "value": session_id}
+            completed = subprocess.CompletedProcess([], 0, stdout=body, stderr=b"")
+            ws = _FakeWebSocket([json.dumps({"type": "get_history", "pane_id": pane_id})])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay.subprocess, "run", return_value=completed) as run:
+                asyncio.run(relay.handle_client(ws))
+            payload = json.loads(ws.sent[0])
+            command = run.call_args[0][0]
+        self.assertEqual(payload["unavailable"], None)
+        self.assertEqual([m["text"] for m in payload["messages"]], ["from the far side"])
+        self.assertFalse(payload["file_truncated"])
+        # Same SSH terms as every other remote read, and the whole script is one argv element.
+        self.assertEqual(command[:1 + len(relay.SSH_BASE_ARGS) + 1],
+                         ["ssh", *relay.SSH_BASE_ARGS, "build-box"])
+        self.assertEqual(len(command), 1 + len(relay.SSH_BASE_ARGS) + 2)
+        self.assertIn(f"{session_id}.jsonl", command[-1])
+        self.assertTrue(command[-1].startswith("sh -c "))
+
+
+class RelaySshMultiplexingTests(unittest.TestCase):
+    def test_remote_invocations_reuse_one_connection(self):
+        with loaded_relay() as relay:
+            if sys.platform == "win32":
+                self.skipTest("OpenSSH on Windows has no connection multiplexing")
+            args = relay.SSH_BASE_ARGS
+            self.assertIn("ControlMaster=auto", args)
+            self.assertIn("ControlPersist=60s", args)
+            control_path = next(a for a in args if a.startswith("ControlPath="))
+            # %C hashes user/host/port to a fixed width so the socket path stays inside the
+            # ~104-byte AF_UNIX limit.
+            self.assertTrue(control_path.endswith("%C"), control_path)
+            self.assertLess(len(control_path), 104)
+            # Options first, then the target, then the remote binary -- callers index on that.
+            self.assertEqual(args[:4], ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"])
 
 
 if __name__ == "__main__":
