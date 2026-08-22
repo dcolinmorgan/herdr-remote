@@ -859,7 +859,10 @@ function renderSessionSelector() {
 
 function toggleSessionMenu() {
   const menu = document.getElementById('sessionMenu');
-  const show = menu.style.display === 'none';
+  // Read the computed style, not the inline one: the menu starts hidden via
+  // the stylesheet, so menu.style.display is '' on the first click and an
+  // inline-only check would silently "close" an already-closed menu.
+  const show = getComputedStyle(menu).display === 'none';
   menu.style.display = show ? 'block' : 'none';
   document.getElementById('sessionSelector').setAttribute('aria-expanded', String(show));
 }
