@@ -112,13 +112,15 @@ class WebKeyPadTests(unittest.TestCase):
     def test_the_pad_leaves_the_terminal_most_of_the_phone(self):
         """The complaint that started this: the dock ate a third of the screen, then half.
 
-        Four rows of 44px plus three rows of presets measured 271px closed and 415px open on a
-        390x844 phone. Five columns fold the modifiers into the arrows' spare column, so the pad is
-        three rows, and the presets are four columns instead of three.
+        Measured on a 390x844 phone across three revisions: four rows of 44px was 271px closed and
+        415px with presets open; five columns and three rows was 205 / 301; seven columns and two
+        rows, with the pad switch and the presets disclosure sharing one line, is 121 / 201. The
+        ceilings are set just above the last of those, so the pad cannot grow back into the
+        terminal without a test saying so.
         """
         for label, expression, ceiling in (
-            ("closed", "() => 0", 0.28),
-            ("open", "() => toggleCtrlPresets()", 0.40),
+            ("closed", "() => 0", 0.16),
+            ("open", "() => toggleCtrlPresets()", 0.25),
         ):
             with self.subTest(presets=label):
                 self.page.evaluate(expression)
@@ -129,16 +131,56 @@ class WebKeyPadTests(unittest.TestCase):
         self.page.evaluate("() => toggleCtrlPresets()")
 
     def test_no_key_label_is_clipped_by_the_narrower_cells(self):
-        """Five columns and four preset columns is the cost of the three-row pad."""
+        """Seven columns is ~49px a cell at 390px wide, which is what "PgUp" has to survive."""
         self.page.evaluate("() => toggleCtrlPresets()")
         try:
             clipped = self.page.evaluate(
-                """() => [...document.querySelectorAll('#keysPad button, #ctrlPresets button')]
+                """() => [...document.querySelectorAll(
+                       '#keysPad button, #ctrlPresets button, .keys-bar button, #quickDock button')]
                      .filter(b => b.scrollWidth > b.clientWidth + 1)
                      .map(b => b.textContent.trim())""")
         finally:
             self.page.evaluate("() => toggleCtrlPresets()")
         self.assertEqual(clipped, [])
+
+    def test_the_pad_is_two_rows(self):
+        """Not a proxy for the height check: rows are the thing that was traded for width."""
+        rows = self.page.evaluate(
+            """() => new Set([...document.querySelectorAll('#keysPad .keys-grid button')]
+                 .map(b => Math.round(b.getBoundingClientRect().top))).size""")
+        self.assertEqual(rows, 2)
+
+    def test_the_switch_and_the_presets_disclosure_share_a_line(self):
+        centres = self.page.evaluate(
+            """() => ['tabKeys', 'tabDigits', 'presetsBtn'].map(id => {
+                 const r = document.getElementById(id).getBoundingClientRect();
+                 return Math.round(r.top + r.height / 2); })""")
+        self.assertLessEqual(max(centres) - min(centres), 1,
+                             f"the control row broke into more than one line: {centres}")
+
+    def test_the_digit_pad_is_one_row(self):
+        """3x3 of 52px keys was 164px, taller than the whole keys pad it sits under."""
+        self.page.evaluate("() => switchKeyTab('digits')")
+        try:
+            rows, height = self.page.evaluate(
+                """() => [new Set([...document.querySelectorAll('#digitsPad button')]
+                            .map(b => Math.round(b.getBoundingClientRect().top))).size,
+                          document.getElementById('termKeys').getBoundingClientRect().height]""")
+        finally:
+            self.page.evaluate("() => switchKeyTab('keys')")
+        self.assertEqual(rows, 1)
+        self.assertLess(height, PHONE["height"] * 0.13)
+
+    def test_the_presets_disclosure_leaves_with_the_pad_it_opens(self):
+        """It shares its line with the switch now, so it no longer hides along with the pad."""
+        self.page.evaluate("() => switchKeyTab('digits')")
+        try:
+            self.assertFalse(self.page.evaluate(
+                "() => !!document.getElementById('presetsBtn').offsetParent"))
+        finally:
+            self.page.evaluate("() => switchKeyTab('keys')")
+        self.assertTrue(self.page.evaluate(
+            "() => !!document.getElementById('presetsBtn').offsetParent"))
 
     def test_every_pad_button_stays_inside_the_viewport(self):
         widest = self.page.evaluate(
@@ -293,6 +335,146 @@ class WebPanelLayeringTests(unittest.TestCase):
                 "&& document.getElementById('terminalView').offsetHeight > 0"))
         finally:
             self.page.set_viewport_size(PHONE)
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebToggleStateTests(unittest.TestCase):
+    """Every toggle in the session view has to look different open than closed.
+
+    Search, History and the two docks all used to render pixel-identical either way -- the only
+    clue that a dock was open was the dock itself, and for Search and History not even that once
+    the panel was scrolled past. So each one is checked twice: `aria-pressed` for the attribute the
+    CSS and the screen reader both read, and the computed background for the pixels a thumb sees.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._playwright = sync_playwright().start()
+        cls._browser = cls._playwright.chromium.launch(executable_path=_chrome())
+        cls.page = cls._browser.new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._browser.close()
+        cls._playwright.stop()
+
+    def setUp(self):
+        self.page.evaluate("""() => {
+          document.getElementById('terminalView').classList.add('active');
+          activePane = 'w0:p1';
+          ws = {readyState: 1, send: () => {}};
+          hideSearch(); hideHistory(); showDock(null);
+        }""")
+
+    def look(self, button_id):
+        return self.page.evaluate(
+            """(() => {
+              const el = document.getElementById(ID);
+              const cs = getComputedStyle(el);
+              return {pressed: el.getAttribute('aria-pressed'),
+                      bg: cs.backgroundColor, fg: cs.color, border: cs.borderTopColor};
+            })()""".replace("ID", json.dumps(button_id)))
+
+    def assert_lights(self, button_id, open_js, close_js):
+        off = self.look(button_id)
+        self.assertEqual(off["pressed"], "false")
+        self.page.evaluate(open_js)
+        on = self.look(button_id)
+        self.assertEqual(on["pressed"], "true")
+        self.assertNotEqual(on["bg"], off["bg"], f"{button_id} looks the same open as closed")
+        self.assertNotEqual(on["fg"], off["fg"], f"{button_id} keeps its closed foreground")
+        self.page.evaluate(close_js)
+        self.assertEqual(self.look(button_id)["pressed"], "false")
+
+    def test_the_search_button_lights_while_the_bar_is_open(self):
+        self.assert_lights("searchBtn", "() => toggleSearch()", "() => toggleSearch()")
+
+    def test_the_history_button_lights_while_the_panel_is_open(self):
+        self.assert_lights("historyBtn", "() => toggleHistory()", "() => toggleHistory()")
+
+    def test_the_keys_dock_button_lights_while_the_dock_is_up(self):
+        self.assert_lights("keysDockBtn", "() => toggleKeysDock()", "() => toggleKeysDock()")
+
+    def test_the_quick_dock_button_lights_while_the_dock_is_up(self):
+        self.assert_lights("quickDockBtn", "() => toggleQuickDock()", "() => toggleQuickDock()")
+
+    def test_opening_one_dock_unlights_the_other(self):
+        """They are mutually exclusive, so the closed one has to be un-lit, not merely hidden."""
+        self.page.evaluate("() => toggleKeysDock()")
+        self.page.evaluate("() => toggleQuickDock()")
+        self.assertEqual(self.look("keysDockBtn")["pressed"], "false")
+        self.assertEqual(self.look("quickDockBtn")["pressed"], "true")
+
+    def test_search_and_history_unlight_each_other(self):
+        """They share the space under the header, so opening one closes -- and dims -- the other."""
+        self.page.evaluate("() => toggleHistory()")
+        self.page.evaluate("() => toggleSearch()")
+        self.assertEqual(self.look("historyBtn")["pressed"], "false")
+        self.assertEqual(self.look("searchBtn")["pressed"], "true")
+        self.page.evaluate("() => toggleHistory()")
+        self.assertEqual(self.look("searchBtn")["pressed"], "false")
+        self.assertEqual(self.look("historyBtn")["pressed"], "true")
+
+    def test_search_closing_history_also_drops_its_history_entry(self):
+        """It used to hide the panel directly, leaving a nav layer with nothing behind it."""
+        self.page.evaluate("() => toggleHistory()")
+        self.page.evaluate("() => toggleSearch()")
+        self.assertNotIn("history", self.page.evaluate("() => navStack.map(l => l.key)"))
+
+    def test_the_pad_switch_shows_which_pad_is_up(self):
+        self.page.evaluate("() => switchKeyTab('digits')")
+        try:
+            self.assertEqual(self.look("tabDigits")["pressed"], "true")
+            self.assertEqual(self.look("tabKeys")["pressed"], "false")
+        finally:
+            self.page.evaluate("() => switchKeyTab('keys')")
+        self.assertEqual(self.look("tabKeys")["pressed"], "true")
+
+    def test_the_presets_disclosure_says_whether_it_is_open(self):
+        """A text disclosure, not a chip, so it says it with its colour and its chevron -- the
+        chevron alone was the old signal and it is 7px of glyph on a phone."""
+        off = self.look("presetsBtn")
+        self.assertEqual(off["pressed"], "false")
+        self.page.evaluate("() => toggleCtrlPresets()")
+        try:
+            on = self.look("presetsBtn")
+            self.assertEqual(on["pressed"], "true")
+            self.assertNotEqual(on["fg"], off["fg"], "the disclosure keeps its closed colour")
+            self.assertEqual(
+                self.page.evaluate("() => document.getElementById('ctrlChevron').textContent"),
+                "\u25be")
+        finally:
+            self.page.evaluate("() => toggleCtrlPresets()")
+        self.assertEqual(self.look("presetsBtn")["pressed"], "false")
+
+    def test_the_refresh_button_is_not_dressed_as_a_toggle(self):
+        """It fires and returns; a pressed state on it would be a lie, and the contrast with the
+        two chips beside it is what says those two are toggles."""
+        self.assertIsNone(self.page.evaluate(
+            "() => document.querySelector('.refresh-btn').getAttribute('aria-pressed')"))
+
+    def test_the_history_panel_starts_with_tool_calls_shown(self):
+        """A tool call is most of what a turn consists of, so hiding them by default read as a
+        conversation with holes in it. The chip is the way back to prose-only."""
+        self.assertTrue(self.page.evaluate("() => history_.tools"))
+        self.assertEqual(
+            self.page.evaluate(
+                "() => document.getElementById('historyToolsBtn').getAttribute('aria-pressed')"),
+            "true")
+
+    def test_the_history_request_carries_the_tool_flag_it_shows(self):
+        sent = self.page.evaluate("""() => {
+          const out = [];
+          history_.loading = false;
+          const real = ws;
+          ws = {readyState: 1, send: p => out.push(JSON.parse(p))};
+          loadHistory();
+          ws = real;
+          return out;
+        }""")
+        self.assertEqual([m["include_tools"] for m in sent], [True])
 
 
 if __name__ == "__main__":

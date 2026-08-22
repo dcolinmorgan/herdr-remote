@@ -130,10 +130,38 @@ holds and is what makes the escaping provable rather than remembered.
   playwright or chromium is missing; `tests/run.sh` step 9d runs every `tests/test_web_*.py`
   separately with playwright on the path).
 
+The history panel asks for tool turns **by default** (`history_.tools` starts `true`). The relay's
+own default is still `include_tools: false` — this is the web client's choice, because a tool call
+is most of what an agent's turn consists of and hiding them rendered a conversation with holes in
+it. It costs reach: tool turns spend page slots and characters from the same budget as the prose,
+so a page reaches less far back. The `Tools` chip is the way to prose-only.
+
 The key pad and the panel layering are geometry, so `tests/test_web_keys.py` measures them rather
 than reading the CSS. The arrow keys sit in a `grid-template-areas` inverted T — `up` shares its
-column with `down`, and the cell beside `up` is deliberately empty — and the test asserts the
-boxes, not the rule. Settings and Timeline are siblings of the session view, which is
+column with `down`, and the empty cell is above `left`, where a keyboard has nothing either — and
+the test asserts the boxes, not the rule. The pad is **seven columns and two rows**, sized against
+measurements at 390×844 across three revisions: four rows of 44px was 271px closed / 415px with
+presets open, five columns and three rows was 205 / 301, and seven columns with the pad switch and
+the presets disclosure sharing one line is **121 / 201**. Twelve keys need thirteen cells because of
+the arrows' empty corner, which makes seven the narrowest grid that fits two rows; `Enter` spans
+both rows, and no label clips down to a 320px viewport (40px a cell). The same pass took the digit
+pad from 3×3 of 52px keys (164px, taller than the keys pad above it) to **one row of nine**, and the
+quick dock from two labelled sections of 44px buttons to a 3×2 grid — colour already said which two
+were the confirm pair. Tests hold the dock under 16% / 25% of the screen, count the rows, and check
+every label for clipping, so none of it can grow back quietly.
+
+Every toggle in the session view says whether its panel is open through **`aria-pressed`**, and the
+CSS fills the chip off that attribute alone — `setPressed` is the only writer, so the pixels and the
+screen reader cannot drift apart. Search, History and the two dock buttons used to render pixel
+identical either way; they now fill with the *inverted neutral* (`--text` on `--bg`), which is
+unmistakably lit, carries no semantics of its own to clash with the orange/red keys, and is the one
+pair of colours guaranteed to contrast in all eleven themes — a blue fill sat next to the blue Send
+button and read as a second Send. Blue fill is reserved for *selection* (the Keys/123 switch, the
+`Tools` filter), and `refresh` deliberately has **no** pressed state at all: it fires and returns,
+and the contrast with the two chips beside it is what marks those two as toggles. Mutually
+exclusive pairs are restated together rather than one at a time (`showDock`, and `toggleSearch`
+routing history's close through `navClose` instead of hiding the element and orphaning its history
+entry). Settings and Timeline are siblings of the session view, which is
 `position: fixed; z-index: 50` over an opaque background below the 768px breakpoint: a panel
 opened from inside a session used to render in normal flow *underneath* it, present and
 unreachable. `openPanel` records what the panel covered in `panelReturn` and deactivates the

@@ -111,16 +111,21 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-header .back { background: none; border: none; color: var(--blue); font-size: 1.4rem; cursor: pointer; padding: 4px 8px; }
 .term-header .title { flex: 1; font-size: 0.8rem; font-weight: 500; }
 .term-header .refresh-btn { background: none; border: none; color: var(--muted); font-size: 1.1rem; cursor: pointer; }
-.term-header .search-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
-.term-header .search-btn:hover, .term-header .refresh-btn:hover, .term-header .history-btn:hover { color: var(--text); }
-.term-header .history-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
+/* Search and History open a panel; Refresh is a one-shot. Only the two toggles carry a pressed
+   state, and they carry it as a filled chip rather than a colour shift -- an icon that only
+   changes hue reads as "hovered", not as "this panel is open", and on a phone there is no hover
+   state to compare it against. Driven by `aria-pressed` so the pixels and the screen reader
+   cannot disagree, and the off state keeps a transparent border so nothing shifts when it fills. */
+.term-header .icon-toggle { background: none; border: 1px solid transparent; border-radius: 7px; color: var(--muted); cursor: pointer; padding: 4px; display: flex; align-items: center; }
+.term-header .icon-toggle:hover, .term-header .refresh-btn:hover { color: var(--text); }
+.term-header .icon-toggle[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
 /* top is set from the header's real height when the panel opens (positionHistoryPanel); 45px is
    the phone-sized fallback for a first paint before JS runs. */
 .term-history { position: absolute; top: 45px; left: 0; right: 0; bottom: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
 .term-history .hist-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .term-history .hist-title { font-size: 0.8rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .term-history .hist-toggle { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 0.65rem; padding: 3px 8px; cursor: pointer; }
-.term-history .hist-toggle[aria-pressed="true"] { color: var(--text); border-color: var(--blue); }
+.term-history .hist-toggle[aria-pressed="true"] { background: var(--blue); border-color: var(--blue); color: #fff; }
 .term-history .hist-find { flex: 1; min-width: 0; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.8rem; }
 .term-history .hist-find:focus { outline: none; border-color: var(--blue); }
 .term-history .hist-count { font-size: 0.65rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -220,7 +225,15 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-input { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; gap: 6px; background: var(--surface); flex-shrink: 0; }
 .term-input input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', Consolas, monospace; min-width: 0; }
 .term-input button:last-child { padding: 10px 14px; border-radius: 6px; border: none; background: var(--blue); color: #fff; font-weight: 700; font-size: 16px; flex-shrink: 0; }
-.term-keys { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 8px); }
+/* The keys and quick-action docks are toggles too, and they were the worst of the set: pixel
+   identical before and after a dock slid up right behind them. Same filled-chip vocabulary as the
+   header, so "lit" means the same thing everywhere in the session view. The per-button colour has
+   to live here rather than inline, or it would outrank the pressed rule. */
+.dock-toggle { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; flex-shrink: 0; display: flex; align-items: center; }
+.dock-toggle.dock-quick { color: var(--orange); }
+.dock-toggle.dock-keys { color: var(--muted); }
+.dock-toggle[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+.term-keys { border-top: 1px solid var(--border); padding: 6px 12px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; }
 .nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
 .nav-key:active { background: var(--border); transform: scale(0.97); }
 .mod-key { font-size: 12px; }
@@ -229,27 +242,43 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
    Tab/left/down/up across one row and right/Shift/Ctrl across the next, so the arrows neither
    aligned nor read in any keyboard order.
 
-   Five columns rather than four, because this dock sits on a phone screen above the terminal it is
-   driving: the modifiers move into the arrows' spare column and the whole pad fits in three rows
-   instead of four. PgUp/PgDn keep the outer column -- same vertical axis, same thumb. */
-.keys-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 4px;
+   Seven columns and TWO rows, sized against a measurement rather than a guess: the same twelve
+   keys were four rows of 44px (271px of an 844px phone), then three rows of five columns (205px),
+   and are 118px now. The pad is aimed at, not read, so spending width buys back the terminal lines
+   that actually matter. Twelve keys need thirteen cells because of the arrows' empty corner, which
+   makes seven the narrowest grid that fits two rows. Enter spans both -- it is the most-pressed
+   key here -- and PgUp/PgDn keep a shared column so paging is one thumb going straight up and
+   down. */
+.keys-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
   grid-template-areas:
-    "esc   space space enter enter"
-    "pgup  shift .     up    tab"
-    "pgdn  ctrl  left  down  right"; }
+    "esc  space pgup  .     up    tab   enter"
+    "ctrl shift pgdn  left  down  right enter"; }
 /* Scoped to the pad: the quick-action dock keeps the 44px target, but 12 keys at 44px is a third
    of a phone screen and the pad is aimed at, not read. */
-.keys-grid .nav-key { min-height: 38px; padding: 7px 2px; }
+.keys-grid .nav-key { min-height: 38px; padding: 7px 2px; font-size: 12px; }
 .keys-grid .mod-key { font-size: 11px; }
+/* Both control affordances on one line. The Keys/123 switch used to be a full 44px button row of
+   its own and the Presets disclosure another line under the pad -- 62px of chrome around 122px of
+   keys. */
+.keys-bar { display: flex; align-items: center; gap: 4px; width: 100%; margin-bottom: 4px; }
+.keys-bar .tab-btn { padding: 3px 14px; font-size: 11px; }
+.keys-bar .presets-btn { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; cursor: pointer; padding: 2px 4px; }
+.keys-bar .presets-btn[aria-pressed="true"] { color: var(--blue); }
+#ctrlPresets .ctrl-key { min-height: 36px; padding: 6px 2px; }
 .mod-key.armed { background: var(--blue); border-color: var(--blue); color: #fff; }
+/* Same reasoning as the pad, plus a two-word phrase has to wrap rather than clip at a third of
+   the dock's width. */
+#quickDock .nav-key { min-height: 38px; padding: 6px 4px; font-size: 12px; line-height: 1.2; text-align: center; }
 .tab-btn { padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
-.tab-btn.active { background: var(--surface); color: var(--text); border-color: var(--blue); }
+.tab-btn[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: var(--blue); }
 .ctrl-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer; min-height: 44px; }
 .ctrl-key:active { background: var(--border); }
 .ctrl-key.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 30%, var(--border)); }
 .ctrl-key.confirm { background: var(--red); color: #fff; border-color: var(--red); }
 .digit-key { padding: 14px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 18px; font-family: monospace; font-weight: 600; cursor: pointer; min-height: 52px; display: flex; align-items: center; justify-content: center; }
 .digit-key:active { background: var(--border); }
+/* One row of nine, so the pad below the keys grid is 44px rather than 164px. */
+#digitsPad .digit-key { min-height: 44px; padding: 10px 0; font-size: 16px; }
 .queue-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: color-mix(in srgb, var(--text) 5%, var(--bg)); font-family: monospace; font-size: 12px; font-weight: 500; cursor: pointer; }
 .queue-chip:hover { border-color: var(--red); }
 .queue-chip.danger { border-color: color-mix(in srgb, var(--red) 40%, var(--border)); color: var(--red); }
@@ -343,14 +372,14 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   <div class="term-header">
     <button class="back" onclick="closeTerminal()" aria-label="Back to agent list"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
     <span class="title" id="termTitle"></span>
-    <button class="search-btn" onclick="toggleSearch()" aria-label="Find in output"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></button>
-    <button class="history-btn" onclick="toggleHistory()" aria-label="Conversation history"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></button>
+    <button class="search-btn icon-toggle" id="searchBtn" aria-pressed="false" onclick="toggleSearch()" aria-label="Find in output"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></button>
+    <button class="history-btn icon-toggle" id="historyBtn" aria-pressed="false" onclick="toggleHistory()" aria-label="Conversation history"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></button>
     <button class="refresh-btn" onclick="refreshPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
   </div>
   <div class="term-history" id="termHistory" style="display:none">
     <div class="hist-bar">
       <span class="hist-title" id="historyTitle">Conversation History</span>
-      <button class="hist-toggle" id="historyToolsBtn" aria-pressed="false" onclick="toggleHistoryTools()" title="Show tool calls">Tools</button>
+      <button class="hist-toggle" id="historyToolsBtn" aria-pressed="true" onclick="toggleHistoryTools()" title="Show tool calls">Tools</button>
       <button onclick="toggleHistory()" aria-label="Close history" style="background:none;border:none;color:var(--muted);cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </div>
     <div class="hist-bar">
@@ -371,42 +400,39 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   <div class="term-input">
     <button onclick="openCommandPalette()" aria-label="Commands" style="padding:10px 12px;border-radius:6px;border:1px solid var(--blue);background:var(--bg);color:var(--blue);font-weight:700;font-size:14px;flex-shrink:0">/</button>
     <input id="termInput" placeholder="Type…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
-    <button onclick="toggleQuickDock()" aria-label="Quick actions" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--orange);flex-shrink:0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></button>
-    <button onclick="toggleKeysDock()" aria-label="Keys" style="padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--muted);flex-shrink:0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h.001M12 12h.001M16 12h.001M7 16h10"/></svg></button>
+    <button class="dock-toggle dock-quick" id="quickDockBtn" aria-pressed="false" onclick="toggleQuickDock()" aria-label="Quick actions"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></button>
+    <button class="dock-toggle dock-keys" id="keysDockBtn" aria-pressed="false" onclick="toggleKeysDock()" aria-label="Keys"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h.001M12 12h.001M16 12h.001M7 16h10"/></svg></button>
     <button onclick="sendText()" aria-label="Send" style="padding:10px 14px;border-radius:6px;border:none;background:var(--blue);color:#fff;flex-shrink:0"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
   </div>
   <div class="term-keys" id="termKeys" style="display:none">
     <!-- Key queue strip (visible when composing) -->
     <div id="keyQueueStrip" style="display:none;width:100%;padding:6px 0;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap;gap:4px;align-items:center"></div>
-    <!-- Tab toggle -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;width:100%;margin-bottom:6px">
-      <button class="tab-btn active" id="tabKeys" onclick="switchKeyTab('keys')">Keys</button>
-      <button class="tab-btn" id="tabDigits" onclick="switchKeyTab('digits')">123</button>
+    <!-- Pad switch and the presets disclosure share one line -->
+    <div class="keys-bar">
+      <button class="tab-btn" id="tabKeys" aria-pressed="true" onclick="switchKeyTab('keys')">Keys</button>
+      <button class="tab-btn" id="tabDigits" aria-pressed="false" onclick="switchKeyTab('digits')">123</button>
+      <button class="presets-btn" id="presetsBtn" aria-pressed="false" onclick="toggleCtrlPresets()">Presets <span id="ctrlChevron">▸</span></button>
     </div>
     <!-- Keys pad -->
     <div id="keysPad" style="width:100%">
       <div class="keys-grid">
         <button class="nav-key" style="grid-area:esc" onclick="fireKey('Escape')">Esc</button>
         <button class="nav-key" style="grid-area:space" onclick="fireKey('Space')">Space</button>
-        <button class="nav-key" style="grid-area:enter" onclick="fireKey('Enter')">⏎ Enter</button>
         <button class="nav-key" style="grid-area:pgup" onclick="fireKey('PageUp')">PgUp</button>
         <button class="nav-key" style="grid-area:up" onclick="fireKey('Up')">↑</button>
         <button class="nav-key" style="grid-area:tab" onclick="fireKey('Tab')">Tab</button>
+        <button class="nav-key" style="grid-area:enter;flex-direction:column;gap:1px" onclick="fireKey('Enter')">⏎<span style="font-size:9px;opacity:0.75">Enter</span></button>
+        <button class="nav-key mod-key" style="grid-area:ctrl" id="modCtrl" onclick="armMod('ctrl')">Ctrl</button>
+        <button class="nav-key mod-key" style="grid-area:shift" id="modShift" onclick="armMod('shift')">⇧</button>
         <button class="nav-key" style="grid-area:pgdn" onclick="fireKey('PageDown')">PgDn</button>
         <button class="nav-key" style="grid-area:left" onclick="fireKey('Left')">←</button>
         <button class="nav-key" style="grid-area:down" onclick="fireKey('Down')">↓</button>
         <button class="nav-key" style="grid-area:right" onclick="fireKey('Right')">→</button>
-        <button class="nav-key mod-key" style="grid-area:shift" id="modShift" onclick="armMod('shift')">⇧</button>
-        <button class="nav-key mod-key" style="grid-area:ctrl" id="modCtrl" onclick="armMod('ctrl')">Ctrl</button>
       </div>
-      <!-- Ctrl presets -->
-      <div>
-        <button onclick="toggleCtrlPresets()" style="background:none;border:none;color:var(--muted);font-size:0.7rem;cursor:pointer;padding:2px 4px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase">Presets <span id="ctrlChevron">▸</span></button>
-        <div id="ctrlPresets" style="display:none;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px"></div>
-      </div>
+      <div id="ctrlPresets" style="display:none;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px"></div>
     </div>
     <!-- Digits pad -->
-    <div id="digitsPad" style="display:none;width:100%;grid-template-columns:repeat(3,1fr);gap:4px"></div>
+    <div id="digitsPad" style="display:none;width:100%;grid-template-columns:repeat(9,1fr);gap:3px"></div>
     <!-- Action keys for blocked state -->
     <div id="actionKeys" style="width:100%;margin-top:4px"></div>
   </div>
@@ -416,19 +442,13 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
       <span style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted)">Quick Actions</span>
       <button onclick="toggleQuickDock()" aria-label="Close" style="background:none;border:none;color:var(--muted);font-size:1rem;cursor:pointer">✕</button>
     </div>
-    <div style="width:100%">
-      <p style="font-size:0.6rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:4px">Confirm</p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px">
-        <button class="nav-key" style="color:var(--green);border-color:var(--green)" onclick="quickSend('yes')">yes</button>
-        <button class="nav-key" style="color:var(--red);border-color:var(--red)" onclick="quickSend('no')">no</button>
-      </div>
-      <p style="font-size:0.6rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:4px">Common</p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
-        <button class="nav-key" onclick="quickSend('continue')">continue</button>
-        <button class="nav-key" onclick="quickSend('retry')">retry</button>
-        <button class="nav-key" onclick="quickSend('skip')">skip</button>
-        <button class="nav-key" onclick="quickSend('commit and push')">commit & push</button>
-      </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;width:100%">
+      <button class="nav-key" style="color:var(--green);border-color:var(--green)" onclick="quickSend('yes')">yes</button>
+      <button class="nav-key" style="color:var(--red);border-color:var(--red)" onclick="quickSend('no')">no</button>
+      <button class="nav-key" onclick="quickSend('continue')">continue</button>
+      <button class="nav-key" onclick="quickSend('retry')">retry</button>
+      <button class="nav-key" onclick="quickSend('skip')">skip</button>
+      <button class="nav-key" onclick="quickSend('commit and push')">commit&nbsp;&amp;&nbsp;push</button>
     </div>
   </div>
 </div>
@@ -1514,6 +1534,14 @@ function loadMore() {
   refreshPane();
 }
 
+// Every toggle in the session view says whether its panel is open through `aria-pressed`, and the
+// CSS fills the chip off that attribute alone. One helper, so a new toggle cannot be added that
+// looks pressed without being pressed.
+function setPressed(id, on) {
+  const el = document.getElementById(id);
+  if (el) el.setAttribute('aria-pressed', String(!!on));
+}
+
 // Find in output
 let searchMatches = [];
 let searchIndex = 0;
@@ -1524,13 +1552,23 @@ function toggleSearch() {
   const input = document.getElementById('searchInput');
   if (bar.style.display === 'none') {
     bar.style.display = 'flex';
-    document.getElementById('termHistory').style.display = 'none'; // close history if open
+    setPressed('searchBtn', true);
+    // Through navClose, not by hiding the panel: history pushed a history entry, and dropping the
+    // element without dropping the entry left the next Back press with nothing to close.
+    if (document.getElementById('termHistory').style.display !== 'none') {
+      navClose('history', hideHistory);
+    }
     input.focus();
   } else {
-    bar.style.display = 'none';
-    input.value = '';
-    clearSearch();
+    hideSearch();
   }
+}
+
+function hideSearch() {
+  document.getElementById('termSearch').style.display = 'none';
+  document.getElementById('searchInput').value = '';
+  setPressed('searchBtn', false);
+  clearSearch();
 }
 
 // The panel is absolutely positioned inside the terminal view and has to start below its header,
@@ -1545,19 +1583,28 @@ function toggleHistory() {
   const panel = document.getElementById('termHistory');
   if (panel.style.display !== 'none') { navClose('history', hideHistory); return; }
   panel.style.display = 'flex';
+  setPressed('historyBtn', true);
   positionHistoryPanel();
-  document.getElementById('termSearch').style.display = 'none'; // close search if open
+  hideSearch(); // the two share the space under the header
   navPush('history', hideHistory);
   loadHistory();
 }
 
-function hideHistory() { document.getElementById('termHistory').style.display = 'none'; }
+function hideHistory() {
+  document.getElementById('termHistory').style.display = 'none';
+  setPressed('historyBtn', false);
+}
 
 // The conversation, read from the agent's own transcript rather than the terminal. The relay keeps
 // the session reference server-side; all we ever send is the pane and a cursor it gave us.
 const HISTORY_PAGE = 200;
+// `tools: true` by default. A tool call is most of what an agent's turn actually consists of -- on
+// the largest session here 674 of 794 turns were tool calls -- so a history that hides them reads
+// as a conversation with holes in it. The cost is real and known: tool turns spend page slots and
+// characters from the same budget as the prose, so a page reaches less far back. The Tools chip
+// turns them off for exactly that case.
 let history_ = { turns: [], total: 0, hasMore: false, fileTruncated: false,
-                 tools: false, loading: false, unavailable: null };
+                 tools: true, loading: false, unavailable: null };
 
 function loadHistory(before) {
   if (!ws || ws.readyState !== WebSocket.OPEN || !activePane) return;
@@ -1584,7 +1631,7 @@ function loadOlderHistory() {
 
 function toggleHistoryTools() {
   history_.tools = !history_.tools;
-  document.getElementById('historyToolsBtn').setAttribute('aria-pressed', String(history_.tools));
+  setPressed('historyToolsBtn', history_.tools);
   loadHistory();  // the server pages with tools filtered out, so the whole view has to be refetched
 }
 
@@ -2077,22 +2124,23 @@ function sendQueuedKeys() {
   keyQueue=[]; armedMod=null; renderKeyQueue(); renderMods();
 }
 
+// The two docks are mutually exclusive, so both buttons are restated on every change -- opening one
+// has to un-light the other, and that is easy to forget when only the opened one is touched.
+function showDock(which) {
+  const keys = which === 'keys';
+  document.getElementById('termKeys').style.display = keys ? '' : 'none';
+  document.getElementById('quickDock').style.display = which === 'quick' ? '' : 'none';
+  setPressed('keysDockBtn', keys);
+  setPressed('quickDockBtn', which === 'quick');
+  if(window.cue) cue(which ? 'page' : 'tick');
+}
+
 function toggleKeysDock() {
-  const el = document.getElementById('termKeys');
-  const quick = document.getElementById('quickDock');
-  const show = el.style.display === 'none';
-  el.style.display = show ? '' : 'none';
-  if (show) quick.style.display = 'none'; // mutual exclusive
-  if(window.cue) cue(show ? 'page' : 'tick');
+  showDock(document.getElementById('termKeys').style.display === 'none' ? 'keys' : null);
 }
 
 function toggleQuickDock() {
-  const el = document.getElementById('quickDock');
-  const keys = document.getElementById('termKeys');
-  const show = el.style.display === 'none';
-  el.style.display = show ? '' : 'none';
-  if (show) keys.style.display = 'none'; // mutual exclusive
-  if(window.cue) cue(show ? 'page' : 'tick');
+  showDock(document.getElementById('quickDock').style.display === 'none' ? 'quick' : null);
 }
 
 function quickSend(text) {
@@ -2100,13 +2148,15 @@ function quickSend(text) {
   if(window.cue) cue('success');
   ws.send(JSON.stringify({type:'send_text', pane_id: activePane, text: text}));
   ws.send(JSON.stringify({type:'send_keys', pane_id: activePane, keys:['Enter']}));
-  document.getElementById('quickDock').style.display = 'none';
+  showDock(null);
   setTimeout(refreshPane, 500);
 }
 
 function switchKeyTab(tab) {
-  document.getElementById('tabKeys').classList.toggle('active', tab==='keys');
-  document.getElementById('tabDigits').classList.toggle('active', tab==='digits');
+  setPressed('tabKeys', tab==='keys');
+  setPressed('tabDigits', tab==='digits');
+  // The disclosure shares its line with the switch now, so it has to leave with the pad it opens.
+  document.getElementById('presetsBtn').style.display = tab==='keys' ? '' : 'none';
   document.getElementById('keysPad').style.display = tab==='keys' ? '' : 'none';
   const dp = document.getElementById('digitsPad');
   dp.style.display = tab==='digits' ? 'grid' : 'none';
@@ -2120,6 +2170,7 @@ function toggleCtrlPresets() {
   const chevron = document.getElementById('ctrlChevron');
   const show = el.style.display === 'none';
   el.style.display = show ? 'grid' : 'none';
+  setPressed('presetsBtn', show);
   chevron.textContent = show ? '\u25be' : '\u25b8';
   if (show && !el.innerHTML) {
     el.innerHTML = CTRL_PRESETS.map(p => {
