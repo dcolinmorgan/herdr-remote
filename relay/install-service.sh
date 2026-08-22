@@ -298,6 +298,32 @@ send_telegram_test() {
         >/dev/null 2>&1
 }
 
+# Percent-encode a string for use as a URL query value. Kept in step with the
+# copy in relay/herdr-remote, which is the canonical definition.
+urlencode() {
+    local s=$1 out="" i c
+    for (( i = 0; i < ${#s}; i++ )); do
+        c=${s:i:1}
+        case "$c" in
+            [A-Za-z0-9._~-]) out+="$c" ;;
+            *) out+=$(printf '%%%02X' "'$c") ;;
+        esac
+    done
+    printf '%s\n' "$out"
+}
+
+# The one-tap URL the operator opens on their phone: the tunnel URL with the
+# token already embedded, so the web app configures itself and there is nothing
+# to paste into the gear. This is the same link `herdr-remote url` prints - see
+# tap_url() in relay/herdr-remote for why the token must be a query parameter
+# and cannot be a '#token=' fragment.
+aws_tap_url() {
+    local host=${HERDR_AWS_HOST:-} tok=${HERDR_RELAY_TOKEN:-}
+    [ -n "$host" ] || { printf '<HERDR_AWS_HOST not set>\n'; return 0; }
+    if [ -z "$tok" ]; then printf 'https://%s\n' "$host"; return 0; fi
+    printf 'https://%s/?token=%s\n' "${host%/}" "$(urlencode "$tok")"
+}
+
 generate_relay_token() {
     python3 -c 'import secrets; print(secrets.token_hex(32))'
 }
@@ -1312,6 +1338,7 @@ EOF
 
     echo "  Tunnel service installed."
     echo "  URL: https://${HERDR_AWS_HOST:-<HERDR_AWS_HOST not set>}"
+    echo "  Tap: $(aws_tap_url)"
 elif [ "$TUNNEL_MODE" != "none" ] && [ -n "$CLOUDFLARED_PATH" ]; then
     echo "Installing tunnel service (mode: $TUNNEL_MODE)..."
 
@@ -1658,13 +1685,17 @@ fi
 [ "$TUNNEL_MODE" != "none" ] && echo "  Tunnel:     $TUNNEL_MODE"
 [ "$TUNNEL_MODE" = "named" ] && echo "  URL:        wss://$TUNNEL_HOSTNAME"
 if [ "$TUNNEL_MODE" = "aws" ]; then
-    # The URL and token are the exact two values the operator types into the
-    # phone web app (https://herdr-remote.pages.dev - tap the gear). The AWS
-    # path always has a token (the tunnel install refuses to run without one),
-    # so print it here rather than making the operator dig it out of secrets.env.
+    # The URL and token are the exact two values the operator would otherwise
+    # type into the phone web app by hand. The AWS path always has a token (the
+    # tunnel install refuses to run without one), so print them here rather than
+    # making the operator dig them out of secrets.env - and print the combined
+    # one-tap link too, which is what most people actually want.
     echo "  URL:        https://${HERDR_AWS_HOST:-<HERDR_AWS_HOST not set>}"
     echo "  Token:      ${HERDR_RELAY_TOKEN}"
-    echo "  Open the web app, tap the gear, and paste the URL and token above."
+    echo "  Tap:        $(aws_tap_url)"
+    echo "  Tap that link on your phone - it carries the token, so the app needs"
+    echo "  no setup. (It embeds the token, so it lands in your browser history.)"
+    echo "  Or open the web app, tap the gear, and paste the URL and token above."
 fi
 echo "  Logs:       $LOG_DIR/"
 echo "  Config:     $CONFIG_FILE"

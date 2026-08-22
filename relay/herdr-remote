@@ -6,7 +6,7 @@
 #   herdr-remote start    start relay + tunnel, print URL and token
 #   herdr-remote stop     stop tunnel and relay
 #   herdr-remote status   report what is running, and the current URL
-#   herdr-remote url      print just the current tunnel URL
+#   herdr-remote url      print the one-tap URL (tunnel URL + embedded token)
 #   herdr-remote token    print just the relay token
 #
 # Tunnel backend is chosen by HERDR_TUNNEL_MODE in
@@ -151,6 +151,46 @@ current_url() {
   fi
 }
 
+# Percent-encode a string for use as a URL query value. The installer
+# generates hex tokens, but HERDR_RELAY_TOKEN can be set by hand to anything,
+# and an unencoded '&' or '#' would silently truncate the token the phone
+# receives - producing a link that looks right and fails to authenticate.
+urlencode() {
+  local s=$1 out="" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c=${s:i:1}
+    case "$c" in
+      [A-Za-z0-9._~-]) out+="$c" ;;
+      *) out+=$(printf '%%%02X' "'$c") ;;
+    esac
+  done
+  printf '%s\n' "$out"
+}
+
+# The one-tap URL: the tunnel URL with the token already embedded, so the
+# operator can tap it straight out of the terminal instead of assembling it by
+# hand. The web app configures itself from it - web/index.html derives the
+# relay URL from its own origin and reads ?token= into localStorage - so there
+# is nothing left to paste into the gear.
+#
+# The token has to be a QUERY parameter and cannot be a '#token=' fragment,
+# much as a fragment would keep it out of the request. The relay authenticates
+# the initial GET / server-side (relay/herdr_relay.py process_request), and
+# browsers never transmit the fragment, so a fragment link would be answered
+# 401 before the app ever loaded to read it.
+#
+# Every caller that shows a URL to a human goes through here, so start, status
+# and url cannot drift into three different spellings of the same link.
+tap_url() {
+  local u tok
+  u=$(current_url) || return 1
+  tok=$(token_value 2>/dev/null) || tok=""
+  if [ -z "$tok" ]; then printf '%s\n' "$u"; return 0; fi
+  # Emit an explicit "/" path: "https://host?token=" is legal and most clients
+  # normalise it, but the relay matches on the path it is handed, so spell it out.
+  printf '%s/?token=%s\n' "${u%/}" "$(urlencode "$tok")"
+}
+
 url_is_live() {
   local u=$1
   [ -n "$u" ] || return 1
@@ -209,6 +249,10 @@ cmd_start() {
   echo "  Web app:  $WEB_APP"
   echo "  URL:      $url"
   echo "  Token:    $tok"
+  echo
+  echo "  Tap this on your phone - it carries the token, so the app needs no setup:"
+  echo "    $(tap_url)"
+  echo "  (that link embeds the token, so it lands in your browser history)"
   echo
   if [ "$live" = yes ]; then
     echo "  Reachable: yes (verified through the tunnel with your token)"
@@ -307,13 +351,17 @@ cmd_status() {
   fi
   echo "  Token:   $(token_value 2>/dev/null || echo 'not set')"
   echo "  Web app: $WEB_APP"
+  if [ -n "$u" ]; then
+    echo "  Tap:     $(tap_url)"
+    echo "           (embeds the token; it lands in your browser history)"
+  fi
 }
 
 case "${1:-}" in
   start)  cmd_start ;;
   stop)   cmd_stop ;;
   status) cmd_status ;;
-  url)    current_url || die "no URL recorded" ;;
+  url)    tap_url || die "no URL recorded" ;;
   token)  token_value || die "no token in $SECRETS" ;;
   ""|-h|--help|help)
     awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"

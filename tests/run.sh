@@ -177,13 +177,42 @@ PATH="$HR_TMP/bin:$PATH" HOME="$HR_TMP/home" HERDR_REMOTE_REPO="$DIR" \
 assert_eq "$?" "0" "stop confirms shutdown instead of claiming a restart is pending"
 rm -rf "$HR_TMP"
 
+echo "22. herdr-remote url prints a one-tap URL with the token embedded"
+# The operator taps this straight out of the terminal, so the token has to be
+# a query parameter (the relay authenticates GET / server-side, and a fragment
+# is never sent to it) and has to be percent-encoded (parse_qs would otherwise
+# read a literal '+' as a space and a '&' would truncate the token).
+HR_TMP="$(mktemp -d)"
+mkdir -p "$HR_TMP/bin" "$HR_TMP/home/.config/herdr-remote"
+printf 'HERDR_TUNNEL_MODE=aws\nHERDR_AWS_HOST=example.sslip.io\n' \
+    > "$HR_TMP/home/.config/herdr-remote/config.env"
+printf 'HERDR_RELAY_TOKEN=a+b/c&d\n' > "$HR_TMP/home/.config/herdr-remote/secrets.env"
+printf '#!/bin/sh\nexit 1\n' > "$HR_TMP/bin/lsof"
+printf '#!/bin/sh\nexit 1\n' > "$HR_TMP/bin/pgrep"
+chmod +x "$HR_TMP/bin/lsof" "$HR_TMP/bin/pgrep"
+HR_URL=$(PATH="$HR_TMP/bin:$PATH" HOME="$HR_TMP/home" HERDR_REMOTE_REPO="$DIR" \
+    "$DIR/relay/herdr-remote" url 2>/dev/null)
+assert_eq "$HR_URL" "https://example.sslip.io/?token=a%2Bb%2Fc%26d" \
+    "url prints the tappable link with a percent-encoded token"
+
+echo "23. herdr-remote start, status and url agree on that URL"
+# Three surfaces printing three spellings of the same link is the drift this
+# guards against; they all have to come from tap_url().
+HR_STATUS=$(PATH="$HR_TMP/bin:$PATH" HOME="$HR_TMP/home" HERDR_REMOTE_REPO="$DIR" \
+    "$DIR/relay/herdr-remote" status 2>/dev/null | sed -n 's/^  Tap:  *//p')
+assert_eq "$HR_STATUS" "$HR_URL" "status prints the same link as url"
+HR_SRC_USERS=$(grep -c 'tap_url' "$DIR/relay/herdr-remote")
+[ "$HR_SRC_USERS" -ge 4 ]
+assert_eq "$?" "0" "start, status and url all route through tap_url"
+rm -rf "$HR_TMP"
+
 # --- Repository policy gates ---
 # These are POLICY gates, not behavior tests. They assert a property of the
 # repository's contents itself, which is the thing being guaranteed - not a
 # proxy for any code working.
 echo ""
 echo "=== Repository policy ==="
-echo "22. POLICY: no credential material committed anywhere in the repository"
+echo "24. POLICY: no credential material committed anywhere in the repository"
 # Scans every git-tracked file, not just the AWS tunnel directory and not
 # just the diff: the requirement is repo-wide, and a full scan gives the
 # same answer regardless of branch, rebase, or staging state.
