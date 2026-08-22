@@ -109,6 +109,37 @@ class WebKeyPadTests(unittest.TestCase):
             })()""")
         self.assertNotIn("nav-key", gap or "")
 
+    def test_the_pad_leaves_the_terminal_most_of_the_phone(self):
+        """The complaint that started this: the dock ate a third of the screen, then half.
+
+        Four rows of 44px plus three rows of presets measured 271px closed and 415px open on a
+        390x844 phone. Five columns fold the modifiers into the arrows' spare column, so the pad is
+        three rows, and the presets are four columns instead of three.
+        """
+        for label, expression, ceiling in (
+            ("closed", "() => 0", 0.28),
+            ("open", "() => toggleCtrlPresets()", 0.40),
+        ):
+            with self.subTest(presets=label):
+                self.page.evaluate(expression)
+                height = self.page.evaluate(
+                    "() => document.getElementById('termKeys').getBoundingClientRect().height")
+                self.assertLess(height, PHONE["height"] * ceiling,
+                                f"the key dock is {height}px with presets {label}")
+        self.page.evaluate("() => toggleCtrlPresets()")
+
+    def test_no_key_label_is_clipped_by_the_narrower_cells(self):
+        """Five columns and four preset columns is the cost of the three-row pad."""
+        self.page.evaluate("() => toggleCtrlPresets()")
+        try:
+            clipped = self.page.evaluate(
+                """() => [...document.querySelectorAll('#keysPad button, #ctrlPresets button')]
+                     .filter(b => b.scrollWidth > b.clientWidth + 1)
+                     .map(b => b.textContent.trim())""")
+        finally:
+            self.page.evaluate("() => toggleCtrlPresets()")
+        self.assertEqual(clipped, [])
+
     def test_every_pad_button_stays_inside_the_viewport(self):
         widest = self.page.evaluate(
             """(() => {
