@@ -127,8 +127,19 @@ holds and is what makes the escaping provable rather than remembered.
   the code keeps its real indentation instead of being shifted a column.
 - Renderer behaviour is tested in a real browser: `tests/test_web_history.py` loads
   `web/index.html` over `file://` with playwright and asserts the DOM (skipped, not failed, where
-  playwright or chromium is missing; `tests/run.sh` step 9b runs it separately with playwright on
-  the path).
+  playwright or chromium is missing; `tests/run.sh` step 9d runs every `tests/test_web_*.py`
+  separately with playwright on the path).
+
+The key pad and the panel layering are geometry, so `tests/test_web_keys.py` measures them rather
+than reading the CSS. The arrow keys sit in a `grid-template-areas` inverted T — `up` shares its
+column with `down`, and the cell beside `up` is deliberately empty — and the test asserts the
+boxes, not the rule. Settings and Timeline are siblings of the session view, which is
+`position: fixed; z-index: 50` over an opaque background below the 768px breakpoint: a panel
+opened from inside a session used to render in normal flow *underneath* it, present and
+unreachable. `openPanel` records what the panel covered in `panelReturn` and deactivates the
+session view; `hidePanel` restores exactly that, which is also why closing a panel no longer
+reveals the agent list under a live session. The test proves it with `elementFromPoint` at the
+panel's own centre, at both phone and desktop widths.
 
 ## WebSocket Protocol
 

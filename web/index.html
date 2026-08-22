@@ -501,12 +501,36 @@ addEventListener('popstate', () => {
   while (navStack.length > depth) navStack.pop().close();
 });
 
-function toggleSettings() {
-  if (document.getElementById('settingsView').style.display === 'block') { closePanel(); return; }
-  document.getElementById('settingsView').style.display = 'block';
-  document.getElementById('timelineView').style.display = 'none';
+// What the panel is covering, so closing it restores that and not something else. The session
+// view is `position: fixed; z-index: 50` over an opaque background, so a panel opened from inside
+// a session used to render in normal flow UNDERNEATH it -- present, focusable, and invisible.
+// Deactivating it is the fix; the header buttons stay reachable in a session only because the
+// overlay's hardcoded 49px top edge sits above the header's real ~69px, which is how the panel
+// was reachable-but-hidden in the first place.
+let panelReturn = null;
+
+function panelIsOpen() {
+  return document.getElementById('settingsView').style.display === 'block'
+      || document.getElementById('timelineView').style.display === 'block';
+}
+
+function openPanel(id) {
+  // Only on the way IN: swapping between Settings and Timeline must not re-read this, because by
+  // then the session view is already deactivated and the panel would forget to bring it back.
+  if (!panelIsOpen()) {
+    const term = document.getElementById('terminalView');
+    panelReturn = term.classList.contains('active') ? 'terminal' : 'list';
+    if (panelReturn === 'terminal') term.classList.remove('active');
+  }
+  document.getElementById('settingsView').style.display = id === 'settingsView' ? 'block' : 'none';
+  document.getElementById('timelineView').style.display = id === 'timelineView' ? 'block' : 'none';
   document.getElementById('agentListView').style.display = 'none';
   navPush('panel', hidePanel);
+}
+
+function toggleSettings() {
+  if (document.getElementById('settingsView').style.display === 'block') { closePanel(); return; }
+  openPanel('settingsView');
   document.getElementById('settingsStatus').innerHTML = ws && ws.readyState === 1
     ? `<span style="color:var(--green)">● Connected</span> · ${agents.length} agents`
     : `<span style="color:var(--red)">● Disconnected</span>`;
@@ -515,20 +539,22 @@ function toggleSettings() {
 
 function toggleTimeline() {
   if (document.getElementById('timelineView').style.display === 'block') { closePanel(); return; }
-  document.getElementById('timelineView').style.display = 'block';
-  document.getElementById('settingsView').style.display = 'none';
-  document.getElementById('agentListView').style.display = 'none';
-  navPush('panel', hidePanel);
+  openPanel('timelineView');
   renderTimeline();
 }
 
-// Settings and Timeline swap places over the agent list, so they share one
+// Settings and Timeline swap places over whatever they were opened from, so they share one
 // history entry: switching between them doesn't cost an extra back press.
 function closePanel() { navClose('panel', hidePanel); }
 function hidePanel() {
   document.getElementById('settingsView').style.display = 'none';
   document.getElementById('timelineView').style.display = 'none';
-  document.getElementById('agentListView').style.display = '';
+  const toSession = panelReturn === 'terminal';
+  panelReturn = null;
+  // Restoring the agent list unconditionally used to leave it rendered under the still-active
+  // session view; the session keeps polling while the panel is up, so it comes back current.
+  document.getElementById('agentListView').style.display = toSession ? 'none' : '';
+  if (toSession) document.getElementById('terminalView').classList.add('active');
 }
 
 function renderTimeline() {

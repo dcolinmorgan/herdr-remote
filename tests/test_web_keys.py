@@ -1,7 +1,9 @@
-"""Tests for the terminal key pad in web/index.html.
+"""Tests for the terminal key pad and the panel/session layering in web/index.html.
 
-The layout is geometry, not markup, so it is measured in a real browser rather than asserted
-against CSS text: an inverted-T arrow cluster is a claim about where the buttons LAND.
+Both are geometry, not markup, so both are measured in a real browser rather than asserted against
+CSS text: an inverted-T arrow cluster is a claim about where the buttons LAND, and "the settings
+panel is covered by the session view" is a claim about which element paints at a given point.
+`elementFromPoint` answers the second one exactly the way a thumb does.
 
 Skipped, not failed, when playwright or a chromium build is missing.
 """
@@ -154,6 +156,113 @@ class WebKeyPadTests(unittest.TestCase):
         self.assertEqual(
             self.sent(),
             [{"type": "send_keys", "pane_id": "w0:p1", "keys": ["ctrl+PageUp"]}])
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebPanelLayeringTests(unittest.TestCase):
+    """Settings and Timeline opened from inside a session used to render under it, unreachable."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._playwright = sync_playwright().start()
+        cls._browser = cls._playwright.chromium.launch(executable_path=_chrome())
+        cls.page = cls._browser.new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._browser.close()
+        cls._playwright.stop()
+
+    def setUp(self):
+        self.page.evaluate("""() => {
+          hidePanel();
+          document.getElementById('terminalView').classList.remove('active');
+          document.getElementById('agentListView').style.display = '';
+        }""")
+
+    def enter_session(self):
+        self.page.evaluate(
+            "() => document.getElementById('terminalView').classList.add('active')")
+
+    def topmost_over(self, panel_id):
+        """Which element actually paints at the centre of the panel -- the panel, or its cover."""
+        return self.page.evaluate(
+            """(() => {
+              const panel = document.getElementById(PANEL);
+              const r = panel.getBoundingClientRect();
+              if (!r.height) return 'panel has no box';
+              const hit = document.elementFromPoint(r.x + r.width / 2, r.y + 20);
+              if (!hit) return 'nothing';
+              return panel.contains(hit) ? 'panel' : (hit.closest('[id]') || hit).id || hit.tagName;
+            })()""".replace("PANEL", json.dumps(panel_id)))
+
+    def visible(self):
+        return self.page.evaluate("""() => ({
+          settings: document.getElementById('settingsView').style.display,
+          timeline: document.getElementById('timelineView').style.display,
+          list: document.getElementById('agentListView').style.display,
+          session: document.getElementById('terminalView').classList.contains('active'),
+        })""")
+
+    def test_settings_opens_on_top_when_reached_from_a_session(self):
+        self.enter_session()
+        self.page.evaluate("() => toggleSettings()")
+        self.assertEqual(self.topmost_over("settingsView"), "panel")
+        self.assertFalse(self.visible()["session"], "the session view must step aside")
+
+    def test_timeline_opens_on_top_when_reached_from_a_session(self):
+        self.enter_session()
+        self.page.evaluate("() => toggleTimeline()")
+        self.assertEqual(self.topmost_over("timelineView"), "panel")
+
+    def test_settings_still_opens_on_top_from_the_agent_list(self):
+        self.page.evaluate("() => toggleSettings()")
+        self.assertEqual(self.topmost_over("settingsView"), "panel")
+        self.assertEqual(self.visible()["list"], "none")
+
+    def test_closing_returns_to_the_session_it_was_opened_from(self):
+        self.enter_session()
+        self.page.evaluate("() => toggleSettings()")
+        self.page.evaluate("() => closePanel()")
+        state = self.visible()
+        self.assertTrue(state["session"], "the session must come back")
+        # It used to reappear UNDER the still-active session view.
+        self.assertEqual(state["list"], "none", "the agent list must stay hidden")
+
+    def test_closing_returns_to_the_agent_list_when_opened_from_there(self):
+        self.page.evaluate("() => toggleSettings()")
+        self.page.evaluate("() => closePanel()")
+        state = self.visible()
+        self.assertFalse(state["session"])
+        self.assertEqual(state["list"], "")
+
+    def test_swapping_panels_inside_a_session_still_remembers_the_session(self):
+        """The second open must not re-read the session flag: it is already deactivated by then."""
+        self.enter_session()
+        self.page.evaluate("() => toggleSettings()")
+        self.page.evaluate("() => toggleTimeline()")
+        self.assertEqual(self.topmost_over("timelineView"), "panel")
+        self.page.evaluate("() => closePanel()")
+        state = self.visible()
+        self.assertTrue(state["session"], "swapping panels lost the session")
+        self.assertEqual(state["list"], "none")
+
+    def test_a_wide_viewport_also_frees_the_panel(self):
+        """Above 768px the view is `position: relative`, and used to push the panel off-screen."""
+        self.page.set_viewport_size({"width": 1100, "height": 800})
+        try:
+            self.enter_session()
+            self.page.evaluate("() => toggleSettings()")
+            self.assertEqual(self.topmost_over("settingsView"), "panel")
+            # The session view claimed a full viewport-height of layout below the panel.
+            self.assertFalse(self.page.evaluate(
+                "() => document.documentElement.scrollHeight > innerHeight + 2 "
+                "&& document.getElementById('terminalView').offsetHeight > 0"))
+        finally:
+            self.page.set_viewport_size(PHONE)
+
 
 if __name__ == "__main__":
     unittest.main()
