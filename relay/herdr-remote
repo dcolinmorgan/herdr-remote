@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# herdr-remote - start/stop the herdr-remote relay and its tunnel (Cloudflare
+# quick tunnel or the AWS reverse tunnel), and print the URL and token to
+# paste into the phone web app.
+#
+#   herdr-remote start    start relay + tunnel, print URL and token
+#   herdr-remote stop     stop tunnel and relay
+#   herdr-remote status   report what is running, and the current URL
+#   herdr-remote url      print just the current tunnel URL
+#   herdr-remote token    print just the relay token
+#
+# Tunnel backend is chosen by HERDR_TUNNEL_MODE in
+# ~/.config/herdr-remote/config.env: "temp"/"named" (Cloudflare, default)
+# or "aws" (reverse SSH tunnel to infra/aws-tunnel/, see that directory).
+#
+# This is the canonical copy - keep it in the repo, not only in
+# ~/.local/bin, so it's versioned and reviewable like everything else
+# here. Symlink it into place:
+#   ln -sf "$(pwd)/relay/herdr-remote" ~/.local/bin/herdr-remote
+set -uo pipefail
+
+if [ -n "${HERDR_REMOTE_REPO:-}" ]; then
+  REPO="$HERDR_REMOTE_REPO"
+else
+  _src="${BASH_SOURCE[0]}"
+  while [ -L "$_src" ]; do
+    _target=$(readlink "$_src")
+    case "$_target" in
+      /*) _src="$_target" ;;
+      *)  _src="$(dirname "$_src")/$_target" ;;
+    esac
+  done
+  REPO="$(cd "$(dirname "$_src")/.." && pwd)"
+fi
+CONFIG="$HOME/.config/herdr-remote/config.env"
+SECRETS="$HOME/.config/herdr-remote/secrets.env"
+LOG="$REPO/relay/relay.log"
+WEB_APP="https://herdr-remote.pages.dev"
+CF_URL_RE='https://[a-z0-9-]*\.trycloudflare\.com'
+
+die() { printf 'herdr-remote: %s\n' "$1" >&2; exit 1; }
+
+# install-service.sh writes every known key into config.env even when it
+# has no value ("HERDR_AWS_HOST="), so "the key is present" says nothing.
+# Only a non-empty value counts as set; anything else fails, and callers
+# rely on that exit status to refuse to start.
+value_from() {
+  local key="$1"; shift
+  local file v
+  for file in "$@"; do
+    [ -f "$file" ] || continue
+    v=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" \
+      | tail -1 | sed -E "s/.*${key}=//; s/^\"//; s/\"\$//")
+    if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+  done
+  return 1
+}
+
+config_value() { value_from "$1" "$CONFIG"; }
+
+# Every setting follows one rule, the same one start.sh/tunnel-aws.sh and
+# install-service.sh use: a non-empty exported value beats the persisted
+# file. A wrapper that disagreed with them about the port or the mode would
+# aim all of its checks at the wrong process.
+setting() {
+  local key="$1"
+  if [ -n "${!key:-}" ]; then printf '%s\n' "${!key}"; return 0; fi
+  config_value "$key"
+}
+
+# The token lives in secrets.env (mode 0600), which is where
+# install-service.sh has always written it; config.env is 0644 and never
+# carries it. Environment wins over both, for one-off overrides.
+token_value() {
+  if [ -n "${HERDR_RELAY_TOKEN:-}" ]; then printf '%s\n' "$HERDR_RELAY_TOKEN"; return 0; fi
+  value_from HERDR_RELAY_TOKEN "$SECRETS" "$CONFIG"
+}
+
+tunnel_mode() { setting HERDR_TUNNEL_MODE || echo "temp"; }
+aws_host() { setting HERDR_AWS_HOST; }
+
+PORT="$(setting HERDR_RELAY_PORT || echo 8375)"
+
+LABEL_RELAY="com.herdr-remote.relay"
+LABEL_TUNNEL="com.herdr-remote.tunnel"
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# install-service.sh installs these with KeepAlive/Restart=always, so a plain
+# kill is undone within seconds. Stopping means telling the supervisor.
+# "Loaded" means the supervisor is still in charge of the process right now,
+# which is what stop has to disprove. On systemd that is ActiveState, not
+# is-enabled: an explicitly stopped unit stays enabled so it returns at next
+# login, but it is genuinely down until then and Restart=always does not
+# revive it. activating covers the RestartSec auto-restart window.
+managed_job_loaded() {
+  local label=$1 unit=$2
+  if is_macos; then
+    launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1
+  else
+    local state
+    state=$(systemctl --user show -p ActiveState "$unit" 2>/dev/null)
+    case "${state#ActiveState=}" in
+      active|activating|reloading|deactivating) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+managed_jobs_loaded() {
+  managed_job_loaded "$LABEL_RELAY" herdr-relay.service \
+    || managed_job_loaded "$LABEL_TUNNEL" herdr-tunnel.service
+}
+
+stop_managed_jobs() {
+  if is_macos; then
+    launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$LABEL_RELAY" 2>/dev/null || true
+  else
+    systemctl --user stop herdr-tunnel.service 2>/dev/null || true
+    systemctl --user stop herdr-relay.service 2>/dev/null || true
+  fi
+}
+
+relay_pid()  { lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1; }
+cf_tunnel_pids() { pgrep -f "cloudflared tunnel --url http://localhost:$PORT" 2>/dev/null; }
+# Three shapes to reap: the launcher script, autossh, and - when autossh
+# is not installed - the plain ssh the launcher's retry loop supervises.
+# Missing the last one leaves the remote forward bound, which makes the
+# next start fail against ExitOnForwardFailure.
+aws_tunnel_pids() {
+  { pgrep -f "$REPO/relay/tunnel-aws.sh" 2>/dev/null
+    pgrep -f "autossh.*127.0.0.1:.*:127.0.0.1:$PORT" 2>/dev/null
+    pgrep -f "ssh .*-R 127.0.0.1:[0-9]*:127.0.0.1:$PORT" 2>/dev/null
+  } | sort -u
+}
+tunnel_pids() { if [ "$(tunnel_mode)" = "aws" ]; then aws_tunnel_pids; else cf_tunnel_pids; fi; }
+launcher_pids() { pgrep -f "$REPO/relay/start.sh" 2>/dev/null; }
+
+current_url() {
+  if [ "$(tunnel_mode)" = "aws" ]; then
+    local h; h=$(aws_host)
+    [ -n "$h" ] && echo "https://$h"
+  else
+    [ -f "$LOG" ] || return 1
+    local u; u=$(grep -o "$CF_URL_RE" "$LOG" | tail -1)
+    [ -n "$u" ] || return 1
+    printf '%s\n' "$u"
+  fi
+}
+
+url_is_live() {
+  local u=$1
+  [ -n "$u" ] || return 1
+  curl -fsS -o /dev/null --max-time 15 -H "Authorization: Bearer $(token_value)" "$u" 2>/dev/null
+}
+
+cmd_start() {
+  [ -d "$REPO" ] || die "repo not found at $REPO (set HERDR_REMOTE_REPO)"
+  local tok; tok=$(token_value) || tok=""
+
+  if [ "$(tunnel_mode)" = "aws" ]; then
+    aws_host >/dev/null || die "HERDR_TUNNEL_MODE=aws but HERDR_AWS_HOST is not set in $CONFIG"
+    [ -n "$tok" ] || die "refusing to start the AWS reverse tunnel without HERDR_RELAY_TOKEN.
+  The AWS tunnel publishes this relay on the public internet over HTTPS, and
+  the relay grants whoever reaches it full control of your agents. A token is
+  mandatory for this path and there is no way to skip it.
+  Set HERDR_RELAY_TOKEN in $SECRETS, or re-run relay/install-service.sh."
+  fi
+
+  [ -n "$tok" ] || die "no HERDR_RELAY_TOKEN in $SECRETS (or $CONFIG, or the environment)"
+
+  if [ -n "$(relay_pid)" ]; then
+    echo "Already running. Current details:"
+    echo
+    cmd_status
+    return 0
+  fi
+
+  echo "Starting relay and tunnel (mode: $(tunnel_mode))..."
+  : > "$LOG"
+  nohup "$REPO/relay/start.sh" > "$LOG" 2>&1 &
+  disown 2>/dev/null || true
+
+  local url="" _i
+  for _i in $(seq 1 40); do
+    url=$(current_url)
+    [ -n "$url" ] && break
+    sleep 1
+  done
+
+  if [ -z "$url" ]; then
+    echo "Relay started, but no tunnel URL appeared within 40s." >&2
+    echo "Check: $LOG" >&2
+    return 1
+  fi
+
+  # A quick tunnel can print its URL (or the AWS host can be configured)
+  # before it is actually routable end-to-end.
+  local live=no _j
+  for _j in $(seq 1 20); do
+    if url_is_live "$url"; then live=yes; break; fi
+    sleep 2
+  done
+
+  echo
+  echo "  Web app:  $WEB_APP"
+  echo "  URL:      $url"
+  echo "  Token:    $tok"
+  echo
+  if [ "$live" = yes ]; then
+    echo "  Reachable: yes (verified through the tunnel with your token)"
+  else
+    echo "  Reachable: NOT YET - the URL is published but not answering."
+    echo "             Give it a moment, then: herdr-remote status"
+  fi
+  echo
+  echo "  Open the web app on your phone, tap the gear, paste the URL and token."
+  echo "  Stop it later with: herdr-remote stop"
+}
+
+cmd_stop() {
+  local found=no managed=no p
+  if managed_jobs_loaded; then managed=yes; found=yes; stop_managed_jobs; fi
+
+  for p in $(launcher_pids); do kill "$p" 2>/dev/null && found=yes; done
+  for p in $(tunnel_pids);   do kill "$p" 2>/dev/null && found=yes; done
+  p=$(relay_pid); [ -n "$p" ] && { kill "$p" 2>/dev/null && found=yes; }
+  sleep 2
+  p=$(relay_pid); [ -n "$p" ] && kill -9 "$p" 2>/dev/null
+  for p in $(tunnel_pids); do kill -9 "$p" 2>/dev/null; done
+
+  # Outlast the supervisors' restart throttle (5s relay, 10s tunnel) before
+  # believing anything: a process absent at t=2s proves nothing.
+  local _i
+  for _i in $(seq 1 14); do
+    if [ -z "$(relay_pid)" ] && [ -z "$(tunnel_pids)" ] && ! managed_jobs_loaded; then
+      break
+    fi
+    sleep 1
+  done
+
+  local rp tp
+  rp=$(relay_pid); tp=$(tunnel_pids | head -1)
+  if [ -n "$rp" ] || [ -n "$tp" ] || managed_jobs_loaded; then
+    echo "herdr-remote: could NOT confirm shutdown - do not assume this is closed." >&2
+    [ -n "$rp" ] && echo "  Relay:  still listening on port $PORT (pid $rp)" >&2
+    [ -n "$tp" ] && echo "  Tunnel: still running (pid $tp); the reverse forward may still be bound" >&2
+    if managed_jobs_loaded; then
+      echo "  A supervised service is still loaded and will keep restarting it." >&2
+      if is_macos; then
+        echo "  Stop it with: launchctl bootout gui/\$(id -u)/$LABEL_TUNNEL" >&2
+        echo "            and launchctl bootout gui/\$(id -u)/$LABEL_RELAY" >&2
+      else
+        echo "  Stop it with: systemctl --user stop herdr-tunnel.service herdr-relay.service" >&2
+      fi
+    fi
+    exit 1
+  fi
+
+  if [ "$found" = no ]; then
+    echo "Nothing was running."
+    return 0
+  fi
+  echo "Stopped. Verified: port $PORT is not listening, and no tunnel process is"
+  echo "running on this machine (re-checked past the supervisors' restart delay)."
+  if [ "$managed" = yes ]; then
+    if is_macos; then
+      echo "Supervised services were booted out; they come back at next login,"
+      echo "or immediately via relay/install-service.sh."
+    else
+      echo "Supervised services were stopped; they come back at next login,"
+      echo "or immediately via: systemctl --user start herdr-relay.service"
+    fi
+  fi
+}
+
+cmd_status() {
+  local r t u
+  r=$(relay_pid); t=$(tunnel_pids | head -1); u=$(current_url)
+  echo "  Mode:    $(tunnel_mode)"
+  if [ -n "$r" ]; then
+    echo "  Relay:   running (pid $r)"
+  elif managed_job_loaded "$LABEL_RELAY" herdr-relay.service; then
+    echo "  Relay:   no process now, but a supervised service is loaded and will restart it"
+  else
+    echo "  Relay:   not running (no process, no supervised service loaded)"
+  fi
+  if [ -n "$t" ]; then
+    echo "  Tunnel:  running (pid $t)"
+  elif managed_job_loaded "$LABEL_TUNNEL" herdr-tunnel.service; then
+    echo "  Tunnel:  no process now, but a supervised service is loaded and will restart it"
+  else
+    echo "  Tunnel:  not running (no process, no supervised service loaded)"
+  fi
+  if [ -n "$u" ]; then
+    if url_is_live "$u"; then
+      echo "  URL:     $u  (reachable)"
+    else
+      echo "  URL:     $u  (NOT reachable - stale, or the tunnel dropped)"
+      echo "           Fix with: herdr-remote stop && herdr-remote start"
+    fi
+  else
+    echo "  URL:     none recorded"
+  fi
+  echo "  Token:   $(token_value 2>/dev/null || echo 'not set')"
+  echo "  Web app: $WEB_APP"
+}
+
+case "${1:-}" in
+  start)  cmd_start ;;
+  stop)   cmd_stop ;;
+  status) cmd_status ;;
+  url)    current_url || die "no URL recorded" ;;
+  token)  token_value || die "no token in $SECRETS" ;;
+  ""|-h|--help|help)
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+    ;;
+  *) die "unknown command '$1' (try: start, stop, status, url, token)" ;;
+esac

@@ -12,7 +12,7 @@ herdr-remote is a multi-client system for monitoring and approving [herdr](https
 Clients (web/mac/ios/telegram/tui)
         │ WebSocket
         ▼
-   relay (:8375)  ←── Cloudflare tunnel (public wss://)
+   relay (:8375)  ←── remote tunnel (public wss://)
         │
         ▼
    herdr CLI (local or SSH to HERDR_REMOTES)
@@ -40,7 +40,7 @@ All Python scripts use [PEP 723 inline metadata](https://peps.python.org/pep-072
 # Relay (main server)
 uv run relay/herdr_relay.py
 
-# Full setup with Cloudflare tunnel
+# Full setup with relay + tunnel (Cloudflare by default; aws via HERDR_TUNNEL_MODE)
 relay/start.sh
 
 # Telegram bot
@@ -68,6 +68,11 @@ cd herdi-ios && xcodegen generate
 | `HERDR_REMOTES` | Comma-separated SSH targets to poll |
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
+
+The relay always binds to loopback; a tunnel is what makes it reachable
+remotely. `HERDR_TUNNEL_MODE` selects the backend (Cloudflare Tunnel or an
+AWS reverse SSH tunnel) - see `relay/.env.example` for the full set of
+tunnel variables and `infra/aws-tunnel/README.md` for the AWS host.
 
 ## Web App
 

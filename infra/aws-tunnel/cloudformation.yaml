@@ -1,0 +1,301 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  herdr-remote AWS rendezvous host. A single t4g.nano EC2 instance that
+  terminates TLS (Caddy) and forwards to a loopback port that the Mac
+  populates over an outbound `ssh -R` reverse tunnel. No secret material
+  lives in this template: the relay token never touches this stack, and
+  the only credential accepted is a public key pasted in at deploy time.
+  See infra/aws-tunnel/README.md before applying this template.
+
+Parameters:
+  HostnameFqdn:
+    Type: String
+    Description: >
+      The stable hostname that will point at this host's Elastic IP
+      (e.g. herdr-remote.example.com). You create the DNS A record
+      yourself, in whatever provider hosts that domain (see README) -
+      this template does not require Route 53. Used only to configure
+      Caddy's automatic HTTPS for the right hostname.
+
+  TunnelPublicKey:
+    Type: String
+    Description: >
+      The PUBLIC key (e.g. contents of ~/.ssh/herdr-remote-tunnel.pub)
+      the Mac will use to open the reverse tunnel. Paste the public key
+      only - never a private key. This is not treated as a secret, but
+      review it is the value you expect before applying. The pattern below
+      accepts only an OpenSSH public key line, so a pasted private key or a
+      truncated key is rejected at deploy time rather than being written
+      verbatim into authorized_keys and failing later as "Permission denied".
+    AllowedPattern: ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) +[A-Za-z0-9+/]+=*( .*)?$
+    ConstraintDescription: >
+      must be a single OpenSSH PUBLIC key line - "ssh-ed25519 AAAA... comment"
+      (or ssh-rsa / ecdsa-sha2-nistp256|384|521). A private key, a key file
+      with headers, or a truncated value is rejected.
+
+  SshAllowedCidr:
+    Type: String
+    Description: >
+      CIDR allowed to reach port 22 (e.g. your home IP as "203.0.113.5/32").
+      Required - there is no default, and this template refuses a
+      world-open value. If your ISP rotates your IP, update the security
+      group rule after it changes (see README).
+    AllowedPattern: ^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}/([1-9]|[12][0-9]|3[0-2])$
+    ConstraintDescription: >
+      must be a well-formed IPv4 CIDR with a prefix length of /1 to /32
+      (e.g. 203.0.113.5/32). /0 is rejected outright - SSH must never be
+      world-open.
+
+  TunnelPort:
+    Type: Number
+    Default: 9375
+    MinValue: 1024
+    MaxValue: 65535
+    Description: >
+      Loopback port on the EC2 host that the Mac's reverse tunnel
+      populates, and that Caddy reverse-proxies to. Restricted to the
+      unprivileged range, which also keeps it clear of 443, 80 and 22 -
+      Caddy proxying to its own listener would deadlock the host.
+    ConstraintDescription: must be an unprivileged port between 1024 and 65535.
+
+  TunnelUser:
+    Type: String
+    Default: herdr-tunnel
+    Description: Unprivileged user the Mac's SSH key logs in as. No shell, forwarding only.
+
+  InstanceType:
+    Type: String
+    Default: t4g.nano
+    AllowedValues: [t4g.nano, t4g.micro, t4g.small, t4g.medium, t4g.large]
+    Description: >
+      Smallest Graviton instance class that comfortably runs Caddy + sshd.
+      Restricted to t4g.* because ImageId below resolves the arm64 AMI
+      alias - an x86_64 type would fail at launch.
+    ConstraintDescription: must be a t4g.* (Graviton/arm64) type, to match the arm64 AMI.
+
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: >
+      OPTIONAL. A Route 53 hosted zone ID to create the A record in. Leave
+      blank to manage DNS yourself elsewhere (any provider - Route 53 is
+      not required). If set, HostnameFqdn must be a name within that zone.
+
+Conditions:
+  HasHostedZone: !Not [!Equals [!Ref HostedZoneId, ""]]
+
+Resources:
+  TunnelInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: SignalOwnStackResource
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+      Description: >
+        Grants only AWS Systems Manager Session Manager access, so the
+        host can be administered without opening a general-purpose SSH
+        login - the only SSH key accepted is the forwarding-restricted
+        tunnel key below.
+
+  TunnelInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref TunnelInstanceRole
+
+  TunnelSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: herdr-remote rendezvous host - 443 public, SSH restricted
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS from phone/browser clients
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshAllowedCidr
+          Description: Reverse tunnel from the Mac only
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Outbound for package installs and ACME
+
+  TunnelEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  TunnelEipAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt TunnelEip.AllocationId
+      InstanceId: !Ref TunnelInstance
+
+  TunnelDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasHostedZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref HostnameFqdn
+      Type: A
+      TTL: "60"
+      ResourceRecords:
+        - !Ref TunnelEip
+
+  TunnelInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref TunnelInstanceProfile
+      SecurityGroupIds:
+        - !Ref TunnelSecurityGroup
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}"
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      Tags:
+        - Key: Name
+          Value: herdr-remote-tunnel
+        - Key: project
+          Value: herdr-remote
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          dnf install -y aws-cfn-bootstrap
+          trap '/opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource TunnelInstance --region ${AWS::Region}' ERR
+
+          # --- Unprivileged, forwarding-only user for the Mac's reverse tunnel ---
+          useradd --create-home --shell /usr/sbin/nologin "${TunnelUser}"
+          install -d -m 700 -o "${TunnelUser}" -g "${TunnelUser}" "/home/${TunnelUser}/.ssh"
+          cat > "/home/${TunnelUser}/.ssh/authorized_keys" <<'KEYS'
+          restrict,port-forwarding,permitlisten="127.0.0.1:${TunnelPort}" ${TunnelPublicKey}
+          KEYS
+          chown "${TunnelUser}:${TunnelUser}" "/home/${TunnelUser}/.ssh/authorized_keys"
+          chmod 600 "/home/${TunnelUser}/.ssh/authorized_keys"
+
+          # `restrict` (OpenSSH >= 7.2) disables pty/agent/X11 forwarding, user-rc
+          # execution, and command execution, but it also disables the -R this
+          # account exists for, so `port-forwarding` has to come back - and that
+          # re-enables BOTH -L and -R. `permitlisten` narrows the -R side to the
+          # single bind we want, but there is no authorized_keys option that
+          # denies the -L side (`permitopen` takes host:port only; `none` is an
+          # sshd_config keyword and putting it here makes sshd reject the whole
+          # key line). So the local-forward block lives in the Match stanza
+          # below, which is where OpenSSH can actually express it. Without it,
+          # this host would be a general TCP proxy for anything its egress
+          # reaches - the instance metadata service among them.
+          install -d -m 755 /etc/ssh/sshd_config.d
+          cat > /etc/ssh/sshd_config.d/99-herdr-tunnel.conf <<'SSHD'
+          GatewayPorts no
+          AllowTcpForwarding yes
+
+          Match User ${TunnelUser}
+              AllowTcpForwarding remote
+              PermitOpen none
+
+          Match all
+          SSHD
+          systemctl reload sshd
+
+          # --- Caddy: static binary, pinned version, reverse-proxies to the
+          # loopback port the tunnel populates. Port 80 is never opened on
+          # the security group, so Caddy issues its cert via TLS-ALPN-01
+          # entirely over 443. ---
+          # Digests are the published ones from the release's own
+          # caddy_2.8.4_checksums.txt (sha512, as upstream publishes). Caddy
+          # terminates TLS in front of the relay, so the bytes are verified
+          # before anything is unpacked into /usr/bin as root.
+          CADDY_VERSION="2.8.4"
+          CADDY_SHA512_arm64="5466234be3e988071cef937aedbdd94c15b6f75cf7307397e67c2641219ac9bfe2c2bb3b31fc05bc68d3b6398bbe50abfa16ccf3b127318ccac31115ad26507c"
+          CADDY_SHA512_amd64="b8bec15d14fb033562af9f207850027bcbaa1f891edc9efe00d38bf39e1bf9944f8b6b8eba041ddd4c171cd70c905174c704d705be2f23bc678fe1eaf37a2485"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            aarch64) CADDY_ARCH="arm64"; CADDY_SHA512="${!CADDY_SHA512_arm64}" ;;
+            x86_64) CADDY_ARCH="amd64"; CADDY_SHA512="${!CADDY_SHA512_amd64}" ;;
+            *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o /tmp/caddy.tar.gz \
+            "https://github.com/caddyserver/caddy/releases/download/v${!CADDY_VERSION}/caddy_${!CADDY_VERSION}_linux_${!CADDY_ARCH}.tar.gz"
+          echo "${!CADDY_SHA512}  /tmp/caddy.tar.gz" | sha512sum -c -
+          tar -xzf /tmp/caddy.tar.gz -C /usr/bin caddy
+          chmod +x /usr/bin/caddy
+          rm -f /tmp/caddy.tar.gz
+
+          useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy || true
+          install -d -o caddy -g caddy /var/lib/caddy /etc/caddy
+
+          cat > /etc/caddy/Caddyfile <<'CADDYFILE'
+          ${HostnameFqdn} {
+              reverse_proxy 127.0.0.1:${TunnelPort}
+          }
+          CADDYFILE
+
+          cat > /etc/systemd/system/caddy.service <<'UNIT'
+          [Unit]
+          Description=Caddy - reverse proxy for herdr-remote
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=caddy
+          Group=caddy
+          ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+          ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+          TimeoutStopSec=5s
+          LimitNOFILE=1048576
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+          Restart=on-failure
+          RestartSec=2s
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable --now caddy
+
+          /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource TunnelInstance --region ${AWS::Region}
+
+Outputs:
+  ElasticIp:
+    Description: >
+      Public IP to point HostnameFqdn's A record at (skip if HostedZoneId
+      was supplied - the record already exists).
+    Value: !Ref TunnelEip
+
+  InstanceId:
+    Value: !Ref TunnelInstance
+
+  TunnelUserOutput:
+    Description: SSH user the Mac's reverse tunnel connects as
+    Value: !Ref TunnelUser
+
+  TunnelPortOutput:
+    Description: Loopback port on this host the Mac's tunnel must forward to
+    Value: !Ref TunnelPort
+
+  HttpsUrl:
+    Value: !Sub "https://${HostnameFqdn}"

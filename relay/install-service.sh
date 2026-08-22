@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_DIR="$HOME/.config/herdr-remote"
 CONFIG_FILE="$CONFIG_DIR/config.env"
 SECRETS_FILE="$CONFIG_DIR/secrets.env"
+# shellcheck source=config-lib.sh
+source "$SCRIPT_DIR/config-lib.sh"
 
 # --- Detect OS ---
 
@@ -97,7 +99,7 @@ if [ -f "$CONFIG_FILE" ]; then
         exit 1
     fi
     # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
+    load_config_file "$CONFIG_FILE"
     EXISTING_INSTALL=true
 fi
 if [ -f "$SECRETS_FILE" ]; then
@@ -118,8 +120,7 @@ if [ -f "$SECRETS_FILE" ]; then
         echo "Repair it with: chmod 600 \"$SECRETS_FILE\""
         exit 1
     fi
-    # shellcheck disable=SC1090
-    source "$SECRETS_FILE"
+    load_config_file "$SECRETS_FILE"
 fi
 
 WS_PORT="${HERDR_RELAY_PORT:-8375}"
@@ -489,7 +490,35 @@ fi
 
 TUNNEL_MODE="none"
 
-if [ -z "$CLOUDFLARED_PATH" ]; then
+# HERDR_TUNNEL_MODE=aws (set by hand in config.env — see infra/aws-tunnel/)
+# replaces the whole interactive Cloudflare flow below with the reverse SSH
+# tunnel service. It was already sourced from $CONFIG_FILE at the top of
+# this script if present.
+if [ "${HERDR_TUNNEL_MODE:-}" = "aws" ]; then
+    TUNNEL_MODE="aws"
+    echo "AWS reverse tunnel"
+    echo "-------------------"
+    echo "  HERDR_TUNNEL_MODE=aws in $CONFIG_FILE — installing the reverse"
+    echo "  SSH tunnel service instead of Cloudflare Tunnel."
+
+    if [ -z "$HERDR_RELAY_TOKEN" ]; then
+        echo ""
+        echo "  Error: the AWS reverse tunnel requires HERDR_RELAY_TOKEN."
+        echo "  Unlike the Cloudflare path, this one publishes the relay on the"
+        echo "  public internet over HTTPS, and the relay grants whoever reaches"
+        echo "  it full control of your agents — read output, send keys, and"
+        echo "  trust all tools for a blocked agent. A token is mandatory here"
+        echo "  and there is no way to skip it."
+        echo ""
+        echo "  Re-run this installer and accept the token prompt, or set"
+        echo "  HERDR_RELAY_TOKEN in the environment before running it."
+        exit 1
+    fi
+
+    [ -n "${HERDR_AWS_HOST:-}" ] || echo "  WARNING: HERDR_AWS_HOST is not set — the tunnel will fail to start."
+    echo "  See infra/aws-tunnel/README.md for the EC2-side setup."
+    echo ""
+elif [ -z "$CLOUDFLARED_PATH" ]; then
     echo "Cloudflare tunnel"
     echo "-----------------"
     echo "  cloudflared not found."
@@ -544,7 +573,7 @@ fi
 
 # --- Tunnel configuration ---
 
-if [ -n "$CLOUDFLARED_PATH" ]; then
+if [ "$TUNNEL_MODE" != "aws" ] && [ -n "$CLOUDFLARED_PATH" ]; then
     echo ""
     echo "Cloudflare tunnel setup"
     echo "-----------------------"
@@ -892,6 +921,11 @@ HERDR_CLOUDFLARED_PATH=${CLOUDFLARED_PATH:-}
 HERDR_TG_ENABLED=$TELEGRAM_ENABLED
 HERDR_TG_USERNAME=${HERDR_TG_USERNAME:-}
 HERDR_TG_CHAT_TYPE=${HERDR_TG_CHAT_TYPE:-unknown}
+HERDR_AWS_HOST=${HERDR_AWS_HOST:-}
+HERDR_AWS_SSH_USER=${HERDR_AWS_SSH_USER:-}
+HERDR_AWS_SSH_PORT=${HERDR_AWS_SSH_PORT:-}
+HERDR_AWS_SSH_KEY=${HERDR_AWS_SSH_KEY:-}
+HERDR_AWS_TUNNEL_PORT=${HERDR_AWS_TUNNEL_PORT:-}
 EOF
 )
 chmod 644 "$CONFIG_TMP"
@@ -1202,6 +1236,82 @@ if [ "$TUNNEL_MODE" = "none" ] || [ "$TUNNEL_MODE" = "named-external" ]; then
         echo "  Tunnel: using existing cloudflared service (not managed by herdr-remote)."
         echo "  Hostname: ${TUNNEL_HOSTNAME:-unknown}"
     fi
+elif [ "$TUNNEL_MODE" = "aws" ]; then
+    if [ -z "$HERDR_RELAY_TOKEN" ]; then
+        echo "Error: refusing to install the AWS reverse tunnel service without"
+        echo "  HERDR_RELAY_TOKEN. This tunnel exposes the relay publicly over the"
+        echo "  internet, so a token is mandatory and cannot be skipped."
+        exit 1
+    fi
+
+    echo "Installing AWS reverse tunnel service..."
+    TUNNEL_SCRIPT="$SCRIPT_DIR/tunnel-aws.sh"
+
+    if [ "$OS" = "macos" ]; then
+        PLIST_TUNNEL="$HOME/Library/LaunchAgents/$LABEL_TUNNEL.plist"
+
+        launchctl bootout "gui/$(id -u)/$LABEL_TUNNEL" 2>/dev/null || true
+        sleep 1
+
+        cat > "$PLIST_TUNNEL" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL_TUNNEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$TUNNEL_SCRIPT</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>$LOG_DIR/tunnel-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_DIR/tunnel-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$SERVICE_PATH</string>
+    </dict>
+</dict>
+</plist>
+EOF
+
+        wait_for_label_gone "$LABEL_TUNNEL" || true
+        bootstrap_with_retry "$PLIST_TUNNEL" "$LABEL_TUNNEL" || true
+    else
+        systemctl --user stop herdr-tunnel.service 2>/dev/null || true
+
+        cat > "$UNIT_DIR/herdr-tunnel.service" <<EOF
+[Unit]
+Description=herdr-remote AWS reverse tunnel
+After=herdr-relay.service network-online.target
+Wants=network-online.target
+Requires=herdr-relay.service
+
+[Service]
+ExecStart=$TUNNEL_SCRIPT
+Restart=always
+RestartSec=10
+Environment=PATH=$SERVICE_PATH
+
+[Install]
+WantedBy=default.target
+EOF
+
+        systemctl --user daemon-reload
+        systemctl --user enable herdr-tunnel.service
+        systemctl --user start herdr-tunnel.service
+    fi
+
+    echo "  Tunnel service installed."
+    echo "  URL: https://${HERDR_AWS_HOST:-<HERDR_AWS_HOST not set>}"
 elif [ "$TUNNEL_MODE" != "none" ] && [ -n "$CLOUDFLARED_PATH" ]; then
     echo "Installing tunnel service (mode: $TUNNEL_MODE)..."
 

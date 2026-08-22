@@ -48,6 +48,10 @@ cd herdr-remote/relay && ./start.sh
 
 Open [herdr-demo.pages.dev](https://herdr-demo.pages.dev) on your phone, paste the tunnel URL.
 
+By default `start.sh` uses a free Cloudflare quick tunnel. If that doesn't
+work for you (or you'd rather run your own rendezvous host), see
+[AWS reverse tunnel](#aws-reverse-tunnel) below.
+
 ### Windows
 
 With Git, [uv](https://docs.astral.sh/uv/), and `herdr` installed:
@@ -119,6 +123,40 @@ The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers kee
 
 Finished and blocked notifications include **Open output & reply**. You can also reply directly to the notification to send a follow-up without returning to the agent list. Blocked notifications retain their one-tap approval controls.
 
+## AWS reverse tunnel
+
+An alternative to Cloudflare Tunnel: a small EC2 host you control
+terminates TLS and forwards to the relay over a reverse SSH tunnel the
+Mac opens outbound. Nothing inbound is ever opened on the Mac or the
+home router, and the relay stays loopback-only, exactly as with
+Cloudflare Tunnel.
+
+1. Deploy the rendezvous host (one-time, by hand — this repo only ships
+   the definition, it does not apply it): see
+   [`infra/aws-tunnel/README.md`](infra/aws-tunnel/README.md) for the
+   CloudFormation template, cost (~$4/mo), and deploy steps.
+2. Generate a tunnel-only SSH keypair and add its public half as the
+   stack's `TunnelPublicKey` parameter (see that README).
+3. Add to `~/.config/herdr-remote/config.env`:
+   ```bash
+   HERDR_TUNNEL_MODE=aws
+   HERDR_AWS_HOST=herdr-remote.example.com
+   HERDR_AWS_SSH_KEY=/Users/you/.ssh/herdr-remote-tunnel
+   ```
+4. `cd relay && ./install-service.sh` (or `./start.sh` for a foreground
+   run) — it detects `HERDR_TUNNEL_MODE=aws` and supervises
+   `tunnel-aws.sh` instead of `cloudflared`. Install
+   [`autossh`](https://formulae.brew.sh/formula/autossh) for fast
+   reconnects after a dropped link; a plain-`ssh` retry loop is used
+   otherwise.
+5. Open `https://<HERDR_AWS_HOST>` on your phone.
+6. To take it down again, use `relay/herdr-remote stop`, not a plain `kill`:
+   the supervised services restart a killed process within seconds. `stop`
+   stops the launchd/systemd services and then re-checks past that restart
+   delay, printing "Stopped" only once it has confirmed the relay port is
+   closed and no tunnel process remains. If it cannot confirm that, it says so
+   and exits non-zero — until then, assume the endpoint is still reachable.
+
 ## Architecture
 
 ```
@@ -134,7 +172,7 @@ Finished and blocked notifications include **Open output & reply**. You can also
        └───── WebSocket ──┴──────────────────┘
                    │
         ┌──────────┴──────────┐
-        │   relay (:8375)     │  <- Cloudflare tunnel
+        │   relay (:8375)     │  <- Cloudflare tunnel, or AWS reverse tunnel
         └──────────┬──────────┘
                    │
      ┌─────────────┼─────────────┐
@@ -174,7 +212,8 @@ uv run relay/herdr_relay.py
 - macOS 14+ (menu bar app)
 - Windows 10+ (relay/web/TUI/Telegram; no tray app)
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
-- `cloudflared` (for remote access)
+- `cloudflared` (for remote access via Cloudflare Tunnel), or `autossh` +
+  the AWS rendezvous host (see [AWS reverse tunnel](#aws-reverse-tunnel))
 - herdr 0.7+
 - Zero-dep plugin: [`herdr-push`](https://github.com/dcolinmorgan/herdr-push)
 

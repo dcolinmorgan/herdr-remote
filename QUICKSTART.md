@@ -37,7 +37,7 @@ Credentials are stored in `~/.config/herdr-remote/secrets.env` with owner-only p
 
 ## 3. Optional remote web and agent access
 
-Cloudflare is only needed when a browser or agent outside your local network must connect directly to the relay:
+A tunnel is only needed when a browser or agent outside your local network must connect directly to the relay:
 
 ```bash
 cloudflared tunnel --url http://localhost:8375
@@ -51,6 +51,10 @@ herdr plugin install dcolinmorgan/herdr-push
 export HERDR_RELAY="https://your-tunnel.trycloudflare.com"
 herdr server reload-config
 ```
+
+If Cloudflare quick tunnels don't work for you, the README's
+[AWS reverse tunnel](README.md#aws-reverse-tunnel) section covers the
+self-hosted alternative.
 
 ## 4. Monitor
 

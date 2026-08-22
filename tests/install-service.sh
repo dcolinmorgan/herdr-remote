@@ -150,6 +150,35 @@ run_install() {
         bash "$ROOT/relay/install-service.sh"
 }
 
+run_install_env() {
+    local os="$1"; shift
+    local home="$1"; shift
+    local input="$1"; shift
+    mkdir -p "$home"
+    printf '%s' "$input" | env \
+        HOME="$home" \
+        PATH="$MOCK_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+        HERDR_TEST_CALLS="$CALLS" \
+        HERDR_INSTALL_OS="$os" \
+        HERDR_INSTALL_SKIP_CLOUDFLARED=1 \
+        HERDR_INSTALL_SKIP_WEBSOCKET_SMOKE=1 \
+        HERDR_INSTALL_SETTLE_SECONDS=0 \
+        HERDR_INSTALL_SERVICE_DELAY=0 \
+        HERDR_LOG_DIR= \
+        HERDR_RELAY= \
+        HERDR_TG_CHAT_ID= \
+        HERDR_TG_CHAT_TYPE= \
+        HERDR_TG_ENABLED= \
+        HERDR_TG_TOKEN= \
+        HERDR_TG_USERNAME= \
+        HERDR_TEST_NONROOT_UID="${HERDR_TEST_NONROOT_UID:-501}" \
+        HERDR_TEST_PGREP="${HERDR_TEST_PGREP:-0}" \
+        HERDR_TEST_ROOT="${HERDR_TEST_ROOT:-0}" \
+        HERDR_TEST_OWNER_UID="${HERDR_TEST_OWNER_UID:-}" \
+        "$@" \
+        bash "$ROOT/relay/install-service.sh"
+}
+
 run_uninstall() {
     local os="$1"
     local home="$2"
@@ -344,5 +373,40 @@ assert_contains "$TMP/calls.log" 'launchctl bootout gui/501/com.herdr-remote.tun
 assert_contains "$TMP/calls.log" 'systemctl --user enable herdr-telegram.service'
 assert_contains "$TMP/calls.log" 'systemctl --user disable herdr-tunnel.service'
 assert_not_contains "$TMP/calls.log" '123456:ABC_def'
+
+# The AWS reverse tunnel publishes the relay on the public internet, so the
+# installer must refuse to install it without a token. This is the control the
+# whole AWS path's security rests on: the relay itself accepts an empty token
+# when bound to loopback, so nothing downstream would catch it.
+AWS_NOTOKEN_HOME="$TMP/aws-notoken-home"
+mkdir -p "$AWS_NOTOKEN_HOME/.config/herdr-remote"
+printf 'HERDR_TUNNEL_MODE=aws\nHERDR_AWS_HOST=relay.example.com\n' \
+    > "$AWS_NOTOKEN_HOME/.config/herdr-remote/config.env"
+chmod 600 "$AWS_NOTOKEN_HOME/.config/herdr-remote/config.env"
+if run_install_env macos "$AWS_NOTOKEN_HOME" $'n\nn\nn\nn\n' HERDR_RELAY_TOKEN= \
+        > "$TMP/aws-notoken.log" 2>&1; then
+    echo "aws mode without a relay token unexpectedly succeeded" >&2
+    exit 1
+fi
+assert_contains "$TMP/aws-notoken.log" 'requires HERDR_RELAY_TOKEN'
+[ ! -f "$AWS_NOTOKEN_HOME/Library/LaunchAgents/com.herdr-remote.tunnel.plist" ] || {
+    echo "aws tunnel service was installed despite the missing token" >&2
+    exit 1
+}
+
+# With a token the same invocation must actually reach the tunnel install and
+# persist the aws mode, so the refusal above is proven to be about the token
+# and not about the aws branch being unreachable in this harness.
+AWS_TOKEN_HOME="$TMP/aws-token-home"
+mkdir -p "$AWS_TOKEN_HOME/.config/herdr-remote"
+printf 'HERDR_TUNNEL_MODE=aws\nHERDR_AWS_HOST=relay.example.com\n' \
+    > "$AWS_TOKEN_HOME/.config/herdr-remote/config.env"
+chmod 600 "$AWS_TOKEN_HOME/.config/herdr-remote/config.env"
+run_install_env macos "$AWS_TOKEN_HOME" $'n\nn\nn\nn\n' \
+    HERDR_RELAY_TOKEN=abcdefghijklmnop1234 > "$TMP/aws-token.log" 2>&1 || true
+assert_not_contains "$TMP/aws-token.log" 'requires HERDR_RELAY_TOKEN'
+assert_file "$AWS_TOKEN_HOME/Library/LaunchAgents/com.herdr-remote.tunnel.plist"
+assert_contains "$AWS_TOKEN_HOME/Library/LaunchAgents/com.herdr-remote.tunnel.plist" 'tunnel-aws.sh'
+assert_contains "$AWS_TOKEN_HOME/.config/herdr-remote/config.env" 'HERDR_TUNNEL_MODE=aws'
 
 echo "installer service tests passed"
