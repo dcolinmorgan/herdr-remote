@@ -37,7 +37,10 @@ fi
 CONFIG="$HOME/.config/herdr-remote/config.env"
 SECRETS="$HOME/.config/herdr-remote/secrets.env"
 LOG="$REPO/relay/relay.log"
-WEB_APP="https://herdr-remote.pages.dev"
+# The hosted web app at herdr-remote.pages.dev is gated behind the upstream
+# author's Cloudflare Access org (302 -> graffold.cloudflareaccess.com), so no
+# operator can reach it and no local change unlocks it. We point at the one-tap
+# tunnel link (tap_url) instead, which needs no hosted page or setup.
 CF_URL_RE='https://[a-z0-9-]*\.trycloudflare\.com'
 
 die() { printf 'herdr-remote: %s\n' "$1" >&2; exit 1; }
@@ -246,7 +249,6 @@ cmd_start() {
   done
 
   echo
-  echo "  Web app:  $WEB_APP"
   echo "  URL:      $url"
   echo "  Token:    $tok"
   echo
@@ -350,7 +352,6 @@ cmd_status() {
     echo "  URL:     none recorded"
   fi
   echo "  Token:   $(token_value 2>/dev/null || echo 'not set')"
-  echo "  Web app: $WEB_APP"
   if [ -n "$u" ]; then
     echo "  Tap:     $(tap_url)"
     echo "           (embeds the token; it lands in your browser history)"
