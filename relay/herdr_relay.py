@@ -67,12 +67,43 @@ POLL_INTERVAL = 2
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Optional: shared secret for relay auth
 TRUSTED_ORIGINS = [o.strip().lower() for o in os.environ.get("HERDR_TRUSTED_ORIGINS", "").split(",") if o.strip()]
 
+# Session selection per source. Key is None for local, else the "user@host"
+# string from HERDR_REMOTES. Value is a session name, or None to follow
+# herdr's own default session.
+DEFAULT_LOCAL_SESSION = os.environ.get("HERDR_SESSION") or None
+ACTIVE_SESSIONS = {}
+
+
+def active_session_for(remote=None):
+    """Session name for one source, or None for herdr's default session."""
+    if remote in ACTIVE_SESSIONS:
+        return ACTIVE_SESSIONS[remote]
+    return DEFAULT_LOCAL_SESSION if remote is None else None
+
+
+def _herdr_env(session):
+    """Child environment targeting one session.
+
+    Returning the inherited environment is wrong for the default session: the
+    relay's own env pins HERDR_SESSION via config.env, and HERDR_SOCKET_PATH is
+    present whenever the relay runs inside a herdr pane. Both must be removed.
+    """
+    env = os.environ.copy()
+    if session:
+        env["HERDR_SESSION"] = session
+        env.pop("HERDR_SOCKET_PATH", None)
+    else:
+        env.pop("HERDR_SESSION", None)
+        env.pop("HERDR_SOCKET_PATH", None)
+    return env
+
 # VAPID Web Push
 VAPID_PUBLIC_KEY = os.environ.get("HERDR_VAPID_PUBLIC", "")
 VAPID_PRIVATE_KEY = os.environ.get("HERDR_VAPID_PRIVATE", "")
 VAPID_SUBJECT = os.environ.get("HERDR_VAPID_SUBJECT", "mailto:herdr@localhost")
 push_subscriptions = []  # list of PushSubscription dicts
 PUSH_SUBS_FILE = os.path.join(LOG_DIR, "push_subs.json")
+ACTIVE_SESSIONS_FILE = os.path.join(LOG_DIR, "active_sessions.json")
 
 if RELAY_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_TOKEN:
     raise SystemExit("HERDR_RELAY_TOKEN is required when HERDR_RELAY_HOST binds beyond loopback")
@@ -106,6 +137,7 @@ known_panes = set()
 agent_cache = {}
 _remote_locks = {}
 _remote_locks_guard = threading.Lock()
+_session_list_cache = {}  # source -> (monotonic_timestamp, sessions_list)
 
 
 SAFE_RESPONSES = {
@@ -228,6 +260,41 @@ def _save_push_subs():
         json.dump(push_subscriptions, f)
 
 
+def _load_active_sessions():
+    """Restore session selection. Mirrors _load_push_subs: never raises.
+
+    Values are restricted to str or None: a hand-edited or corrupted entry
+    like {"local": 5} would otherwise land in ACTIVE_SESSIONS[None] as-is,
+    then _herdr_env(5) sets env["HERDR_SESSION"] = 5 and
+    subprocess.run(env=...) raises TypeError -- which run_herdr swallows,
+    so the relay silently reports zero agents forever, surviving every
+    restart. This is also the one place a persisted value reaches
+    _invoke_herdr's remote branch (which interpolates it straight into the
+    ssh argv) without ever passing through apply_session_switch's
+    get_sessions() allowlist, so gating the type on load is the load-time
+    half of keeping that argv interpolation sane.
+    """
+    if not os.path.isfile(ACTIVE_SESSIONS_FILE):
+        return
+    try:
+        with open(ACTIVE_SESSIONS_FILE) as f:
+            stored = json.load(f)
+        if not isinstance(stored, dict):
+            return
+    except Exception:
+        return
+    for key, value in stored.items():
+        if value is not None and not isinstance(value, str):
+            continue
+        ACTIVE_SESSIONS[None if key == "local" else key] = value
+
+
+def _save_active_sessions():
+    payload = {("local" if k is None else k): v for k, v in ACTIVE_SESSIONS.items()}
+    with open(ACTIVE_SESSIONS_FILE, "w") as f:
+        json.dump(payload, f)
+
+
 async def send_web_push(title: str, body: str, url: str = "/", clear: bool = False):
     """Send push notification to all registered subscriptions.
     
@@ -266,11 +333,17 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
         _save_push_subs()
 
 _load_push_subs()
+_load_active_sessions()
 
 
 def _invoke_herdr(*args, remote=None):
+    session = active_session_for(remote)
     if remote:
-        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote, REMOTE_HERDR, *args]
+        cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote]
+        if session:
+            # An env= would not survive ssh; the remote shell applies this.
+            cmd.append(f"HERDR_SESSION={session}")
+        cmd += [REMOTE_HERDR, *args]
         with _remote_locks_guard:
             remote_lock = _remote_locks.get(remote)
             if remote_lock is None:
@@ -280,7 +353,10 @@ def _invoke_herdr(*args, remote=None):
             return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
 
     cmd = [HERDR, *args]
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+    return subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=15, env=_herdr_env(session),
+    )
 
 
 def run_herdr_result(*args, remote=None):
@@ -333,6 +409,32 @@ def get_all_agents():
     return agents
 
 
+def get_sessions(remote=None):
+    """List herdr sessions for one source as [{"name", "running"}].
+
+    Cached per source for SESSION_LIST_CACHE_TTL: sessions_message() calls
+    this once per source on every client connect, each a blocking
+    subprocess (ssh with up to a 15s timeout for remotes) on the event
+    loop, and herdr_telegram.py opens a fresh WebSocket per button press
+    with no X-Herdr-Remote-Command header -- so every press previously
+    paid N+1 of these. apply_session_switch()'s validation also goes
+    through this cache, which keeps it checking against the same list the
+    user was actually shown rather than a fresher one they never saw.
+    """
+    cached = _session_list_cache.get(remote)
+    if cached is not None and time.monotonic() - cached[0] < SESSION_LIST_CACHE_TTL:
+        return cached[1]
+    raw = run_herdr("session", "list", remote=remote)
+    sessions = []
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[0] == "name":
+            continue
+        sessions.append({"name": parts[0], "running": parts[1] == "running"})
+    _session_list_cache[remote] = (time.monotonic(), sessions)
+    return sessions
+
+
 def update_pane_maps(agents):
     current_pane_ids = {agent["pane_id"] for agent in agents}
     for agent in agents:
@@ -349,6 +451,129 @@ def update_pane_maps(agents):
             last_statuses.pop(pane_id, None)
             last_blocked_prompts.pop(pane_id, None)
             agent_cache.pop(pane_id, None)
+
+
+POLL_GENERATION = 0
+
+
+def reset_pane_state():
+    """Drop all pane-keyed state and invalidate in-flight polls.
+
+    pane_id is session-local: w1:p1 exists in every session. update_pane_maps
+    prunes only panes absent from the new list, so a pane_id present in both
+    sessions would carry its state across a switch — suppressing a real blocked
+    notification, or letting a command route to the wrong session's agent.
+
+    Also drains event_queue: a pre-switch agent_event dequeued after this call
+    must not be able to re-seed state under a stale pane_id. Must only ever
+    be called from the event-loop thread; POLL_GENERATION += 1 is not atomic.
+
+    Also clears _session_list_cache: a real switch must always be validated
+    and displayed against a freshly read session list, never a pre-switch
+    one still inside its TTL.
+    """
+    global POLL_GENERATION
+    known_panes.clear()
+    agent_cache.clear()
+    pane_remote_map.clear()
+    last_statuses.clear()
+    last_blocked_prompts.clear()
+    _session_list_cache.clear()
+    while True:
+        try:
+            event_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+    POLL_GENERATION += 1
+
+
+def _source_key(host):
+    """Map a client-supplied host to a source key, or raise KeyError."""
+    if host in (None, "", "local"):
+        return None
+    if host in REMOTES:
+        return host
+    raise KeyError(host)
+
+
+def apply_session_switch(host, session, ip="", device=""):
+    """Point one source at a session. Returns (ok, error_message, changed).
+
+    `changed` is False on the no-op path (already-active selection) and on
+    any rejection, True only when ACTIVE_SESSIONS was actually mutated.
+    Callers must skip the broadcast + re-poll when it's False -- that's the
+    expensive part the no-op short-circuit below exists to avoid, and it is
+    defeated if the caller runs it anyway.
+    """
+    try:
+        source = _source_key(host)
+    except KeyError:
+        return False, f"unknown host: {host}", False
+
+    # Re-selecting the already-active session is a no-op: skip the blocking
+    # `herdr session list` call and, crucially, the pane-state reset below.
+    # `source in ACTIVE_SESSIONS` (not `.get()`) matters here -- a key that
+    # has never been set is not the same thing as an explicit None value.
+    if source in ACTIVE_SESSIONS and ACTIVE_SESSIONS[source] == session:
+        return True, "", False
+
+    if session is not None:
+        if not isinstance(session, str):
+            # session lands in a set-membership check next; a list/dict is
+            # unhashable there and would raise instead of being rejected.
+            return False, f"unknown session: {session}", False
+        names = {s["name"] for s in get_sessions(remote=source)}
+        if session not in names:
+            return False, f"unknown session: {session}", False
+
+    ACTIVE_SESSIONS[source] = session
+    try:
+        _save_active_sessions()
+    except Exception:
+        # A save failure must not half-apply the switch: pane state still
+        # has to reset and the action still has to audit, or stale
+        # pane-keyed state survives under the newly active session.
+        log.exception("failed to persist active sessions: host=%s session=%s", host, session)
+    reset_pane_state()
+    audit("session_switch", ip, device, "", f"host={host} session={session}")
+    log.info("session switch: host=%s session=%s", host, session)
+    return True, "", True
+
+
+SESSION_REFRESH_EVERY = 15   # poll cycles; 30s at POLL_INTERVAL=2
+SESSION_LIST_CACHE_TTL = SESSION_REFRESH_EVERY * POLL_INTERVAL   # 30s
+
+
+def sessions_message():
+    """Per-source session lists and the active selection for each."""
+    sources = []
+    for source in [None, *REMOTES]:
+        sources.append({
+            "host": "local" if source is None else source,
+            "active": active_session_for(source),
+            "sessions": get_sessions(remote=source),
+        })
+    return {"type": "sessions", "sources": sources}
+
+
+async def broadcast_sessions():
+    gen = POLL_GENERATION
+    msg = sessions_message()
+    # This guard cannot fire today: sessions_message -> get_sessions ->
+    # run_herdr -> subprocess.run is entirely synchronous, so nothing can
+    # bump POLL_GENERATION between the two lines above. It stays correct
+    # and becomes load-bearing the moment that chain gains an await (e.g.
+    # a future to_thread fix for the blocking subprocess call).
+    #
+    # It does NOT cover the real staleness window: broadcast() below awaits
+    # ws.send() once per client, so a switch landing mid fan-out can still
+    # let a client late in that loop see a pre-switch `active` value. That
+    # window is shared by every message type, self-heals within one
+    # refresh cycle (~30s), and closing it means touching broadcast()
+    # itself.
+    if gen != POLL_GENERATION:
+        return          # a switch landed while building this; the message is stale
+    await broadcast(msg)
 
 
 def read_pane(pane_id, remote=None):
@@ -618,6 +843,7 @@ async def broadcast(msg):
     clients.difference_update(dead)
 
 async def send_current_snapshot(ws):
+    await ws.send(json.dumps(sessions_message()))
     agents = get_all_agents()
     update_pane_maps(agents)
     await ws.send(json.dumps({"type": "agents", "agents": agents}))
@@ -635,19 +861,26 @@ async def send_current_snapshot(ws):
 
 
 async def poll_loop():
+    cycle = 0
     while True:
         try:
             await _poll_once()
+            if cycle % SESSION_REFRESH_EVERY == 0:
+                await broadcast_sessions()
         except Exception:
             log.exception("poll cycle failed; retrying")
+        cycle += 1
         await asyncio.sleep(POLL_INTERVAL)
 
 
 async def _poll_once():
+        gen = POLL_GENERATION
         agents = get_all_agents()
         update_pane_maps(agents)
         # Always broadcast (even empty list) so clients stay in sync
         await broadcast({"type": "agents", "agents": agents})
+        if gen != POLL_GENERATION:
+            return          # a switch landed; this snapshot is stale
         for a in agents:
             pid, status = a["pane_id"], a["status"]
             if status == "blocked":
@@ -674,14 +907,19 @@ async def _poll_once():
                         body=content[:120],
                         url=f"/?pane={pid}",
                     )
+                    if gen != POLL_GENERATION:
+                        return
             else:
                 if last_statuses.get(pid) == "blocked":
                     await send_web_push("", "", clear=True)
+                    if gen != POLL_GENERATION:
+                        return
                 last_blocked_prompts.pop(pid, None)
             last_statuses[pid] = status
 async def event_push():
     while True:
         event = await event_queue.get()
+        gen = POLL_GENERATION
         pane_id = event.get("pane_id", "")
         update = None
         if pane_id and event.get("type") == "agent_event":
@@ -713,6 +951,8 @@ async def event_push():
                 })
             update_pane_maps(agents)
             await broadcast({"type": "agents", "agents": agents})
+            if gen != POLL_GENERATION:
+                continue        # a switch landed; this event is stale
             agent_cache[pane_id] = {**agent_cache.get(pane_id, {}), **agent_data}
             if status != "blocked":
                 await broadcast(update)
@@ -730,6 +970,14 @@ async def event_push():
                 host,
                 content or agent_data.get("prompt", "Agent is blocked"),
             )
+            # Unreachable with a mismatch today: whichever branch got here
+            # did so with no await since the last gen check (the "agents"
+            # broadcast above already `continue`s on staleness before this
+            # point, and read_pane/blocked_message are synchronous), so gen
+            # cannot have changed. Kept as a guard for a future refactor
+            # that inserts an await between this check and the writes below.
+            if gen != POLL_GENERATION:
+                continue        # a switch landed; this event is stale
             last_blocked_prompts[pane_id] = (
                 message["prompt_id"],
                 tuple(message["selected_options"]),
@@ -987,6 +1235,32 @@ async def handle_client(ws):
                 if request_id:
                     response["request_id"] = request_id
                 await ws.send(json.dumps(response))
+            elif msg_type == "session_switch":
+                request_id = msg.get("request_id")
+                ok, err, changed = apply_session_switch(msg.get("host"), msg.get("session"), ip, device)
+                if not ok:
+                    response = {"type": "error", "message": err}
+                    if request_id:
+                        response["request_id"] = request_id
+                    await ws.send(json.dumps(response))
+                else:
+                    # A no-op switch (already-active selection) still acks,
+                    # but must skip the broadcast and re-poll -- that's the
+                    # expensive part `changed` exists to let us avoid.
+                    if changed:
+                        await broadcast_sessions()
+                    if request_id:
+                        await ws.send(json.dumps({
+                            "type": "command_result",
+                            "command": "session_switch",
+                            "request_id": request_id,
+                            "ok": True,
+                        }))
+                    if changed:
+                        try:
+                            await _poll_once()
+                        except Exception:
+                            log.exception("post-switch poll failed")
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
             elif msg_type == "read_pane":
