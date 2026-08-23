@@ -1207,6 +1207,9 @@ function handleMessage(msg) {
       }
     }
     const el = document.getElementById('termContent');
+    // A read that was already in flight when the drag started, or a manual refresh: the tick's own
+    // guard cannot catch either, and this swap is what would wipe the selection.
+    if (selectionInside(el)) return;
     const prevHeight = el.scrollHeight;
     const prevScroll = el.scrollTop;
     el.replaceChildren(ansiFragment(msg.content || '(empty)'));
@@ -1404,6 +1407,30 @@ function meaningfulTabLabel(label, tabCount) {
   return trimmed;
 }
 
+// A rebuild drops the selection the reader is holding. Both containers that carry selectable text
+// are rewritten on a timer -- the mirror every 3s from `pane_content`, the herd list on every 2s
+// `agents` snapshot -- and `replaceChildren`/`innerHTML` detach the very text nodes the range's
+// endpoints live in, so the browser has nothing left to anchor it to and the highlight vanishes
+// mid-copy. A selection could therefore not survive three seconds, which is less than it takes to
+// reach the copy button on a phone.
+//
+// So a tick that would rewrite a container the reader is selecting inside does not run. Nothing is
+// queued: the tick repeats, so what it skipped arrives on the next one once the selection is
+// released. The pause explains itself -- the highlight is on screen -- and it is the only honest
+// option, since there is no way to re-anchor a range to nodes that no longer exist.
+function selectionInside(el) {
+  if (!el) return false;
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return false;
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const range = sel.getRangeAt(i);
+    // The endpoints are TEXT nodes, and `Node.contains` takes any node -- comparing elements would
+    // miss the common case, where both ends sit inside one text node.
+    if (el.contains(range.startContainer) || el.contains(range.endContainer)) return true;
+  }
+  return false;
+}
+
 function render() {
   document.getElementById('agentCount').textContent = agents.length ? `${agents.length}` : '';
   const rows = workspaceRows();
@@ -1417,8 +1444,11 @@ function render() {
   const occupied = new Set([...agents, ...shellPanes]
     .map(p => agentWorkspaceKey(p)).filter(k => !k.endsWith('|')));
   if (occupied.size <= 1) { activeWorkspace = null; activeTab = null; }
-  const html = activeWorkspace ? renderSpaceView(rows) : renderHerd(rows, occupied);
-  document.getElementById('agents').innerHTML = html;
+  const list = document.getElementById('agents');
+  // Checked here rather than at the top of render(), so the name maps and the sibling strips still
+  // track the truth while the list itself holds still.
+  if (selectionInside(list)) return;
+  list.innerHTML = activeWorkspace ? renderSpaceView(rows) : renderHerd(rows, occupied);
   bindLongPressHandlers();
 }
 
@@ -2061,7 +2091,15 @@ function openTerminal(paneId) {
     }
   }
   refreshPane();
-  refreshInterval = setInterval(refreshPane, 3000);
+  refreshInterval = setInterval(mirrorTick, 3000);
+}
+
+// The interval's whole body, named so the rule can be measured rather than read. The read is not
+// even sent while a selection is held: it would cost the relay a herdr call -- an SSH round trip
+// for a remote host -- to fetch content this tick has already decided it may not render.
+function mirrorTick() {
+  if (selectionInside(document.getElementById('termContent'))) return;
+  refreshPane();
 }
 
 function closeTerminal() { navClose('terminal', hideTerminal); }
