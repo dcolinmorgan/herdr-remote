@@ -45,6 +45,10 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .header button:hover { color: var(--text); background: var(--border); }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .dot.pulse { animation: pulse 2s infinite; }
+/* A terminal has no status to colour -- herdr reports agent_status "unknown" for every pane
+   without an agent -- so its dot is hollow rather than a fourth shade of grey competing with
+   Done and Idle. Same size and position, so the rows still line up down the left edge. */
+.dot-hollow { background: none; border: 1.5px solid var(--muted); opacity: 0.7; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 .view { flex: 1; overflow-y: auto; }
@@ -487,6 +491,17 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 <script>
 
 let ws = null, agents = [], activePane = null, refreshInterval = null, userScrolledUp = false;
+// The panes with no agent in them, from the relay's `panes` array. Empty unless the relay was
+// started with HERDR_SHELL_PANES -- a client cannot tell "switched off" from "none here", and
+// does not need to: both mean there is nothing to show.
+let shellPanes = [];
+// What is running in the pane currently open, once it has been asked for. pane_id -> {name,cmdline}
+let paneProcess = {};
+
+function shellPane(id) { return shellPanes.find(p => p.pane_id === id); }
+// One lookup for both kinds. Agents win: a pane_id is unique per host and the two lists are
+// disjoint, but if a pane gains an agent between polls the agent record is the fuller one.
+function paneById(id) { return agents.find(a => a.pane_id === id) || shellPane(id); }
 let timeline = [], prevStatuses = {};
 // Selections are host-qualified keys, not bare ids: every herdr numbers its own workspaces w1,
 // w2, ... so on a relay watching two hosts an id alone picks out two different spaces.
@@ -1037,6 +1052,7 @@ function handleMessage(msg) {
   if (msg.type === 'agents') {
     switchingSession = false;
     if (msg.spaces) spaces = msg.spaces;
+    if (Array.isArray(msg.panes)) shellPanes = msg.panes;
     // Track timeline on status changes
     for (const a of msg.agents) {
       const prev = prevStatuses[a.pane_id];
@@ -1098,6 +1114,14 @@ function handleMessage(msg) {
     render();
     if (msg.pane_id===activePane) openTerminal(activePane);
   } else if (msg.type === 'pane_content' && msg.pane_id === activePane) {
+    if (msg.process && msg.process.name) {
+      paneProcess[msg.pane_id] = msg.process;
+      const shell = shellPane(msg.pane_id);
+      if (shell) {
+        document.getElementById('termTitle').textContent =
+          `${shell.label||shell.project||shell.pane_id} · ${msg.process.name}`;
+      }
+    }
     const el = document.getElementById('termContent');
     const prevHeight = el.scrollHeight;
     const prevScroll = el.scrollTop;
@@ -1172,7 +1196,8 @@ function render() {
   // The strip appears exactly as often as it did before this view knew the real hierarchy: when
   // the agents themselves span more than one space. Spaces holding only shell panes are worth
   // showing once it is up, but not worth raising it on their own.
-  const occupied = new Set(agents.map(a => agentWorkspaceKey(a)).filter(k => !k.endsWith('|')));
+  const occupied = new Set([...agents, ...shellPanes]
+    .map(a => agentWorkspaceKey(a)).filter(k => !k.endsWith('|')));
   if (occupied.size <= 1) {
     activeWorkspace = null;
     activeTab = null;
@@ -1227,18 +1252,23 @@ function renderWorkspaces(rows) {
   const working = filtered.filter(a => a.status==='working');
   const done = filtered.filter(a => a.status==='done');
   const idle = filtered.filter(a => a.status==='idle'||a.status==='unknown');
+  let shells = shellPanes;
+  if (activeWorkspace) shells = shells.filter(p => agentWorkspaceKey(p) === activeWorkspace);
+  if (activeTab) shells = shells.filter(p => agentTabKey(p) === activeTab);
   if (working.length) html += section('Working', 'var(--green)', working);
   if (done.length) html += section('Done', 'var(--muted)', done);
   if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  if (!filtered.length) html += emptySpaceNotice(rows);
-  if (!agents.length && !spaces.workspaces.length) html = '<div class="empty">Waiting for agents…</div>';
+  html += shellSection(shells);
+  if (!filtered.length && !shells.length) html += emptySpaceNotice(rows);
+  if (!agents.length && !shellPanes.length && !spaces.workspaces.length) html = '<div class="empty">Waiting for agents…</div>';
   document.getElementById('agents').innerHTML = html;
   bindLongPressHandlers();
 }
 
 function emptySpaceNotice(rows) {
-  // A space can hold panes and still hold no agent -- shell panes, an editor, a build. Saying how
-  // many are there beats an empty list that reads as "nothing here".
+  // Only reached when nothing at all was drawn for this space -- no agents and no terminals. With
+  // HERDR_SHELL_PANES on that means herdr's pane count is all the relay knows about the space; the
+  // count still beats an empty list that reads as "nothing here".
   const target = (activeTab ? tabRows(activeWorkspace) : rows).find(r => r.key === (activeTab || activeWorkspace));
   const panes = target?.paneCount || 0;
   if (!panes) return '<div class="empty">No agents here.</div>';
@@ -1255,7 +1285,9 @@ function renderAgentList(list) {
   if (working.length) html += section('Working', 'var(--green)', working);
   if (done.length) html += section('Done', 'var(--muted)', done);
   if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  if (!list.length) html = emptyStateHtml();
+  // The flat list is the single-space case, so every terminal the relay knows belongs here.
+  html += shellSection(shellPanes);
+  if (!list.length && !shellPanes.length) html = emptyStateHtml();
   document.getElementById('agents').innerHTML = html;
   bindLongPressHandlers();
 }
@@ -1437,6 +1469,33 @@ function agentCard(a) {
   </div>`;
 }
 
+function shellCard(p) {
+  // Same shape as an agent card so the list reads as one list, but the identity line is the
+  // pane id rather than a harness name: measured on a real host, 20 shell panes shared only 12
+  // distinct cwd basenames, so eight of them are indistinguishable from a sibling by directory.
+  // The id always separates them; `process` (one extra CLI call) is fetched only on open.
+  const label = p.label || p.project || p.pane_id;
+  const host = p.host && p.host !== 'local'
+    ? ` <span style="color:var(--orange);font-size:0.6rem">@${escapeHtml(p.host)}</span>` : '';
+  const cwd = p.cwd ? p.cwd.split('/').slice(-2).join('/') : '';
+  const focused = p.focused ? ' focused' : '';
+  return `<div class="agent shell${focused}" role="button" tabindex="0" data-shell="1"
+    aria-label="${escapeAttr(label)}, terminal${p.focused ? ', focused in herdr' : ''}"
+    data-pane-id="${escapeAttr(p.pane_id)}" data-agent-name="${escapeAttr(label)}"
+    onclick="openTerminal('${escapeAttr(p.pane_id)}')"
+    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(p.pane_id)}')}">
+    <span class="dot dot-hollow" aria-hidden="true"></span>
+    <div class="info"><div class="project">${escapeHtml(label)}${host}</div><div class="meta"><span style="font-family:monospace">${escapeHtml(p.pane_id)}</span>${cwd ? ' · ' + escapeHtml(cwd) : ''}</div></div>
+    <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
+  </div>`;
+}
+
+function shellSection(list) {
+  if (!list.length) return '';
+  return `<div class="section-header"><span class="dot dot-hollow"></span>Terminals <span style="opacity:0.6">(${list.length})</span></div>`
+    + list.map(p => shellCard(p)).join('');
+}
+
 function section(title, color, list) {
   return `<div class="section-header"><span class="dot" style="background:${color}"></span>${title}</div>` +
     list.map(a => agentCard(a)).join('');
@@ -1448,11 +1507,16 @@ function openTerminal(paneId) {
   if (activePane !== paneId) hideHistory();
   activePane = paneId; paneLines = PANE_LINES_BASE; userScrolledUp = false;
   const a = agents.find(x => x.pane_id===paneId);
-  document.getElementById('termTitle').textContent = a?`${a.label||a.workspace_label||a.project} · ${a.agent}`:paneId;
+  const shell = shellPane(paneId);
+  // A terminal is named by its id, because its directory usually is not unique on the host. The
+  // process name lands here once the read comes back (see paneTitle).
+  document.getElementById('termTitle').textContent = a
+    ? `${a.label||a.workspace_label||a.project} · ${a.agent}`
+    : shell ? `${shell.label||shell.project||shell.pane_id} · ${shell.pane_id}` : paneId;
   // A pane that names no agent session has no transcript to show. `false` only -- undefined means
-  // the relay doesn't report it, and the button stays.
+  // the relay doesn't report it, and the button stays. A terminal never has one.
   const historyBtn = document.querySelector('.history-btn');
-  if (historyBtn) historyBtn.style.display = (a && a.has_session === false) ? 'none' : '';
+  if (historyBtn) historyBtn.style.display = (shell || (a && a.has_session === false)) ? 'none' : '';
   document.getElementById('agentListView').style.display = 'none';
   if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
@@ -1527,7 +1591,7 @@ let paneLines = PANE_LINES_BASE;
 // does -- and herdr retained nothing behind the viewport, so "load older" can never return a line
 // it doesn't already have. undefined means an older relay that doesn't report it: stay permissive.
 function paneScrollback() {
-  const a = agents.find(x => x.pane_id === activePane);
+  const a = paneById(activePane);
   return a ? a.scrollback : undefined;
 }
 function canLoadMore() {
@@ -1539,7 +1603,12 @@ function refreshPane() {
   // `visible` on a pane with no ring: same content, and it can never make the relay pay for
   // herdr's multi-second scrollback harvest. `recent` only where there is a ring to read.
   const source = paneScrollback() === 0 ? 'visible' : 'recent';
-  ws.send(JSON.stringify({type:'read_pane',pane_id:activePane,lines:paneLines,format:'ansi',source}));
+  const request = {type:'read_pane',pane_id:activePane,lines:paneLines,format:'ansi',source};
+  // One extra CLI call on the relay -- one SSH round trip for a remote host -- so it is asked
+  // once per terminal, not on the 3s mirror tick. A directory does not identify a shell pane;
+  // "zsh" versus "vim" versus an hour-old build does.
+  if (shellPane(activePane) && !paneProcess[activePane]) request.process = true;
+  ws.send(JSON.stringify(request));
 }
 function loadMore() {
   if (!canLoadMore()) return;
@@ -2057,6 +2126,14 @@ function sendText() {
   const i=document.getElementById('termInput');
   if(!i.value||!ws||!activePane)return;
   const agent=agents.find(a=>a.pane_id===activePane);
+  if (!agent && shellPane(activePane)) {
+    // One message rather than send_text + Enter: the relay runs both halves and audits it as
+    // respond_shell, which is the line that says a command was run rather than text typed.
+    ws.send(JSON.stringify({type:'respond',pane_id:activePane,text:i.value}));
+    i.value='';
+    setTimeout(refreshPane,400);
+    return;
+  }
   if(agent&&agent.status==='blocked') {
     ws.send(JSON.stringify({type:'respond',pane_id:activePane,prompt_id:agent.prompt_id,text:i.value}));
   } else {

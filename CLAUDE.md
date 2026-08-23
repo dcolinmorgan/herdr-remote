@@ -164,6 +164,25 @@ Two things were found by measuring rather than reading, both in the same trim pa
   30px keys tinted from the same accents as the answers above them; it costs the dock 14px while a
   pane is blocked.
 
+Panes with no agent in them render as a **Terminals** section in the same list, from the relay's
+`panes` array — a hollow dot rather than a fourth shade of grey competing with Done and Idle,
+because a terminal has no status to colour. The card's identity line is the **pane id**, not the
+harness name an agent card carries: measured on a real host, 20 shell panes shared only 12 distinct
+`cwd` basenames, so eight of them are indistinguishable from a sibling by directory. The workspace
+and tab chips filter them like anything else, and a tab holding only a terminal now shows it
+instead of falling through to "N panes here, none running an agent".
+
+Opening one differs from opening an agent pane in three measured ways, all of them tested:
+`canLoadMore` is **true** (agent panes report `scrollback: 0` without exception, these report up to
+693, and the read costs 10ms rather than a multi-second harvest), the History chip is **hidden**
+(there is no transcript, and the relay would answer `no-session`), and the opening read carries
+`process: true` **once** — one extra CLI call, one SSH round trip for a remote host, so the 3s
+mirror tick must not repeat it. When it comes back the title swaps the pane id for what is actually
+running (`herdr-remote-dev · zsh`). Typing goes out as a single `respond` rather than
+`send_text` + `Enter`, so the relay audits it as `respond_shell` — the line that says a command was
+run rather than text typed at an agent. With `HERDR_SHELL_PANES` off the `panes` key is simply
+absent and the page renders exactly as it did before, which `test_web_shell.py` asserts directly.
+
 Every toggle in the session view says whether its panel is open through **`aria-pressed`**, and the
 CSS fills the chip off that attribute alone — `setPressed` is the only writer, so the pixels and the
 screen reader cannot drift apart. Search, History and the two dock buttons used to render pixel
