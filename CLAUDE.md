@@ -157,39 +157,61 @@ the top of it a downward drag chained to the document and handed Chrome its pull
 reloads the whole app — losing the open session, the panel, and however far back you had paged. The
 two are asserted together so they cannot drift apart.
 
-**A selection has to survive a page that rebuilds itself.** `replaceChildren` does not merely lose
-one anchored inside it — measured in chromium, it **collapses the selection to `(container, 0)`**:
-`rangeCount` stays 1 and the anchor becomes the mirror itself at offset 0, so the next extend (a drag
-continuing, a phone's handle being moved) runs from the top of the output and the reader watches the
-**first line** highlight itself. Three things follow, and `tests/test_web_selection.py` measures each
-including that collapse:
+**A selection has to survive a page that rebuilds itself, and that is a question about blast
+radius.** Measured in chromium, on every way there is to update text under one:
 
-- **No timed rebuild runs under a selection.** `selectionInside` is the one predicate, checked in
-  four places: `mirrorTick`, which then does not even *send* the read (a herdr call, an SSH round
-  trip on a remote host, for content it has already decided it may not render); the `pane_content`
-  handler, for a read in flight when the drag started and for a manual refresh; `loadMore`, whose
-  bigger read answers with hundreds of lines *in front* of what is on screen and is therefore the one
-  update that cannot be applied non-destructively; and `render`'s list write — there **after** the
-  name maps and the sibling strips, so only the list holds still. Nothing is queued: the tick
-  repeats, so the skipped update lands on the next one once the selection is released. **A caret is
-  not a selection** (`isCollapsed`) — freezing on the collapsed range every tap leaves behind would
-  stop the mirror for good on the first touch.
-- **`mirrorPatch` replaces only what it must,** because the freeze cannot close the window that
-  matters: a touch drag *dismisses* the old selection before it makes the new one, and a tick landing
-  in between is the one that moves the anchor. Identical content touches no DOM at all — most ticks,
-  since an idle pane polled every 3s returns the same bytes and the old code rebuilt it 20 times a
-  minute — and content that only grew at the tail is **appended to the text node already on screen**,
-  so ranges above it keep both their offsets and the characters those offsets covered. Anything else
-  keeps the matching prefix of `ansiFragment`'s runs (nodeName plus the inline style string) and
-  replaces from the first that differs. It returns whether anything changed, because the scroll
-  fix-up below it — which pins an unscrolled mirror to the bottom — is only owed on a change.
-- **Only a *vertical* arrival at the top asks for more lines.** `scroll` says nothing about which
-  axis moved, and `scrollTop === 0` is true for the whole of a sideways drag — permanently true when
-  the output is shorter than the box. Measured: one wheel right took the read from 200 lines to 600
-  and the next to 1000, each answer a wholesale different content, and `loadMore` reaches
-  `refreshPane` directly so the tick's own guard never saw it. That is the path the reported bug
-  arrived by: select on a long line, scroll right to read the rest of it, and the mirror is rebuilt
-  under your hands.
+| what you do | what happens to a range inside |
+|---|---|
+| `el.replaceChildren(…)` | collapses to `(el, 0)` — the top of the buffer |
+| `node.data = next` | collapses to `(node, 0)` — the DOM spec's `replaceData` |
+| `node.appendData(extra)` | untouched |
+
+So no node can be rewritten without moving what is anchored in it, and the only question is how
+little has to be rewritten. `ansiFragment` emits one span per styled **run**, and a run spans
+newlines — a pane with no colour in it is *one text node holding the whole buffer* — so a change on
+the last line moved a caret sitting on line 3 to the top of the output. **That is the reported bug:**
+a touch drag leaves a **caret** behind, the tick rebuilt the buffer, the caret came back at
+`(el, 0)`, and the reader's next drag highlighted the first line. Freezing cannot fix it, because
+freezing on a caret would stop the mirror for good on the first tap. Collie polls the same mirror
+and carries no selection code at all (its one `getSelection` is about not stealing focus), because
+React renders one keyed node per line: a change on line 7 never touches line 3's node.
+
+**So the mirror is one span per line** (`mirrorLineNodes`), and a tick is a reconcile
+(`mirrorPatch`):
+
+- **identical content touches no DOM** — most ticks, since an idle pane repeats itself every 3s and
+  the old code rebuilt the buffer 20 times a minute for nothing;
+- **a buffer that scrolled by k lines keeps the nodes of the lines that stayed** (`mirrorShift`,
+  verified in full before it is acted on and capped at 64, because a jump of more than a screenful
+  is a repaint) — which is the only way a range survives a pane that is actually working;
+- **a line that only grew takes `appendData`**, the one range-safe mutation, so it may land mid-drag;
+- **a rewritten line rebuilds itself** and nothing else, so a caret ends up at the start of its own
+  line rather than at the top of the buffer;
+- **a caret in a line being deleted is dropped**, not left to fall back to `(el, 0)` — which is
+  exactly where the next drag would extend from.
+
+The newline between two lines is a text node **between** the spans rather than inside one, so
+`el.textContent` is byte-identical to the old flat render — `doSearch` counts offsets in it — and
+the boxes are asserted equal to it rather than read off the CSS. Cost on a 1000-line coloured
+buffer (the deepest a herdr read reaches): identical tick **0.1ms** against the old 3.9ms, a repaint
+14.3ms against 3.9ms; at the default 200 lines, 0.1ms and 3.9ms against 0.9ms. The common tick got
+40× cheaper and the worst one 4× dearer.
+
+**A real selection still stops the tick outright** (`selectionInside`), because a line the reader is
+selecting inside can still be the line that gets rewritten. It is checked in four places:
+`mirrorTick`, which then does not even *send* the read (a herdr call, an SSH round trip on a remote
+host, for content it may not render); the `pane_content` handler, for a read in flight when the drag
+started and for a manual refresh; `loadMore`, whose answer puts hundreds of lines *in front* of what
+is on screen; and `render`'s list write — there **after** the name maps and the sibling strips, so
+only the list holds still. Nothing is queued: the tick repeats.
+
+**Only a *vertical* arrival at the top asks for more lines.** `scroll` says nothing about which axis
+moved, and `scrollTop === 0` is true for the whole of a sideways drag — permanently true when the
+output is shorter than the box. Measured: one wheel right took the read from 200 lines to 600 and
+the next to 1000, each answer a wholesale different content, and `loadMore` reaches `refreshPane`
+directly so the tick's own guard never saw it.
+
+`tests/test_web_selection.py` measures all of it, the collapse table included.
 
 The history panel asks for tool turns **by default** (`history_.tools` starts `true`). The relay's
 own default is still `include_tools: false` — this is the web client's choice, because a tool call

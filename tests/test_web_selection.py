@@ -322,81 +322,159 @@ class WebSelectionCollapseTests(unittest.TestCase):
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
 @unittest.skipIf(_chrome() is None, "no chromium build available")
 class WebMirrorPatchTests(unittest.TestCase, _Selecting):
-    """mirrorPatch: what the 3s tick is allowed to touch."""
+    """The reconciler. Every claim here is about BLAST RADIUS: not "can a node be rewritten without
+    moving what is anchored in it" -- measured, none can -- but "how little has to be rewritten"."""
 
-    BODY = "\n".join(["run one NEEDLE here"] + [f"line {i}" for i in range(60)])
+    BODY = "\n".join([f"line {i} NEEDLE " + "C" * 60 for i in range(50)])
+    GREW = BODY + "\nline 50 tail"
+    ONE_LINE_CHANGED = "\n".join(
+        [f"line {i} NEEDLE " + "C" * 60 if i != 40 else "line 40 MOVED" for i in range(50)])
+    SCROLLED = "\n".join([f"line {i} NEEDLE " + "C" * 60 for i in range(5, 55)])
+    REPAINT = "\n".join([f"XX {i} " + "C" * 60 for i in range(50)])
 
     @classmethod
     def setUpClass(cls):
         cls.page = _shared["browser"].new_page(viewport=PHONE)
         cls.page.goto(PAGE)
+        cls.page.evaluate("""s => {
+          handleMessage(s);
+          ws = {readyState: 1, send: () => {}};
+          openTerminal('wB:pH');
+          clearInterval(refreshInterval);
+        }""", SNAPSHOT)
 
     @classmethod
     def tearDownClass(cls):
         cls.page.close()
 
     def setUp(self):
-        self.page.evaluate("""([s, body]) => {
-          activeWorkspace = null; activeTab = null;
-          handleMessage(s);
-          window.__sent = [];
-          ws = {readyState: 1, send: p => window.__sent.push(JSON.parse(p))};
-          openTerminal('wB:pH');
-          clearInterval(refreshInterval);
-          handleMessage({type: 'pane_content', pane_id: 'wB:pH', content: body});
-          // A stamp on every node, so "did this survive" is a fact and not an inference.
-          [...document.getElementById('termContent').childNodes]
-            .forEach((n, i) => n.__gen = 'kept' + i);
-        }""", [SNAPSHOT, self.BODY])
+        """Built from scratch, then every line node stamped -- so "did this survive" is a fact."""
+        self.page.evaluate("""body => {
+          const el = document.getElementById('termContent');
+          el.__mirror = null;
+          mirrorPatch(el, body);
+          [...el.children].forEach((n, i) => n.__gen = i);
+        }""", self.BODY)
 
     def tearDown(self):
         self.release()
 
-    def nodes(self):
+    def patch(self, content):
+        return self.page.evaluate(
+            "c => mirrorPatch(document.getElementById('termContent'), c)", content)
+
+    def kept(self):
+        """Which of the stamped line nodes are still in the box, in document order."""
         return self.page.eval_on_selector_all(
-            "#termContent > *", "els => els.map(e => e.__gen || 'NEW')")
+            "#termContent > *", "els => els.map(e => e.__gen === undefined ? null : e.__gen)")
 
-    def deliver(self, content):
-        return self.page.evaluate("""content => mirrorPatch(
-          document.getElementById('termContent'), content)""", content)
+    def caret_on(self, line, column):
+        self.page.evaluate("""([line, column]) => {
+          const el = document.getElementById('termContent');
+          const walker = document.createTreeWalker(el.children[line], NodeFilter.SHOW_TEXT);
+          walker.nextNode();
+          const range = document.createRange();
+          range.setStart(walker.currentNode, column);
+          range.collapse(true);
+          const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        }""", [line, column])
 
-    def test_an_unchanged_tick_touches_no_dom_at_all(self):
-        """Most ticks. An idle pane returns the same bytes every 3s, and the old code rebuilt it 20
-        times a minute -- every rebuild a chance to catch a drag mid-gesture."""
-        self.assertFalse(self.deliver(self.BODY))
-        self.assertEqual(self.nodes(), ["kept0"])
+    def caret(self):
+        """Where the caret is in the mirror's own terms: which line node holds it, or -1."""
+        return self.page.evaluate("""() => {
+          const el = document.getElementById('termContent');
+          const sel = getSelection();
+          if (!sel.rangeCount) return {line: -1, offset: -1, isTheBox: false, dropped: true};
+          return {line: [...el.children].findIndex(n => n === sel.anchorNode
+                                                     || n.contains(sel.anchorNode)),
+                  offset: sel.anchorOffset, isTheBox: sel.anchorNode === el, dropped: false};
+        }""")
 
-    def test_output_appended_to_a_run_keeps_the_node_and_the_selection(self):
-        """A live shell pane. The text node the selection is anchored to is EXTENDED, so the range
-        still covers the same characters -- which is why this may land mid-drag."""
-        self.select("#termContent", "NEEDLE")
-        self.assertTrue(self.deliver(self.BODY + "\nline 60\nline 61"))
-        self.assertEqual(self.nodes(), ["kept0"])
-        self.assertEqual(self.selected(), "NEEDLE")
-        self.assertTrue(self.page.eval_on_selector(
-            "#termContent", "e => e.textContent.endsWith('line 61')"))
-
-    def test_a_rewritten_run_replaces_from_the_first_one_that_differs(self):
-        """The agent-TUI case: the whole viewport repaints and there is nothing to keep. The prefix
-        of runs that DID match is still kept, which is what a scrolled line of output looks like."""
-        self.page.evaluate("""() => {
+    def test_the_line_structure_changes_neither_a_character_nor_a_pixel(self):
+        """The newline lives BETWEEN the line spans, not inside one, so textContent is byte-identical
+        -- doSearch counts offsets in it. The boxes are measured because "one span per line" is a
+        claim about layout that reading the CSS cannot settle."""
+        got = self.page.evaluate("""body => {
           const el = document.getElementById('termContent');
           el.__mirror = null;
-          el.replaceChildren(ansiFragment('same\u001b[31mred\u001b[0mtail'));
-          [...el.childNodes].forEach((n, i) => n.__gen = 'kept' + i);
-        }""")
-        self.assertEqual(self.nodes(), ["kept0", "kept1", "kept2"])
-        self.assertTrue(self.deliver("same\u001b[31mred\u001b[0mDIFFERENT"))
-        self.assertEqual(self.nodes(), ["kept0", "kept1", "NEW"])
+          el.replaceChildren(ansiFragment(body));          // the old flat render
+          const flat = {h: el.scrollHeight, w: el.scrollWidth, text: el.textContent};
+          el.__mirror = null;
+          mirrorPatch(el, body);                           // one span per line
+          return {flat, lines: {h: el.scrollHeight, w: el.scrollWidth, text: el.textContent},
+                  count: el.children.length, body};
+        }""", self.BODY)
+        self.assertEqual(got["lines"]["text"], got["body"])
+        self.assertEqual(got["lines"]["text"], got["flat"]["text"])
+        self.assertEqual((got["lines"]["h"], got["lines"]["w"]),
+                         (got["flat"]["h"], got["flat"]["w"]))
+        self.assertEqual(got["count"], 50)
+
+    def test_an_unchanged_tick_touches_no_dom_at_all(self):
+        """Most ticks. An idle pane returns the same bytes every 3s, and the old code rebuilt the
+        whole buffer 20 times a minute -- every rebuild a chance to catch a gesture mid-flight."""
+        self.assertFalse(self.patch(self.BODY))
+        self.assertEqual(self.kept(), list(range(50)))
+
+    def test_a_change_on_one_line_leaves_every_other_line_alone(self):
+        self.assertTrue(self.patch(self.ONE_LINE_CHANGED))
+        self.assertEqual(self.kept(), list(range(50)))   # the line node itself is reused
+        self.assertEqual(
+            self.page.eval_on_selector("#termContent", "e => e.children[40].textContent"),
+            "line 40 MOVED")
+
+    def test_a_caret_three_lines_up_does_not_move_when_line_forty_changes(self):
+        """The reported bug, stated exactly. A touch drag leaves a caret behind; the freeze ignores
+        carets on purpose (freezing on every tap would stop the mirror for good); so the caret is
+        what an update has to not move."""
+        self.caret_on(3, 7)
+        self.patch(self.ONE_LINE_CHANGED)
+        self.assertEqual(self.caret(), {"line": 3, "offset": 7, "isTheBox": False,
+                                        "dropped": False})
+
+    def test_a_full_repaint_leaves_the_caret_on_its_own_line(self):
+        """Every line differs -- a working agent's TUI. The caret cannot keep its column (assigning
+        text collapses ranges to offset 0 of the node) but it must not leave its line, because
+        (box, 0) is what makes the reader's next drag highlight the first line."""
+        self.caret_on(3, 7)
+        self.patch(self.REPAINT)
+        self.assertEqual(self.caret(), {"line": 3, "offset": 0, "isTheBox": False,
+                                        "dropped": False})
+
+    def test_a_scrolled_buffer_keeps_the_nodes_that_only_moved_up(self):
+        """Five lines printed: the other 45 are the same text one row up, so they keep their NODES
+        and a selection on them survives a pane that is actually working."""
+        self.select("#termContent", "line 20 NEEDLE")
+        self.assertTrue(self.patch(self.SCROLLED))
+        self.assertEqual(self.kept()[:45], list(range(5, 50)))
+        self.assertEqual(self.kept()[45:], [None] * 5)
+        self.assertEqual(self.selected(), "line 20 NEEDLE")
+
+    def test_a_caret_in_a_line_that_scrolls_off_is_dropped_not_teleported(self):
+        """Its text is gone, so there is nowhere honest to put it -- and leaving it to fall back to
+        (box, 0) is the bug itself. Dropped means the reader's next drag starts where their finger
+        is."""
+        self.caret_on(3, 7)
+        self.patch(self.SCROLLED)
+        self.assertTrue(self.caret()["dropped"])
+
+    def test_output_appended_to_a_line_keeps_the_node_and_the_selection(self):
+        """appendData is the one mutation the DOM spec leaves ranges alone through, which is why
+        this may land mid-drag."""
+        self.select("#termContent", "line 49 NEEDLE")
+        self.assertTrue(self.patch(self.GREW))
+        self.assertEqual(self.kept()[:50], list(range(50)))
+        self.assertEqual(self.selected(), "line 49 NEEDLE")
+        self.assertTrue(self.page.eval_on_selector(
+            "#termContent", "e => e.textContent.endsWith('line 50 tail')"))
 
     def test_an_unchanged_tick_does_not_yank_the_scroll_either(self):
         """The fix-up below the patch pins an unscrolled mirror to the bottom. Running it on a tick
         that changed nothing is how a reader who nudged the view got pulled back every 3s."""
         self.page.evaluate("document.getElementById('termContent').scrollTop = 20")
-        self.page.evaluate("""([s, body]) => handleMessage(
-          {type: 'pane_content', pane_id: 'wB:pH', content: body})""", [SNAPSHOT, self.BODY])
-        self.assertEqual(
-            self.page.eval_on_selector("#termContent", "e => e.scrollTop"), 20)
+        self.page.evaluate("""body => handleMessage(
+          {type: 'pane_content', pane_id: 'wB:pH', content: body})""", self.BODY)
+        self.assertEqual(self.page.eval_on_selector("#termContent", "e => e.scrollTop"), 20)
 
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")

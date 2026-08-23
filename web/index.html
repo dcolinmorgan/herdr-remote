@@ -1208,7 +1208,8 @@ function handleMessage(msg) {
     }
     const el = document.getElementById('termContent');
     // A read that was already in flight when the drag started, or a manual refresh: the tick's own
-    // guard cannot catch either, and this swap is what would wipe the selection.
+    // guard catches neither, and the line the reader is selecting inside can still be the line
+    // mirrorPatch has to rewrite.
     if (selectionInside(el)) return;
     const prevHeight = el.scrollHeight;
     const prevScroll = el.scrollTop;
@@ -2096,53 +2097,161 @@ function openTerminal(paneId) {
   refreshInterval = setInterval(mirrorTick, 3000);
 }
 
-// What the mirror does instead of replacing itself.
+// ---- the mirror's reconciler -------------------------------------------------------------------
 //
-// `replaceChildren` does not merely lose a selection anchored inside it. Measured in chromium: the
-// selection is COLLAPSED to (container, 0) -- rangeCount stays 1, the anchor becomes the mirror
-// itself at offset 0 -- so the next extend, whether that is a drag continuing or a phone's handle
-// being moved, runs from the top of the output and the reader watches the FIRST LINE highlight
-// itself. Freezing the mirror while a selection is observable (`selectionInside`) cannot close
-// that: a touch drag dismisses the old selection before it makes the new one, and the tick that
-// lands in between is the one that moves the anchor.
+// Measured in chromium, on every way there is to update text under a selection:
 //
-// So the swap is the last resort rather than the first move:
-//   - identical content touches no DOM at all, which is MOST ticks -- an idle pane polled every 3s
-//     returns the same bytes, and the old code rebuilt it 20 times a minute for nothing;
-//   - content that only grew at the tail -- what a live shell pane does -- is appended to the text
-//     node already on screen, so every range anchored above it stays valid AND still covers the
-//     same characters;
-//   - anything else keeps the matching prefix of runs and replaces from the first that differs.
-// ansiFragment emits one span per styled run, so "the same run" is nodeName plus the inline style
-// string, and a run is left alone when its text is unchanged.
+//   el.replaceChildren(...)  -> every range inside collapses to (el, 0)
+//   node.data = next         -> every range inside collapses to (node, 0)   [spec: replaceData]
+//   node.appendData(extra)   -> ranges are untouched
 //
-// Returns whether anything actually changed, because the scroll fix-up is only owed on a change.
-function mirrorPatch(el, content) {
-  if (el.__mirror === content) return false;
-  const next = [...ansiFragment(content).childNodes];
-  const prev = [...el.childNodes];
-  const grow = [];
-  let i = 0;
-  for (; i < prev.length && i < next.length; i++) {
-    const a = prev[i], b = next[i];
-    if (a.nodeName !== b.nodeName) break;
-    if (a.nodeType === 1 && a.getAttribute('style') !== b.getAttribute('style')) break;
+// So a node cannot be rewritten without moving what is anchored in it, and what decides whether the
+// reader notices is the BLAST RADIUS. `ansiFragment` emits one span per styled RUN and a run spans
+// newlines, so a pane with no colour in it is ONE text node holding the whole buffer: a change on
+// the last line moved a caret sitting on line 3 to the top of the output. That is the reported bug.
+// A touch drag leaves a CARET behind -- and the freeze deliberately ignores carets, because
+// freezing on the collapsed range every tap leaves behind would stop the mirror for good -- so the
+// tick rebuilt the buffer, the caret came back at (el, 0), and the reader's next drag highlighted
+// the FIRST LINE. Collie polls the same mirror every few seconds with no selection code at all,
+// because React renders one keyed node per line: a change on line 7 never touches line 3's node.
+//
+// So the mirror is a line per span from here on, and an update is a reconcile:
+//   - identical content              -> no DOM at all (most ticks: an idle pane repeats itself)
+//   - the buffer scrolled by k lines -> the lines that stayed keep their NODES (mirrorShift)
+//   - a line that only grew          -> appendData, the one range-safe mutation
+//   - a line rewritten              -> that LINE rebuilds; the rest of the buffer is not touched
+//
+// The newline between two lines is a text node BETWEEN the spans rather than inside one, so
+// `el.textContent` is byte-identical to the old flat render -- doSearch counts offsets in it.
+
+function mirrorLineNodes(content) {
+  const lines = [];
+  let line = document.createElement('span');
+  line.className = 'term-line';
+  // Snapshotted, because appendChild MOVES a node out of the live NodeList being walked.
+  for (const run of [...ansiFragment(content).childNodes]) {
+    const text = run.textContent;
+    // A run that does not straddle a newline -- almost all of them -- is adopted whole rather than
+    // cloned. Measured on a 1000-line coloured buffer, that is the difference between building 5000
+    // nodes a tick and 3000.
+    if (!text.includes('\n')) { line.appendChild(run); continue; }
+    const parts = text.split('\n');
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) {
+        lines.push(line);
+        line = document.createElement('span');
+        line.className = 'term-line';
+      }
+      if (!parts[i]) continue;
+      const piece = run.cloneNode(false);   // same tag, same inline style, no children
+      piece.textContent = parts[i];
+      line.appendChild(piece);
+    }
+  }
+  lines.push(line);
+  return lines;
+}
+
+// Same run, meaning the same box with the same styling -- its TEXT is compared separately, because
+// text is the part that can sometimes be healed instead of replaced.
+function mirrorSameRun(a, b) {
+  return a.nodeName === b.nodeName
+    && (a.nodeType !== 1 || a.getAttribute('style') === b.getAttribute('style'));
+}
+
+function mirrorTextNode(node) {
+  if (node.nodeType === 3) return node;
+  return node.childNodes.length === 1 && node.firstChild.nodeType === 3 ? node.firstChild : null;
+}
+
+// One line against what it should say. Returns whether the DOM moved.
+function mirrorPatchLine(line, want) {
+  const have = [...line.childNodes], next = [...want.childNodes];
+  let i = 0, changed = false;
+  for (; i < have.length && i < next.length; i++) {
+    const a = have[i], b = next[i];
+    if (!mirrorSameRun(a, b)) break;
     const was = a.textContent, now = b.textContent;
     if (was === now) continue;
-    // The one divergence worth healing in place. A run whose text node is replaced takes every
-    // range anchored in it with it; a run whose text node is EXTENDED keeps them, offsets and all.
-    const text = a.nodeType === 3 ? a
-      : (a.childNodes.length === 1 && a.firstChild.nodeType === 3 ? a.firstChild : null);
+    const text = mirrorTextNode(a);
     if (!text || !now.startsWith(was)) break;
-    grow.push([text, now.slice(was.length)]);
+    text.appendData(now.slice(was.length));
+    changed = true;
+  }
+  if (i < have.length) { line.replaceChildren(...next); return true; }
+  for (; i < next.length; i++) { line.appendChild(next[i]); changed = true; }
+  return changed;
+}
+
+// How far the buffer scrolled between two reads, or 0. A terminal that printed k lines reports the
+// same text k rows up, and every line that stayed is a node that can stay with it -- which is the
+// only way a range survives a pane that is actually working. Verified in FULL before it is acted on,
+// since a wrong k would delete lines that are still on screen, and capped because a jump of more
+// than a screenful is a repaint rather than a scroll.
+const MIRROR_SHIFT_MAX = 64;
+function mirrorShift(have, want) {
+  if (have.length !== want.length) return 0;
+  for (let k = 1; k <= Math.min(MIRROR_SHIFT_MAX, have.length - 1); k++) {
+    let all = true;
+    for (let i = 0; i + k < have.length; i++) {
+      if (have[i + k] !== want[i]) { all = false; break; }
+    }
+    if (all) return k;
+  }
+  return 0;
+}
+
+// A caret in a line that is about to be deleted is DROPPED, not left to fall back to (el, 0) --
+// which is precisely where the reader's next drag would extend from, highlighting the first line of
+// the output. Only ever a caret: a real selection stops the whole patch before it starts.
+function mirrorDropCaretIn(node) {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
+  if (node.contains(sel.anchorNode)) sel.removeAllRanges();
+}
+
+// Returns whether anything changed, because the scroll fix-up above -- which pins an unscrolled
+// mirror to the bottom -- is only owed on a change.
+function mirrorPatch(el, content) {
+  if (el.__mirror === content) return false;
+  const want = mirrorLineNodes(content);
+  const lines = [...el.children];
+  // n spans with the n-1 newlines between them is the structure this function builds. Anything else
+  // -- the initial "Loading…", a search rewrite, a pane opened before any of this ran -- is built
+  // from scratch rather than reconciled against.
+  if (el.__mirror == null || !lines.length || el.childNodes.length !== 2 * lines.length - 1) {
+    el.__mirror = content;
+    const flat = [];
+    want.forEach((node, i) => { if (i) flat.push(document.createTextNode('\n')); flat.push(node); });
+    el.replaceChildren(...flat);
+    return true;
   }
   el.__mirror = content;
-  for (const [text, extra] of grow) text.appendData(extra);
-  for (let j = prev.length - 1; j >= i; j--) prev[j].remove();
-  for (let j = i; j < next.length; j++) el.appendChild(next[j]);
-  // Two different strings can render to the same runs (an escape code that changes nothing), and
-  // "changed" has to mean the pixels, since that is what the scroll fix-up is for.
-  return grow.length > 0 || i < prev.length || i < next.length;
+  let changed = false;
+  const shift = mirrorShift(lines.map(l => l.textContent), want.map(l => l.textContent));
+  for (let i = 0; i < shift; i++) {
+    const gap = lines[i].nextSibling;          // the newline that followed it
+    mirrorDropCaretIn(lines[i]);
+    lines[i].remove();
+    if (gap && gap.nodeType === 3) gap.remove();
+    changed = true;
+  }
+  lines.splice(0, shift);
+  const shared = Math.min(lines.length, want.length);
+  for (let i = 0; i < shared; i++) if (mirrorPatchLine(lines[i], want[i])) changed = true;
+  for (let i = lines.length - 1; i >= want.length; i--) {
+    const gap = lines[i].previousSibling;
+    mirrorDropCaretIn(lines[i]);
+    lines[i].remove();
+    if (gap && gap.nodeType === 3) gap.remove();
+    changed = true;
+  }
+  for (let i = lines.length; i < want.length; i++) {
+    if (el.childNodes.length) el.appendChild(document.createTextNode('\n'));
+    el.appendChild(want[i]);
+    changed = true;
+  }
+  return changed;
 }
 
 // The interval's whole body, named so the rule can be measured rather than read. The read is not
@@ -2559,6 +2668,9 @@ function doSearch() {
   // Restore original content first
   if (!originalContent) originalContent = el.innerHTML;
   el.innerHTML = originalContent;
+  // Written behind mirrorPatch's back, so its record of what the DOM says is void: the next tick
+  // reconciles against the live text instead of trusting a string that predates the marks.
+  el.__mirror = null;
   
   if (!query || query.length < 2) {
     countEl.textContent = '';
@@ -2637,6 +2749,7 @@ function clearSearch() {
   const el = document.getElementById('termContent');
   if (originalContent) {
     el.innerHTML = originalContent;
+    el.__mirror = null;
     originalContent = '';
   }
   searchMatches = [];
