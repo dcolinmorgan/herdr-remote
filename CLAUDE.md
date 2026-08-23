@@ -157,20 +157,39 @@ the top of it a downward drag chained to the document and handed Chrome its pull
 reloads the whole app — losing the open session, the panel, and however far back you had paged. The
 two are asserted together so they cannot drift apart.
 
-**No timed rebuild runs under a selection.** The mirror is replaced every 3s (`pane_content` →
-`replaceChildren`) and the herd list on every 2s `agents` snapshot (`innerHTML`), and both writes
-detach the very text nodes a range is anchored to — so a selection could not survive three seconds,
-which is less than it takes to reach the copy button on a phone. `selectionInside` is the one
-predicate, and it is checked in three places: `mirrorTick`, which then does not even *send* the read
-(a herdr call, an SSH round trip on a remote host, for content the tick has already decided it may
-not render); the `pane_content` handler, which catches a read already in flight when the drag
-started and a manual refresh; and `render`'s list write — there **after** the name maps and the
-sibling strips, so only the list holds still. Nothing is queued: the tick repeats, so the skipped
-update lands on the next one once the selection is released, and the pause explains itself because
-the highlight is on screen. **A caret is not a selection** (`isCollapsed`) — freezing on the
-collapsed range every tap leaves behind would stop the mirror for good on the first touch, which is
-worse than the bug. `tests/test_web_selection.py` measures each of those, including that a selection
-in the header does not freeze the output.
+**A selection has to survive a page that rebuilds itself.** `replaceChildren` does not merely lose
+one anchored inside it — measured in chromium, it **collapses the selection to `(container, 0)`**:
+`rangeCount` stays 1 and the anchor becomes the mirror itself at offset 0, so the next extend (a drag
+continuing, a phone's handle being moved) runs from the top of the output and the reader watches the
+**first line** highlight itself. Three things follow, and `tests/test_web_selection.py` measures each
+including that collapse:
+
+- **No timed rebuild runs under a selection.** `selectionInside` is the one predicate, checked in
+  four places: `mirrorTick`, which then does not even *send* the read (a herdr call, an SSH round
+  trip on a remote host, for content it has already decided it may not render); the `pane_content`
+  handler, for a read in flight when the drag started and for a manual refresh; `loadMore`, whose
+  bigger read answers with hundreds of lines *in front* of what is on screen and is therefore the one
+  update that cannot be applied non-destructively; and `render`'s list write — there **after** the
+  name maps and the sibling strips, so only the list holds still. Nothing is queued: the tick
+  repeats, so the skipped update lands on the next one once the selection is released. **A caret is
+  not a selection** (`isCollapsed`) — freezing on the collapsed range every tap leaves behind would
+  stop the mirror for good on the first touch.
+- **`mirrorPatch` replaces only what it must,** because the freeze cannot close the window that
+  matters: a touch drag *dismisses* the old selection before it makes the new one, and a tick landing
+  in between is the one that moves the anchor. Identical content touches no DOM at all — most ticks,
+  since an idle pane polled every 3s returns the same bytes and the old code rebuilt it 20 times a
+  minute — and content that only grew at the tail is **appended to the text node already on screen**,
+  so ranges above it keep both their offsets and the characters those offsets covered. Anything else
+  keeps the matching prefix of `ansiFragment`'s runs (nodeName plus the inline style string) and
+  replaces from the first that differs. It returns whether anything changed, because the scroll
+  fix-up below it — which pins an unscrolled mirror to the bottom — is only owed on a change.
+- **Only a *vertical* arrival at the top asks for more lines.** `scroll` says nothing about which
+  axis moved, and `scrollTop === 0` is true for the whole of a sideways drag — permanently true when
+  the output is shorter than the box. Measured: one wheel right took the read from 200 lines to 600
+  and the next to 1000, each answer a wholesale different content, and `loadMore` reaches
+  `refreshPane` directly so the tick's own guard never saw it. That is the path the reported bug
+  arrived by: select on a long line, scroll right to read the rest of it, and the mirror is rebuilt
+  under your hands.
 
 The history panel asks for tool turns **by default** (`history_.tools` starts `true`). The relay's
 own default is still `include_tools: false` — this is the web client's choice, because a tool call

@@ -1212,7 +1212,9 @@ function handleMessage(msg) {
     if (selectionInside(el)) return;
     const prevHeight = el.scrollHeight;
     const prevScroll = el.scrollTop;
-    el.replaceChildren(ansiFragment(msg.content || '(empty)'));
+    // Nothing moved, so nothing here may move either -- not the DOM, and not the scroll, which the
+    // fix-up below would otherwise yank to the bottom every 3s.
+    if (!mirrorPatch(el, msg.content || '(empty)')) return;
     if (userScrolledUp) {
       // Keep scroll position relative to bottom (content may have grown at top)
       const growth = el.scrollHeight - prevHeight;
@@ -2094,6 +2096,55 @@ function openTerminal(paneId) {
   refreshInterval = setInterval(mirrorTick, 3000);
 }
 
+// What the mirror does instead of replacing itself.
+//
+// `replaceChildren` does not merely lose a selection anchored inside it. Measured in chromium: the
+// selection is COLLAPSED to (container, 0) -- rangeCount stays 1, the anchor becomes the mirror
+// itself at offset 0 -- so the next extend, whether that is a drag continuing or a phone's handle
+// being moved, runs from the top of the output and the reader watches the FIRST LINE highlight
+// itself. Freezing the mirror while a selection is observable (`selectionInside`) cannot close
+// that: a touch drag dismisses the old selection before it makes the new one, and the tick that
+// lands in between is the one that moves the anchor.
+//
+// So the swap is the last resort rather than the first move:
+//   - identical content touches no DOM at all, which is MOST ticks -- an idle pane polled every 3s
+//     returns the same bytes, and the old code rebuilt it 20 times a minute for nothing;
+//   - content that only grew at the tail -- what a live shell pane does -- is appended to the text
+//     node already on screen, so every range anchored above it stays valid AND still covers the
+//     same characters;
+//   - anything else keeps the matching prefix of runs and replaces from the first that differs.
+// ansiFragment emits one span per styled run, so "the same run" is nodeName plus the inline style
+// string, and a run is left alone when its text is unchanged.
+//
+// Returns whether anything actually changed, because the scroll fix-up is only owed on a change.
+function mirrorPatch(el, content) {
+  if (el.__mirror === content) return false;
+  const next = [...ansiFragment(content).childNodes];
+  const prev = [...el.childNodes];
+  const grow = [];
+  let i = 0;
+  for (; i < prev.length && i < next.length; i++) {
+    const a = prev[i], b = next[i];
+    if (a.nodeName !== b.nodeName) break;
+    if (a.nodeType === 1 && a.getAttribute('style') !== b.getAttribute('style')) break;
+    const was = a.textContent, now = b.textContent;
+    if (was === now) continue;
+    // The one divergence worth healing in place. A run whose text node is replaced takes every
+    // range anchored in it with it; a run whose text node is EXTENDED keeps them, offsets and all.
+    const text = a.nodeType === 3 ? a
+      : (a.childNodes.length === 1 && a.firstChild.nodeType === 3 ? a.firstChild : null);
+    if (!text || !now.startsWith(was)) break;
+    grow.push([text, now.slice(was.length)]);
+  }
+  el.__mirror = content;
+  for (const [text, extra] of grow) text.appendData(extra);
+  for (let j = prev.length - 1; j >= i; j--) prev[j].remove();
+  for (let j = i; j < next.length; j++) el.appendChild(next[j]);
+  // Two different strings can render to the same runs (an escape code that changes nothing), and
+  // "changed" has to mean the pixels, since that is what the scroll fix-up is for.
+  return grow.length > 0 || i < prev.length || i < next.length;
+}
+
 // The interval's whole body, named so the rule can be measured rather than read. The read is not
 // even sent while a selection is held: it would cost the relay a herdr call -- an SSH round trip
 // for a remote host -- to fetch content this tick has already decided it may not render.
@@ -2142,6 +2193,10 @@ function refreshPane() {
 }
 function loadMore() {
   if (!canLoadMore()) return;
+  // A bigger read answers with a DIFFERENT content -- hundreds of lines arriving in FRONT of what
+  // is on screen -- so it is the one update mirrorPatch cannot make non-destructively. It waits,
+  // like the tick does, rather than collapsing the selection to the top of the output.
+  if (selectionInside(document.getElementById('termContent'))) return;
   paneLines = Math.min(paneLines + PANE_LINES_STEP, PANE_LINES_MAX);
   refreshPane();
 }
@@ -2891,10 +2946,19 @@ let imeComposing = false, imeEndedAt = 0;
     e.preventDefault();sendText();
   });
 }
+// `scroll` says nothing about which axis moved, and a long line is exactly when the reader moves
+// the other one. `scrollTop === 0` is true for the whole of a horizontal drag -- and permanently
+// true whenever the output is shorter than the box -- so this fired loadMore on every scroll event
+// sideways: measured, one wheel right took the read from 200 lines to 600 and the next to 1000,
+// each answer a different content that replaced the mirror under the reader's hands. Only a
+// vertical move that ARRIVES at the top is a request for more.
+let mirrorScrollTop = 0;
 document.getElementById('termContent').addEventListener('scroll', function() {
   const el = this;
   userScrolledUp = (el.scrollHeight - el.scrollTop - el.clientHeight) > 50;
-  if (el.scrollTop === 0) loadMore();
+  const moved = el.scrollTop !== mirrorScrollTop;
+  mirrorScrollTop = el.scrollTop;
+  if (moved && el.scrollTop === 0 && el.scrollHeight > el.clientHeight) loadMore();
 });
 document.getElementById('historyContent').addEventListener('scroll', function() {
   if (this.scrollTop <= 4) loadOlderHistory();

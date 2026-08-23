@@ -1,11 +1,21 @@
-"""Tests for the one rule that lets a reader copy text out of a page that rebuilds itself.
+"""Tests for what it takes to copy text out of a page that rebuilds itself on a timer.
 
-The mirror is replaced every 3s and the herd list on every 2s `agents` snapshot, and both writes
-detach the text nodes a selection is anchored to -- so a selection held long enough to reach the
-copy button did not survive to be copied. The rule is that a timed rebuild of a container the
-reader is selecting inside does not run, and it has three edges worth measuring: a caret (a plain
-tap) must NOT freeze anything, a selection somewhere else on the page must not either, and the
-skipped update has to land as soon as the selection is released.
+`replaceChildren` does not merely lose a selection anchored inside it: measured in chromium, it
+COLLAPSES the selection to (container, 0), so the next extend -- a drag continuing, a phone's
+handle being moved -- runs from the top of the output and the reader watches the first line
+highlight itself. That is asserted here directly, because it is the whole reason for the rest.
+
+Three claims follow, and each has its own class:
+
+- A timed rebuild of a container the reader is selecting inside does not run. Its edges: a caret (a
+  plain tap) must NOT freeze anything, a selection elsewhere on the page must not either, and the
+  skipped update has to land as soon as the selection is released.
+- The mirror does not replace what it does not have to -- identical content touches no DOM, and
+  output appended to a run is appended to the text node already on screen. This is what closes the
+  window the freeze cannot: a touch drag dismisses the old selection before it makes the new one,
+  and a tick landing in between is the one that moves the anchor.
+- `scroll` says nothing about which axis moved. A horizontal drag -- exactly what a long line asks
+  for -- must not be read as "I want more lines".
 
 Skipped, not failed, when playwright or a chromium build is missing.
 """
@@ -258,6 +268,221 @@ class WebHerdSelectionTests(unittest.TestCase, _Selecting):
         self.release()
         self.page.evaluate("s => handleMessage(s)", GREW)
         self.assertEqual(self.cards(), 3)
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebSelectionCollapseTests(unittest.TestCase):
+    """What chromium actually does to a selection whose nodes are replaced. Everything else in this
+    file is built on this measurement, so it is measured rather than cited."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = _shared["browser"].new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+        # The box has to be RENDERED: Selection.toString() of an undisplayed subtree is empty, so a
+        # measurement taken with the session view closed would prove nothing either way.
+        cls.page.evaluate("""s => {
+          handleMessage(s);
+          ws = {readyState: 1, send: () => {}};
+          openTerminal('wB:pH');
+          clearInterval(refreshInterval);
+        }""", SNAPSHOT)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    def test_a_replaced_child_collapses_the_selection_to_the_top_of_the_box(self):
+        got = self.page.evaluate("""() => {
+          const box = document.getElementById('termContent');
+          box.replaceChildren(ansiFragment('line1 AAA\\nline2 BBB\\nline3 NEEDLE CCC'));
+          const node = box.firstChild.firstChild;
+          const at = node.data.indexOf('NEEDLE');
+          const range = document.createRange();
+          range.setStart(node, at); range.setEnd(node, at + 6);
+          const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+          const before = sel.toString();
+
+          box.replaceChildren(ansiFragment('zine1 AAA\\nzine2 BBB\\nzine3 NEEDLE CCC'));
+          const after = {ranges: getSelection().rangeCount,
+                         anchorIsTheBox: getSelection().anchorNode === box,
+                         offset: getSelection().anchorOffset};
+          getSelection().extend(box.firstChild.firstChild, 15);
+          return {before, after, extended: getSelection().toString()};
+        }""")
+        self.assertEqual(got["before"], "NEEDLE")
+        # Not "the selection is gone" -- it is alive, anchored at the very start of the output.
+        self.assertEqual(got["after"], {"ranges": 1, "anchorIsTheBox": True, "offset": 0})
+        # ... so the reader's next drag highlights the first line, which is the bug as reported.
+        self.assertEqual(got["extended"], "zine1 AAA\nzine2")
+        self.page.evaluate("getSelection().removeAllRanges()")
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebMirrorPatchTests(unittest.TestCase, _Selecting):
+    """mirrorPatch: what the 3s tick is allowed to touch."""
+
+    BODY = "\n".join(["run one NEEDLE here"] + [f"line {i}" for i in range(60)])
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = _shared["browser"].new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    def setUp(self):
+        self.page.evaluate("""([s, body]) => {
+          activeWorkspace = null; activeTab = null;
+          handleMessage(s);
+          window.__sent = [];
+          ws = {readyState: 1, send: p => window.__sent.push(JSON.parse(p))};
+          openTerminal('wB:pH');
+          clearInterval(refreshInterval);
+          handleMessage({type: 'pane_content', pane_id: 'wB:pH', content: body});
+          // A stamp on every node, so "did this survive" is a fact and not an inference.
+          [...document.getElementById('termContent').childNodes]
+            .forEach((n, i) => n.__gen = 'kept' + i);
+        }""", [SNAPSHOT, self.BODY])
+
+    def tearDown(self):
+        self.release()
+
+    def nodes(self):
+        return self.page.eval_on_selector_all(
+            "#termContent > *", "els => els.map(e => e.__gen || 'NEW')")
+
+    def deliver(self, content):
+        return self.page.evaluate("""content => mirrorPatch(
+          document.getElementById('termContent'), content)""", content)
+
+    def test_an_unchanged_tick_touches_no_dom_at_all(self):
+        """Most ticks. An idle pane returns the same bytes every 3s, and the old code rebuilt it 20
+        times a minute -- every rebuild a chance to catch a drag mid-gesture."""
+        self.assertFalse(self.deliver(self.BODY))
+        self.assertEqual(self.nodes(), ["kept0"])
+
+    def test_output_appended_to_a_run_keeps_the_node_and_the_selection(self):
+        """A live shell pane. The text node the selection is anchored to is EXTENDED, so the range
+        still covers the same characters -- which is why this may land mid-drag."""
+        self.select("#termContent", "NEEDLE")
+        self.assertTrue(self.deliver(self.BODY + "\nline 60\nline 61"))
+        self.assertEqual(self.nodes(), ["kept0"])
+        self.assertEqual(self.selected(), "NEEDLE")
+        self.assertTrue(self.page.eval_on_selector(
+            "#termContent", "e => e.textContent.endsWith('line 61')"))
+
+    def test_a_rewritten_run_replaces_from_the_first_one_that_differs(self):
+        """The agent-TUI case: the whole viewport repaints and there is nothing to keep. The prefix
+        of runs that DID match is still kept, which is what a scrolled line of output looks like."""
+        self.page.evaluate("""() => {
+          const el = document.getElementById('termContent');
+          el.__mirror = null;
+          el.replaceChildren(ansiFragment('same\u001b[31mred\u001b[0mtail'));
+          [...el.childNodes].forEach((n, i) => n.__gen = 'kept' + i);
+        }""")
+        self.assertEqual(self.nodes(), ["kept0", "kept1", "kept2"])
+        self.assertTrue(self.deliver("same\u001b[31mred\u001b[0mDIFFERENT"))
+        self.assertEqual(self.nodes(), ["kept0", "kept1", "NEW"])
+
+    def test_an_unchanged_tick_does_not_yank_the_scroll_either(self):
+        """The fix-up below the patch pins an unscrolled mirror to the bottom. Running it on a tick
+        that changed nothing is how a reader who nudged the view got pulled back every 3s."""
+        self.page.evaluate("document.getElementById('termContent').scrollTop = 20")
+        self.page.evaluate("""([s, body]) => handleMessage(
+          {type: 'pane_content', pane_id: 'wB:pH', content: body})""", [SNAPSHOT, self.BODY])
+        self.assertEqual(
+            self.page.eval_on_selector("#termContent", "e => e.scrollTop"), 20)
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebMirrorScrollAxisTests(unittest.TestCase, _Selecting):
+    """`if (scrollTop === 0) loadMore()` fired on horizontal scrolling too, and scrollTop is 0 for
+    the whole of a sideways drag -- which is the gesture a long line asks for."""
+
+    # Wide enough to scroll sideways, tall enough to scroll down.
+    BODY = "\n".join([f"line {i} NEEDLE " + "C" * 300 for i in range(80)])
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = _shared["browser"].new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    def setUp(self):
+        # Left at the TOP, with the handler's own memory of the position agreeing. That is the state
+        # the bug lives in: `scrollTop === 0` is then true for the whole of a sideways drag.
+        self.page.evaluate("""([s, body]) => {
+          activeWorkspace = null; activeTab = null;
+          handleMessage(s);
+          window.__sent = [];
+          ws = {readyState: 1, send: p => window.__sent.push(JSON.parse(p))};
+          openTerminal('wB:p2');           // a shell pane: the only kind with a ring to load
+          clearInterval(refreshInterval);
+          handleMessage({type: 'pane_content', pane_id: 'wB:p2', content: body});
+          document.getElementById('termContent').scrollTop = 0;
+          mirrorScrollTop = 0;
+          paneLines = 200;
+          window.__sent = [];
+        }""", [SNAPSHOT, self.BODY])
+
+    def tearDown(self):
+        self.release()
+
+    def scroll(self, **pos):
+        self.page.evaluate("""pos => {
+          const el = document.getElementById('termContent');
+          Object.assign(el, pos);
+          el.dispatchEvent(new Event('scroll'));
+        }""", pos)
+
+    def reads(self):
+        return [m["lines"] for m in self.page.evaluate("window.__sent")
+                if m["type"] == "read_pane"]
+
+    def test_scrolling_sideways_does_not_ask_for_more_lines(self):
+        """Measured before the fix, at the top of a long line: one wheel right took the read from
+        200 lines to 600 and the next to 1000, each answer a different content -- hundreds of lines
+        arriving in FRONT of the reader's own -- replacing the mirror under their hands."""
+        for left in (100, 260, 700):
+            self.scroll(scrollLeft=left)
+        self.assertEqual(self.reads(), [])
+        self.assertEqual(self.page.evaluate("paneLines"), 200)
+
+    def test_a_mirror_shorter_than_its_box_never_loads_more(self):
+        """The other half of it: with nothing to scroll down to, scrollTop is 0 forever, so EVERY
+        scroll event was a request for more lines."""
+        self.page.evaluate("""() => {
+          handleMessage({type: 'pane_content', pane_id: 'wB:p2', content: 'one\\ntwo'});
+          document.getElementById('termContent').scrollTop = 0;
+          mirrorScrollTop = 0;
+          window.__sent = [];
+        }""")
+        for left in (40, 120, 200):
+            self.scroll(scrollLeft=left)
+        self.assertEqual(self.reads(), [])
+
+    def test_arriving_at_the_top_still_loads_more(self):
+        """The feature the axis check must not cost: paging back through a shell pane's ring."""
+        self.scroll(scrollTop=400)
+        self.scroll(scrollTop=0)
+        self.assertEqual(self.reads(), [600])
+
+    def test_a_selection_defers_the_bigger_read(self):
+        """Hundreds of lines arrive in FRONT of what is on screen, so this is the one update the
+        patch cannot make non-destructively."""
+        self.scroll(scrollTop=400)
+        self.select("#termContent", "NEEDLE")
+        self.scroll(scrollTop=0)
+        self.assertEqual(self.reads(), [])
 
 
 if __name__ == "__main__":
