@@ -73,6 +73,17 @@ HERDR = (
     or ("herdr" if sys.platform == "win32" else "/opt/homebrew/bin/herdr")
 )
 REMOTE_HERDR = os.environ.get("HERDR_REMOTE_BIN", "herdr")
+# Panes with no agent in them. herdr reports 30 panes on this host and only 10 hold an agent, so
+# two thirds of the operator's terminals are invisible to every client. Listing and reading them
+# costs nothing extra -- they come out of the same `pane list` the poll already runs -- but
+# WRITING to one is arbitrary command execution on the host, with no agent-side approval prompt
+# in the way. That is a capability the relay did not have, so it arrives behind a switch rather
+# than with an upgrade. See SECURITY.md.
+SHELL_PANES = os.environ.get("HERDR_SHELL_PANES", "").strip().lower() not in {
+    "", "0", "false", "no", "off",
+}
+# How many neighbour steps focus_shell_pane will take before giving up (see there).
+PANE_WALK_LIMIT = 6
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
 RELAY_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1")
 POLL_INTERVAL = 2
@@ -150,6 +161,10 @@ pane_remote_map = {}
 # uuid to ask for that pane's history.
 pane_session_map = {}
 known_panes = set()
+# pane_id -> the record broadcast for a non-agent pane. Separate from agent_cache because the
+# handlers need to tell the two apart: a shell pane has no question to detect, no approval to
+# match and no `agent focus` to call.
+shell_pane_map = {}
 agent_cache = {}
 # The tab/workspace hierarchy as herdr reports it, refreshed on its own slower cadence (see
 # SPACES_POLL_INTERVAL) and immediately after anything that changes it. `(host, id) -> remote`,
@@ -631,7 +646,44 @@ def pane_session_ref(pane):
     return session
 
 
-def get_agents_from_host(remote=None):
+def shell_pane_record(pane, host_label, remote):
+    """The payload for a pane with no agent in it.
+
+    Deliberately NOT an `agents` entry. Six clients render that array and every one of them
+    assumes its entries are agents; a shell pane would show up in all of them as a card with an
+    empty harness name. It also has none of what an agent entry carries -- herdr reports
+    `agent_status: "unknown"` for all 20 of them here, there is no session and no terminal title
+    field at all. What it has is a cwd, a place in the hierarchy, and one thing an agent pane
+    never has: a real scrollback ring.
+    """
+    scroll = pane.get("scroll") or {}
+    return {
+        "pane_id": pane["pane_id"],
+        # herdr allows a label on any pane but nothing sets one by default -- all 20 here report
+        # null, so clients fall back to project/pane_id and `rename_agent` is the way to fix that.
+        "label": pane.get("label") or "",
+        "cwd": pane.get("cwd", ""),
+        "project": os.path.basename(pane.get("cwd", "")),
+        "host": host_label,
+        "remote": remote,
+        "workspace_id": pane.get("workspace_id", ""),
+        "tab_id": pane.get("tab_id", ""),
+        "focused": bool(pane.get("focused")),
+        # The reason scrollback is worth offering here and not on an agent pane: measured 34-693
+        # rows on the shell panes of this host against a flat 0 on every agent pane, and a
+        # 400-line `recent` read costs 5ms rather than herdr's multi-second harvest, because
+        # there is a real ring to read instead of a TUI to walk.
+        "scrollback": scroll.get("max_offset_from_bottom", 0),
+        "viewport_rows": scroll.get("viewport_rows", 0),
+    }
+
+
+def list_panes_from_host(remote=None):
+    """One `pane list`, split into (agents, shell panes).
+
+    Split here rather than in two functions because the CLI call is the expensive part -- 12ms
+    locally, a full SSH round trip remotely -- and the poll runs it every POLL_INTERVAL.
+    """
     raw = run_herdr("pane", "list", remote=remote)
     host_label = remote or "local"
     try:
@@ -639,11 +691,13 @@ def get_agents_from_host(remote=None):
         panes = data.get("result", {}).get("panes", [])
         workspace_labels = get_workspace_labels(remote=remote) if panes else {}
     except (json.JSONDecodeError, KeyError):
-        return []
+        return [], []
 
-    agents = []
+    agents, shells = [], []
     for p in panes:
         if not p.get("agent"):
+            if SHELL_PANES and p.get("pane_id"):
+                shells.append(shell_pane_record(p, host_label, remote))
             continue
         session = pane_session_ref(p)
         if session:
@@ -684,14 +738,129 @@ def get_agents_from_host(remote=None):
             # history view. The ref itself stays in pane_session_map.
             "has_session": session is not None,
         })
-    return agents
+    return agents, shells
+
+
+def pane_process(pane_id, remote=None):
+    """What is actually running in a pane.
+
+    Shell panes are the ones that need this: measured on this host, 20 of them share only 12
+    distinct cwd basenames, so eight are indistinguishable from a sibling by directory alone.
+    `pane process-info` separates them -- zsh from vim from the build that has been running an
+    hour -- for 2.5ms locally. But it is one call per pane, which is one SSH round trip per pane,
+    so it is never done for a list; clients ask for it on the pane they are opening.
+    """
+    raw = run_herdr("pane", "process-info", "--pane", pane_id, remote=remote)
+    try:
+        info = json.loads(raw).get("result", {}).get("process_info", {})
+        foreground = (info.get("foreground_processes") or [{}])[0]
+    except (json.JSONDecodeError, AttributeError, TypeError, IndexError):
+        return {}
+    if not isinstance(foreground, dict):
+        return {}
+    name = (foreground.get("name") or "").strip()
+    if not name:
+        return {}
+    # Both are the pane's own process table, so they are as trustworthy as anything else herdr
+    # reports -- but they end up in a client's UI, so they get the same length ceiling as a label.
+    return {"name": name[:64], "cmdline": (foreground.get("cmdline") or "").strip()[:200]}
+
+
+def pane_layout(pane_id, remote=None):
+    """`pane layout` for the tab holding a pane: every pane's rect plus which one is focused."""
+    raw = run_herdr("pane", "layout", "--pane", pane_id, remote=remote)
+    try:
+        layout = json.loads(raw).get("result", {}).get("layout", {})
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(layout, dict) or not layout.get("panes"):
+        return None
+    return layout
+
+
+def walk_direction(current, target):
+    """Which way herdr should step to get from one pane's rect towards another's.
+
+    Rects are in terminal cells, and a cell is about twice as tall as it is wide, so comparing a
+    raw dx against a raw dy picks the wrong axis on splits that look square on screen. Overlap
+    decides it without a fudge factor: two panes that share rows are side by side, whatever the
+    numbers say, and only when they share none is the move vertical.
+    """
+    cx0, cy0 = current.get("x", 0), current.get("y", 0)
+    cx1, cy1 = cx0 + current.get("width", 0), cy0 + current.get("height", 0)
+    tx0, ty0 = target.get("x", 0), target.get("y", 0)
+    tx1, ty1 = tx0 + target.get("width", 0), ty0 + target.get("height", 0)
+    if ty0 < cy1 and cy0 < ty1:
+        if tx0 >= cx1:
+            return "right"
+        if tx1 <= cx0:
+            return "left"
+    if ty0 >= cy1:
+        return "down"
+    if ty1 <= cy0:
+        return "up"
+    # Nested or overlapping rects -- a zoomed pane, or a layout this does not model. Fall back to
+    # whichever centre is further away, so the walk still makes progress instead of refusing.
+    if abs((tx0 + tx1) - (cx0 + cx1)) >= abs((ty0 + ty1) - (cy0 + cy1)):
+        return "right" if tx0 + tx1 > cx0 + cx1 else "left"
+    return "down" if ty0 + ty1 > cy0 + cy1 else "up"
+
+
+def focus_shell_pane(pane_id, tab_id, remote=None):
+    """Focus a pane herdr has no command for.
+
+    `agent focus` takes a pane and walks up to the tab and workspace holding it. There is no
+    equivalent for a pane without an agent: `pane focus` only steps to a *neighbour*, by
+    direction. So the tab is focused first, and then the pane is reached one step at a time.
+
+    Each step re-reads the layout rather than plotting the whole route from the first one.
+    "The pane to the right" is herdr's notion and not ours, so a route computed up front would
+    land somewhere else and report success; re-reading also catches the step that moved nothing
+    -- a wall, or a layout walk_direction does not model -- and stops instead of looping.
+
+    Costs one `pane layout` per step plus one `pane focus`: about six CLI calls for a four-pane
+    tab, 15ms locally. It is user-initiated, never on a timer.
+    """
+    if tab_id and not _mutate_herdr("tab", "focus", tab_id, remote=remote):
+        return False
+    previous = None
+    for _ in range(PANE_WALK_LIMIT):
+        layout = pane_layout(pane_id, remote=remote)
+        if layout is None:
+            return False
+        focused = layout.get("focused_pane_id")
+        if focused == pane_id:
+            return True
+        if focused == previous:
+            log.warning("pane walk stalled on %s heading for %s", focused, pane_id)
+            return False
+        rects = {p.get("pane_id"): (p.get("rect") or {}) for p in layout.get("panes", [])}
+        if focused not in rects or pane_id not in rects:
+            return False
+        previous = focused
+        if not _mutate_herdr("pane", "focus", "--direction",
+                             walk_direction(rects[focused], rects[pane_id]),
+                             "--pane", focused, remote=remote):
+            return False
+    log.warning("pane walk gave up after %d steps heading for %s", PANE_WALK_LIMIT, pane_id)
+    return False
+
+
+def get_agents_from_host(remote=None):
+    return list_panes_from_host(remote=remote)[0]
+
+
+def get_all_panes():
+    agents, shells = list_panes_from_host(remote=None)
+    for remote in REMOTES:
+        more_agents, more_shells = list_panes_from_host(remote=remote)
+        agents.extend(more_agents)
+        shells.extend(more_shells)
+    return agents, shells
 
 
 def get_all_agents():
-    agents = get_agents_from_host(remote=None)
-    for remote in REMOTES:
-        agents.extend(get_agents_from_host(remote=remote))
-    return agents
+    return get_all_panes()[0]
 
 
 def get_sessions(remote=None):
@@ -720,13 +889,30 @@ def get_sessions(remote=None):
     return sessions
 
 
-def update_pane_maps(agents):
+def update_pane_maps(agents, shells=()):
+    """Register what the poll just saw, and forget what it didn't.
+
+    `shells` defaults to empty so a caller that only has agents cannot accidentally evict every
+    shell pane through the stale sweep below -- passing nothing means "no opinion", not "there
+    are none". Callers that list both pass both.
+    """
     current_pane_ids = {agent["pane_id"] for agent in agents}
+    if shells:
+        current_pane_ids |= {pane["pane_id"] for pane in shells}
+    else:
+        # No shell list means the caller has no opinion about shell panes, not that there are
+        # none -- keep the ones already known instead of sweeping every one of them as stale.
+        current_pane_ids |= set(shell_pane_map)
     for agent in agents:
         pane_id = agent["pane_id"]
         pane_remote_map[pane_id] = agent.get("remote")
         known_panes.add(pane_id)
         agent_cache[pane_id] = agent
+    for pane in shells:
+        pane_id = pane["pane_id"]
+        pane_remote_map[pane_id] = pane.get("remote")
+        known_panes.add(pane_id)
+        shell_pane_map[pane_id] = pane
 
     stale = known_panes - current_pane_ids
     if stale:
@@ -737,6 +923,7 @@ def update_pane_maps(agents):
             last_statuses.pop(pane_id, None)
             last_blocked_prompts.pop(pane_id, None)
             agent_cache.pop(pane_id, None)
+            shell_pane_map.pop(pane_id, None)
 
 
 POLL_GENERATION = 0
@@ -1317,12 +1504,13 @@ async def broadcast(msg):
 
 async def send_current_snapshot(ws):
     await ws.send(json.dumps(await asyncio.to_thread(sessions_message)))
-    agents = await asyncio.to_thread(get_all_agents)
-    update_pane_maps(agents)
+    agents, shells = await asyncio.to_thread(get_all_panes)
+    update_pane_maps(agents, shells)
     # Force the hierarchy read: a client that just connected has no chip strip at all, and
     # waiting out the slow cadence would show it agents filed under ids for a few seconds.
-    spaces = await asyncio.to_thread(refresh_spaces, True)
-    await ws.send(json.dumps({"type": "agents", "agents": agents, "spaces": spaces}))
+    spaces = await asyncio.to_thread(refresh_spaces, force=True)
+    await ws.send(json.dumps(
+        {"type": "agents", "agents": agents, "spaces": spaces, "panes": shells}))
     for agent in agents:
         if agent["status"] != "blocked":
             continue
@@ -1351,11 +1539,12 @@ async def poll_loop():
 
 async def _poll_once():
         gen = POLL_GENERATION
-        agents = await asyncio.to_thread(get_all_agents)
-        update_pane_maps(agents)
+        agents, shells = await asyncio.to_thread(get_all_panes)
+        update_pane_maps(agents, shells)
         # Always broadcast (even empty list) so clients stay in sync
         spaces = await asyncio.to_thread(refresh_spaces)
-        await broadcast({"type": "agents", "agents": agents, "spaces": spaces})
+        await broadcast(
+            {"type": "agents", "agents": agents, "spaces": spaces, "panes": shells})
         if gen != POLL_GENERATION:
             return          # a switch landed; this snapshot is stale
         for a in agents:
@@ -1413,7 +1602,7 @@ async def event_push():
         event_remote = pane_remote_map.get(pane_id)
 
         if pane_id and event.get("type") == "agent_event":
-            agents = await asyncio.to_thread(get_all_agents)
+            agents, shells = await asyncio.to_thread(get_all_panes)
             if status == "blocked" and not any(
                 agent["pane_id"] == pane_id for agent in agents
             ):
@@ -1426,8 +1615,8 @@ async def event_push():
                     "host": host,
                     "remote": event_remote,
                 })
-            update_pane_maps(agents)
-            await broadcast({"type": "agents", "agents": agents})
+            update_pane_maps(agents, shells)
+            await broadcast({"type": "agents", "agents": agents, "panes": shells})
             if gen != POLL_GENERATION:
                 continue        # a switch landed; this event is stale
             agent_cache[pane_id] = {**agent_cache.get(pane_id, {}), **agent_data}
@@ -1689,6 +1878,23 @@ async def handle_client(ws):
                     await ws.send(json.dumps(command_error("response empty or too long")))
                     continue
                 remote = pane_remote_map.get(pane_id)
+                if pane_id in shell_pane_map:
+                    # A shell pane has no question to detect, no approval options to match and no
+                    # harness to refuse a bad answer: the text IS a command and Enter runs it.
+                    # That is what HERDR_SHELL_PANES buys and why it is off by default. The
+                    # question guard below would refuse every one of these, so it is skipped
+                    # rather than tricked -- and the audit line says which kind of pane it was.
+                    log.info("Shell command from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
+                    audit("respond_shell", ip, device, pane_id, f"text={text!r}")
+                    delivered = await asyncio.to_thread(
+                        _mutate_herdr, "pane", "send-text", pane_id, text, remote=remote
+                    ) and await asyncio.to_thread(
+                        _mutate_herdr, "pane", "send-keys", pane_id, "Enter", remote=remote
+                    )
+                    await ws.send(json.dumps(
+                        {"type": "command_result", "command": "respond", "ok": bool(delivered),
+                         **({"request_id": request_id} if request_id else {})}))
+                    continue
                 content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
                     await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
@@ -1788,7 +1994,14 @@ async def handle_client(ws):
                     "pane", "read", pane_id, "--lines", str(lines), "--source", read_source,
                     "--format", read_format, remote=remote
                 )
-                await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content}))
+                reply = {"type": "pane_content", "pane_id": pane_id, "content": content}
+                if msg.get("process"):
+                    # One extra CLI call, so it is asked for rather than always sent: a client
+                    # wants it when it OPENS a pane, not on every mirror refresh.
+                    reply["process"] = await asyncio.to_thread(
+                        pane_process, pane_id, remote=remote
+                    )
+                await ws.send(json.dumps(reply))
             elif msg_type == "get_history":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
@@ -1950,6 +2163,17 @@ async def handle_client(ws):
                         await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                         continue
                     remote = pane_remote_map.get(ident)
+                    shell = shell_pane_map.get(ident)
+                    if shell is not None:
+                        log.info("Focus from %s (%s): shell pane=%s", ip, device, ident)
+                        audit("focus", ip, device, ident, f"shell pane={ident}")
+                        moved = await asyncio.to_thread(
+                            focus_shell_pane, ident, shell.get("tab_id", ""), remote=remote
+                        )
+                        mark_spaces_dirty()
+                        await ws.send(json.dumps(
+                            {"type": "command_result", "command": "focus", "ok": moved}))
+                        continue
                     args = ("agent", "focus", ident)
                 else:
                     ok, remote, error = resolve_space(target_kind, ident, msg.get("host", ""))

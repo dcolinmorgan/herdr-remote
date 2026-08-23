@@ -45,7 +45,8 @@ def _websockets_stubs():
 
 
 @contextmanager
-def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_origins=None):
+def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_origins=None,
+                 shell_panes=None):
     module_name = f"herdr_relay_test_{uuid.uuid4().hex}"
     logger = logging.getLogger("herdr-relay")
     original_handlers = tuple(logger.handlers)
@@ -68,6 +69,8 @@ def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_o
             environment["HERDR_RELAY_TOKEN"] = relay_token
         if trusted_origins is not None:
             environment["HERDR_TRUSTED_ORIGINS"] = trusted_origins
+        if shell_panes is not None:
+            environment["HERDR_SHELL_PANES"] = shell_panes
 
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.dict(
             sys.modules, _websockets_stubs(), clear=False
@@ -77,6 +80,7 @@ def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_o
                 ("HERDR_RELAY_HOST", relay_host),
                 ("HERDR_RELAY_TOKEN", relay_token),
                 ("HERDR_TRUSTED_ORIGINS", trusted_origins),
+                ("HERDR_SHELL_PANES", shell_panes),
             ):
                 if value is None:
                     os.environ.pop(name, None)
@@ -496,7 +500,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
             async def switch_mid_broadcast(_message):
                 relay.reset_pane_state()          # simulates a switch landing
 
-            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+            with mock.patch.object(relay, "get_all_panes", return_value=(agents, [])), \
                  mock.patch.object(relay, "broadcast", side_effect=switch_mid_broadcast):
                 asyncio.run(relay._poll_once())
 
@@ -523,7 +527,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
                 if calls["blocked_broadcasts"] == 1:
                     relay.reset_pane_state()          # simulates a switch landing
 
-            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+            with mock.patch.object(relay, "get_all_panes", return_value=(agents, [])), \
                  mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
                  mock.patch.object(relay, "broadcast", side_effect=switch_on_first_blocked_broadcast), \
                  mock.patch.object(relay, "send_web_push", new=mock.AsyncMock()):
@@ -545,7 +549,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
             async def switch_mid_clear_push(*args, **kwargs):
                 relay.reset_pane_state()          # simulates a switch landing
 
-            with mock.patch.object(relay, "get_all_agents", return_value=agents), \
+            with mock.patch.object(relay, "get_all_panes", return_value=(agents, [])), \
                  mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
                  mock.patch.object(relay, "send_web_push", side_effect=switch_mid_clear_push):
                 asyncio.run(relay._poll_once())
@@ -576,7 +580,7 @@ class RelaySessionSwitchTests(unittest.TestCase):
                         relay.reset_pane_state()          # simulates a switch landing
                         switched.set()
 
-                with mock.patch.object(relay, "get_all_agents", return_value=[]), \
+                with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
                      mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
                      mock.patch.object(relay, "broadcast", side_effect=switch_mid_broadcast):
                     task = asyncio.create_task(relay.event_push())
@@ -1662,7 +1666,7 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                         broadcasts_complete.set()
 
                 with mock.patch.object(
-                    relay, "get_all_agents", return_value=snapshot
+                    relay, "get_all_panes", return_value=(snapshot, [])
                 ), mock.patch.object(
                     relay, "read_pane", return_value="approve all pending"
                 ) as read_pane, mock.patch.object(
@@ -1681,7 +1685,7 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     messages,
                     [
-                        {"type": "agents", "agents": expected_agents},
+                        {"type": "agents", "agents": expected_agents, "panes": []},
                         {
                             "type": "blocked",
                             "pane_id": "event-pane",
@@ -2278,7 +2282,7 @@ class RelaySpacesTests(unittest.TestCase):
     def test_the_agents_snapshot_carries_the_hierarchy(self):
         with loaded_relay() as relay:
             ws = _FakeWebSocket([])
-            with mock.patch.object(relay, "get_all_agents", return_value=[]), \
+            with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
                  mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
                 asyncio.run(relay.send_current_snapshot(ws))
             # Not sent[0]: the snapshot opens with `sessions`, so pick the message by type
@@ -2411,6 +2415,217 @@ class RelaySpacesTests(unittest.TestCase):
                 relay, {"type": "rename_agent", "pane_id": "nope", "label": "x"})
             self.assertEqual(sent[-1], {"type": "error", "message": "unknown pane_id"})
             self.assertEqual(calls, [])
+
+
+class RelayShellPaneTests(unittest.TestCase):
+    """Panes with no agent in them.
+
+    Two thirds of the panes on a real herdr host are these -- 20 of 30 here -- and the relay used
+    to drop every one on the floor. Listing them is free; writing to one is arbitrary command
+    execution, which is why HERDR_SHELL_PANES gates the lot.
+    """
+
+    PANE_LIST = json.dumps({"result": {"panes": [
+        {"pane_id": "w1:p1", "agent": "claude", "agent_status": "idle", "cwd": "/work/api",
+         "workspace_id": "w1", "tab_id": "w1:t1", "focused": True,
+         "scroll": {"max_offset_from_bottom": 0, "viewport_rows": 40}},
+        {"pane_id": "w1:p2", "agent_status": "unknown", "cwd": "/work/api",
+         "workspace_id": "w1", "tab_id": "w1:t1", "focused": False,
+         "scroll": {"max_offset_from_bottom": 693, "viewport_rows": 35}},
+        {"pane_id": "w2:p9", "agent_status": "unknown", "cwd": "/srv/logs",
+         "workspace_id": "w2", "tab_id": "w2:t1", "focused": False,
+         "scroll": {"max_offset_from_bottom": 0, "viewport_rows": 24}},
+    ]}})
+
+    def herdr_stub(self, *args, remote=None):
+        if args[:2] == ("pane", "list"):
+            return self.PANE_LIST
+        return ""
+
+    def test_shell_panes_stay_invisible_until_the_switch_is_on(self):
+        """Default off: a relay that gains a remote shell on upgrade would be a nasty surprise."""
+        with loaded_relay() as relay:
+            self.assertFalse(relay.SHELL_PANES)
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                agents, shells = relay.list_panes_from_host()
+            self.assertEqual([a["pane_id"] for a in agents], ["w1:p1"])
+            self.assertEqual(shells, [])
+
+    def test_the_switch_lists_them_without_disturbing_the_agents(self):
+        with loaded_relay(shell_panes="1") as relay:
+            self.assertTrue(relay.SHELL_PANES)
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                agents, shells = relay.list_panes_from_host()
+            self.assertEqual([a["pane_id"] for a in agents], ["w1:p1"])
+            self.assertEqual([s["pane_id"] for s in shells], ["w1:p2", "w2:p9"])
+            first = shells[0]
+            self.assertEqual(first["project"], "api")
+            self.assertEqual(first["tab_id"], "w1:t1")
+            self.assertEqual(first["host"], "local")
+            # The one thing an agent pane never has. A client uses it to decide whether "load
+            # older" can return anything at all.
+            self.assertEqual(first["scrollback"], 693)
+            # None of the agent-only keys, because six clients read `agents` and would render a
+            # shell pane as a harness-less agent card.
+            for absent in ("agent", "status", "has_session", "title"):
+                self.assertNotIn(absent, first)
+
+    def test_only_one_pane_list_serves_both_kinds(self):
+        """The CLI call is the cost -- 12ms locally, an SSH round trip remotely, every poll."""
+        with loaded_relay(shell_panes="1") as relay:
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub) as run:
+                relay.list_panes_from_host()
+            calls = [c.args[:2] for c in run.call_args_list]
+            # Exactly one, not "the only call": the same pass also reads `workspace list` for the
+            # workspace_label an agent entry carries. What must not happen is a second `pane list`
+            # because agents and shells were collected separately.
+            self.assertEqual(calls.count(("pane", "list")), 1, calls)
+
+    def test_a_shell_pane_becomes_addressable(self):
+        with loaded_relay(shell_panes="1") as relay:
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                agents, shells = relay.get_all_panes()
+            relay.update_pane_maps(agents, shells)
+            self.assertIn("w1:p2", relay.known_panes)
+            self.assertIn("w1:p2", relay.shell_pane_map)
+            # ...but not as an agent: the blocked-prompt machinery reads agent_cache.
+            self.assertNotIn("w1:p2", relay.agent_cache)
+
+    def test_a_caller_with_no_shell_list_does_not_evict_them(self):
+        """event_push-shaped callers pass agents only; that must not sweep every shell pane."""
+        with loaded_relay(shell_panes="1") as relay:
+            with mock.patch.object(relay, "run_herdr", side_effect=self.herdr_stub):
+                agents, shells = relay.get_all_panes()
+            relay.update_pane_maps(agents, shells)
+            relay.update_pane_maps(agents)
+            self.assertIn("w1:p2", relay.known_panes)
+            self.assertIn("w1:p2", relay.shell_pane_map)
+
+    def test_free_text_runs_as_a_command_on_a_shell_pane(self):
+        """No question to detect, no approval to match: the text is a command and Enter runs it."""
+        with loaded_relay(shell_panes="1") as relay:
+            relay.known_panes.add("w1:p2")
+            relay.shell_pane_map["w1:p2"] = {"pane_id": "w1:p2", "tab_id": "w1:t1"}
+            ws = _FakeWebSocket([json.dumps(
+                {"type": "respond", "pane_id": "w1:p2", "text": "ls -la"})])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane") as read_pane, \
+                 mock.patch.object(relay, "_mutate_herdr", return_value=True) as mutate:
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(
+                [c.args for c in mutate.call_args_list],
+                [("pane", "send-text", "w1:p2", "ls -la"),
+                 ("pane", "send-keys", "w1:p2", "Enter")],
+            )
+            # The question path is skipped outright rather than fed shell output and tricked.
+            read_pane.assert_not_called()
+            self.assertTrue(json.loads(ws.sent[-1])["ok"])
+
+    def test_free_text_is_still_refused_on_an_agent_pane(self):
+        """The shell branch must not have opened the agent one."""
+        with loaded_relay(shell_panes="1") as relay:
+            relay.known_panes.add("w1:p1")
+            content = "Approve this tool?"
+            ws = _FakeWebSocket([json.dumps(
+                {"type": "respond", "pane_id": "w1:p1", "text": "rm -rf /",
+                 "prompt_id": relay.question_prompt_id("w1:p1", content)})])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value=content), \
+                 mock.patch.object(relay, "_mutate_herdr") as mutate:
+                asyncio.run(relay.handle_client(ws))
+            mutate.assert_not_called()
+            self.assertIn("detected question", json.loads(ws.sent[-1])["message"])
+
+    def test_process_info_is_sent_only_when_asked_for(self):
+        """One extra CLI call, so a mirror refresh must not pay it every tick."""
+        info = json.dumps({"result": {"process_info": {"foreground_processes": [
+            {"name": "vim", "cmdline": "vim relay/herdr_relay.py", "pid": 42}]}}})
+
+        def stub(*args, remote=None):
+            return info if args[:2] == ("pane", "process-info") else "output"
+
+        for asked, expected in ((True, "vim"), (False, None)):
+            with self.subTest(process=asked), loaded_relay(shell_panes="1") as relay:
+                relay.known_panes.add("w1:p2")
+                request = {"type": "read_pane", "pane_id": "w1:p2"}
+                if asked:
+                    request["process"] = True
+                ws = _FakeWebSocket([json.dumps(request)])
+                with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                     mock.patch.object(relay, "run_herdr", side_effect=stub) as run:
+                    asyncio.run(relay.handle_client(ws))
+                reply = json.loads(ws.sent[-1])
+                self.assertEqual((reply.get("process") or {}).get("name"), expected)
+                asked_for_it = any(c.args[:2] == ("pane", "process-info")
+                                   for c in run.call_args_list)
+                self.assertEqual(asked_for_it, asked)
+
+
+class RelayPaneWalkTests(unittest.TestCase):
+    """Focusing a pane herdr has no command for."""
+
+    LAYOUT = {
+        "w1:p1": {"x": 0, "y": 0, "width": 120, "height": 70},    # left half
+        "w1:p2": {"x": 120, "y": 0, "width": 120, "height": 35},  # right top
+        "w1:p3": {"x": 120, "y": 35, "width": 120, "height": 35},  # right bottom
+    }
+
+    def layout_json(self, focused):
+        return json.dumps({"result": {"layout": {
+            "focused_pane_id": focused,
+            "panes": [{"pane_id": pid, "focused": pid == focused, "rect": rect}
+                      for pid, rect in self.LAYOUT.items()],
+        }}})
+
+    def test_a_cell_is_taller_than_it_is_wide_so_overlap_picks_the_axis(self):
+        """Raw dx vs dy would call p1 -> p3 a vertical move; they share no rows, so it isn't."""
+        with loaded_relay() as relay:
+            left, right_top, right_bottom = (self.LAYOUT[k] for k in
+                                             ("w1:p1", "w1:p2", "w1:p3"))
+            self.assertEqual(relay.walk_direction(left, right_top), "right")
+            self.assertEqual(relay.walk_direction(right_top, left), "left")
+            self.assertEqual(relay.walk_direction(right_top, right_bottom), "down")
+            self.assertEqual(relay.walk_direction(right_bottom, right_top), "up")
+            # p1 spans every row p3 does, so it is a horizontal neighbour despite the offset.
+            self.assertEqual(relay.walk_direction(left, right_bottom), "right")
+
+    def test_the_walk_focuses_the_tab_then_steps_to_the_pane(self):
+        with loaded_relay(shell_panes="1") as relay:
+            focused = ["w1:p1"]
+
+            def reader(*args, remote=None):
+                return self.layout_json(focused[0]) if args[:2] == ("pane", "layout") else ""
+
+            def mutator(*args, remote=None):
+                if args[:2] == ("pane", "focus"):
+                    focused[0] = {"right": "w1:p2", "down": "w1:p3"}.get(args[3], focused[0])
+                return True
+
+            with mock.patch.object(relay, "run_herdr", side_effect=reader), \
+                 mock.patch.object(relay, "_mutate_herdr", side_effect=mutator) as mutate:
+                self.assertTrue(relay.focus_shell_pane("w1:p3", "w1:t1"))
+
+            calls = [c.args for c in mutate.call_args_list]
+            self.assertEqual(calls[0], ("tab", "focus", "w1:t1"))
+            self.assertEqual([c[3] for c in calls[1:]], ["right", "down"])
+
+    def test_a_step_that_moves_nothing_stops_the_walk(self):
+        """A wall, or a layout walk_direction does not model. Either way: not a loop."""
+        with loaded_relay(shell_panes="1") as relay:
+            def reader(*args, remote=None):
+                return self.layout_json("w1:p1") if args[:2] == ("pane", "layout") else ""
+
+            with mock.patch.object(relay, "run_herdr", side_effect=reader), \
+                 mock.patch.object(relay, "_mutate_herdr", return_value=True) as mutate:
+                self.assertFalse(relay.focus_shell_pane("w1:p3", "w1:t1"))
+            # tab focus, one step, then it notices the step changed nothing.
+            self.assertEqual(len(mutate.call_args_list), 2)
+
+    def test_an_unreadable_layout_fails_rather_than_guesses(self):
+        with loaded_relay(shell_panes="1") as relay:
+            with mock.patch.object(relay, "run_herdr", return_value="not json"), \
+                 mock.patch.object(relay, "_mutate_herdr", return_value=True):
+                self.assertFalse(relay.focus_shell_pane("w1:p3", "w1:t1"))
 
 
 class RelaySshMultiplexingTests(unittest.TestCase):

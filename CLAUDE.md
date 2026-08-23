@@ -94,6 +94,7 @@ cd herdi-win && ./build.ps1
 | `HERDR_BIN` | Path to herdr binary (default: `/opt/homebrew/bin/herdr`) |
 | `HERDR_RELAY` | Relay URL used by clients (default: `ws://127.0.0.1:8375`) |
 | `HERDR_SESSION` | Boot-time default herdr session; a client can override it per source at runtime via `session_switch` |
+| `HERDR_SHELL_PANES` | Set to `1` to list, read and **write** the panes with no agent in them (default off — writing to one is arbitrary command execution; see SECURITY.md) |
 | `HERDR_TRANSCRIPT` | Set to `0` to refuse every `get_history` with `unavailable: "disabled"` |
 | `HERDR_CLAUDE_ROOTS` | Comma-separated roots to search for claude transcripts (default `~/.claude/projects`) |
 | `HERDR_REMOTE_CLAUDE_ROOTS` | Same, as remote shell words (default `$HOME/.claude/projects`) |
@@ -112,6 +113,7 @@ The web app is a single self-contained HTML file (`web/index.html`) with inline 
 Messages are JSON with a `type` field:
 
 **Server → Client:** `agents` (complete state snapshot, plus the `spaces` hierarchy), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection), `history` (transcript turns, or `unavailable` with a reason), `command_result` / `tab_created` (did the mutation land), `error`
+**Server → Client:** `agents` (complete state snapshot, plus the `spaces` hierarchy and the `panes` list), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `history` (transcript turns, or `unavailable` with a reason), `command_result` / `tab_created` (did the mutation land), `error`
 
 **Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `focus`, `create_tab`, `rename_tab`, `close_tab`, `rename_agent`, `push_subscribe`/`push_unsubscribe`
 
@@ -131,6 +133,76 @@ Refreshed every `SPACES_POLL_INTERVAL` pane polls, immediately on connect, and i
 any message that moves the hierarchy — two extra CLI calls per host (4ms each locally, one SSH
 round trip each remotely) against something that only changes when someone creates, closes,
 renames or focuses. A failed read keeps the last good hierarchy rather than blanking clients.
+
+The same message carries **`panes`** — the panes with no agent in them, which is most of them:
+30 panes on this host, 10 of which hold an agent. They are a separate array rather than `agents`
+entries because six clients render that array and every one of them assumes its entries are
+agents; a shell pane would show up in all of them as a card with an empty harness name. Each entry
+is `pane_id`, `label`, `cwd`, `project`, `host`, `remote`, `workspace_id`, `tab_id`, `focused`,
+`scrollback`, `viewport_rows` — no `status` (herdr reports `agent_status: "unknown"` for all of
+them), no `title` (there is no such field on a non-agent pane) and no `has_session`. They come out
+of the **same `pane list`** the poll already runs, so listing them costs nothing.
+
+Two things are true of a shell pane and not of an agent pane:
+
+- **It has a real scrollback ring.** Agent panes run on the alternate screen and report
+  `max_offset_from_bottom: 0` without exception; shell panes here report 0 to 693. A 400-line
+  `recent` read on one measured **10ms end to end through the relay**, against the multi-second
+  harvest the same request triggers on an idle agent pane. Scrollback is worth offering here.
+- **Writing to it is a command.** `respond` on a shell pane skips the question detector entirely —
+  there is nothing to detect — and sends `pane send-text` followed by `Enter`. No harness stands
+  between the text and the shell. That is why the whole feature is behind `HERDR_SHELL_PANES` and
+  why the audit line is `respond_shell` rather than `respond`.
+
+**`focus` on a shell pane is a walk, not a command.** `agent focus` climbs to the tab and
+workspace holding an agent pane; there is no equivalent for a pane without one, and `pane focus`
+only steps to a *neighbour* by `--direction`. So `focus_shell_pane` focuses the tab, then reads
+`pane layout` (every pane's rect plus `focused_pane_id`) and steps one neighbour at a time,
+re-reading after each step — herdr's notion of "the pane to the right" is its own, and a route
+plotted from the first layout would land elsewhere and report success. A step that changes nothing
+stops the walk instead of looping, and `PANE_WALK_LIMIT` (6) bounds it either way. Measured on a
+throwaway two-pane tab: **32ms** end to end through the relay, about six CLI calls.
+
+`walk_direction` picks its axis by **row overlap, not by comparing dx to dy**: rects are in
+terminal cells, a cell is about twice as tall as it is wide, and the raw comparison calls a
+side-by-side pair a vertical move on splits that look square on screen.
+
+**`pane process-info` is fetched on request, never on a timer.** 20 shell panes here share only 12
+distinct `cwd` basenames, so eight of them are indistinguishable from a sibling by directory alone
+— `process-info` separates zsh from vim from the build that has been running an hour. It costs
+2.5ms locally but it is **one call per pane**, which is one SSH round trip per pane, so it never
+enters the poll. `read_pane` takes an optional `process: true` and answers with
+`process: {name, cmdline}`; a client asks when it *opens* a pane, not on every mirror refresh.
+
+### The relay is single-threaded; every herdr call is not
+
+Nothing that blocks may be awaited inline. A herdr call is a subprocess — a few ms locally, but a
+read past the viewport runs to seconds and an SSH call to the 15s timeout — and for its whole
+duration an inline caller serves no other client, runs no poll tick and sends no broadcast. The
+same applies to `send_web_push`, whose `pywebpush` POSTs are `requests` under the hood against
+endpoints the relay does not control.
+
+So the boundary is explicit at each call site: `await asyncio.to_thread(read_pane, …)`, not
+`read_pane(…)`. Measured with eight clients each reading a different pane at the same instant,
+against a herdr stand-in whose every read costs 0.5s: **4050ms of wall clock in a clean 506ms
+staircase before, 513ms after** — the eighth client used to wait four seconds for a half-second
+call. On real local reads (3ms each) the staircase is still exactly there, just cheap; it is the
+SSH and scrollback-harvest paths that make it hurt.
+
+Two tests hold the boundary, because the failure is silent — everything still works, the relay
+just stops answering anyone else while it runs:
+
+- `test_a_slow_herdr_call_does_not_stall_the_event_loop` puts a 0.3s subprocess under `_poll_once`
+  and counts how many times a 5ms ticker got scheduled. Inline it is exactly 0.
+- `test_no_blocking_call_is_awaited_inline_from_async_code` builds the call graph over the relay's
+  own sync functions, seeds it with `subprocess.run` / `transcript.history` / `transcript_ssh`, and
+  fails on any of them called straight from an `async def` — naming file, line and holder. It
+  unwraps `asyncio.to_thread(fn, …)` for `fn` only, so `to_thread(f, read_pane(x))` is still caught.
+
+`_invoke_herdr`'s SSH branch is the only shared state involved (`_remote_locks`, behind
+`_remote_locks_guard`), so the worker threads need no further synchronising. `_deliver_push` works
+off a snapshot of `push_subscriptions` and drops dead ones **by value**, since a `push_subscribe`
+arriving mid-flight would invalidate an index computed before it.
 
 ### Relay-side constraints clients must respect
 
@@ -155,7 +227,13 @@ renames or focuses. A failed read keeps the last good hierarchy rather than blan
   `herdr agent rename`; typing `/rename x` at the pane instead just lands literal text in the
   agent's composer.
 - **`read_pane` picks its own source.** `source` ∈ `visible | recent | recent-unwrapped | detection`
-  (default `recent`), `lines` is clamped to 1000, `format` ∈ `text | ansi`.
+  (default `recent`), `lines` is clamped to 1000, `format` ∈ `text | ansi`. Optional
+  `process: true` adds `process: {name, cmdline}` to the reply at the cost of one extra CLI call
+  — ask on open, not on every refresh.
+- **A shell pane is addressable only when `HERDR_SHELL_PANES` is on.** With it off they are not in
+  `known_panes`, so every message naming one is refused as an unknown pane — that is the whole
+  gate, there is no second check per message. With it on, `respond` takes free text there (it
+  becomes a command), and `focus` walks instead of calling `agent focus`.
 - **`get_history` reads the agent's own transcript, not the terminal.** Request:
   `{pane_id, limit?, before?, include_tools?}` — `limit` defaults to 200 and is capped at 2000,
   `before` is a turn `uuid` from an earlier response (page towards older), `include_tools` defaults

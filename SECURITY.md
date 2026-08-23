@@ -41,7 +41,7 @@ When running herdr-remote:
 
 ## What the relay can read
 
-Two capabilities are worth knowing about before you expose a relay:
+Three capabilities are worth knowing about before you expose a relay:
 
 **Terminal contents.** Any connected client can ask for a pane's rendered output and can send keys
 and text to the agent in it. That is the point of the tool, but it means relay access is equivalent
@@ -60,3 +60,17 @@ also carries that host's transcripts to the client.
   relay resolves it through state it built from `herdr pane list`.
 - Set `HERDR_TRANSCRIPT=0` to switch the whole capability off. `get_history` then answers
   `unavailable: "disabled"` and no transcript is opened, locally or remotely.
+
+**Shell panes (off by default).** `HERDR_SHELL_PANES` makes the relay list, read and write the
+panes that have no agent in them -- two thirds of the panes on a typical host. The read half is the
+same exposure as above. The write half is not: text sent to a shell pane is a **command**, and the
+relay follows it with Enter. There is no harness in between to detect a question, refuse a
+free-text answer or show an approval prompt, which is exactly what the agent-pane path relies on.
+
+- With the switch off (the default, and the behaviour of every release before it), non-agent panes
+  are not listed, are not in `known_panes`, and every message naming one is refused as an unknown
+  pane. Turning it on is the only way in.
+- With it on, relay access is shell access to every host the relay polls, including everything in
+  `HERDR_REMOTES`. Treat the relay token as you would an SSH key.
+- Shell commands are audited under `respond_shell` with the client IP, the device string and the
+  full text, separately from agent responses.
