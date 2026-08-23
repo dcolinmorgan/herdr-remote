@@ -234,12 +234,85 @@ class WebSpaceGroupTests(unittest.TestCase):
             ".space-header", "els => els.map(e => [e.dataset.wsKey, e.dataset.wsName])")
         self.assertIn(["local|wA", "api"], pairs)
 
-    def test_a_relay_with_no_hierarchy_and_one_space_still_gets_the_flat_list(self):
-        flat = {"type": "agents", "agents": [_agent("wA:pH", "wA", "wA:t1")], "panes": []}
-        self.page.evaluate("s => { activeWorkspace = null; shellPanes = []; handleMessage(s); }",
-                           flat)
-        self.assertEqual([n["name"] for n in self.sequence() if n["kind"] == "space"], [])
-        self.assertEqual([n["name"] for n in self.sequence() if n["kind"] == "head"], ["IDLE"])
+    def test_a_relay_that_reports_no_hierarchy_gets_the_flat_status_list(self):
+        """The shape `demo-worker` actually serves: no `workspace_id` on any pane, three hosts. It
+        used to render three fabricated groups named after whichever project came first, with the
+        blocked agent buried as the third card -- because `spaceKey` stringified `undefined` into
+        `local|undefined`, which reads as a real space to every guard downstream."""
+        demo = {"type": "agents", "agents": [
+            {"pane_id": "demo:1", "agent": "claude", "status": "working",
+             "project": "phoenix-api", "cwd": "/dev/phoenix-api", "host": "local"},
+            {"pane_id": "demo:3", "agent": "kiro", "status": "blocked",
+             "project": "orbit-ui", "cwd": "/dev/orbit-ui", "host": "local"},
+            {"pane_id": "demo:4", "agent": "grok", "status": "working",
+             "project": "atlas-core", "cwd": "/dev/atlas-core", "host": "remote-1"},
+            {"pane_id": "demo:6", "agent": "claude", "status": "working",
+             "project": "nebula-ml", "cwd": "/dev/nebula-ml", "host": "remote-2"},
+        ]}
+        self.page.evaluate("""s => {
+          activeWorkspace = null; activeTab = null;
+          shellPanes = []; spaces = {workspaces: [], tabs: []};
+          handleMessage(s);
+        }""", demo)
+        seq = self.sequence()
+        self.assertEqual([n["name"] for n in seq if n["kind"] == "space"], [],
+                         "a relay with no hierarchy was given fabricated workspaces")
+        self.assertEqual([n["name"] for n in seq if n["kind"] == "head"], ["BLOCKED", "WORKING"])
+        self.assertEqual(next(n for n in seq if n["kind"] == "agent")["id"], "demo:3")
+
+    def test_the_pane_that_is_asking_is_the_first_card_in_the_list(self):
+        """Dropping the `Needs you` hoist is only honest if this holds, and sorting a group by tab
+        alone left the blocked agent below any tabmate that came from an earlier tab."""
+        self.page.evaluate("""s => {
+          const snap = JSON.parse(JSON.stringify(s));
+          snap.agents.find(a => a.pane_id === 'wB:pH').tab_id = 'wB:t2';
+          snap.spaces.tabs.push({tab_id: 'wB:t2', workspace_id: 'wB', label: '2', number: 2,
+                                 focused: false, pane_count: 1, host: 'local'});
+          activeWorkspace = null; activeTab = null; handleMessage(snap);
+        }""", SNAPSHOT)
+        seq = self.sequence()
+        self.assertEqual(next(n for n in seq if n["kind"] == "space")["name"], "billing")
+        self.assertEqual(
+            next(n for n in seq if n["kind"] in ("agent", "shell"))["id"], "wB:pH",
+            "the blocked pane was not the first card in the list")
+
+    def test_a_pane_that_names_no_space_lands_somewhere_unclickable(self):
+        """A `blocked` push carries no workspace_id (relay: blocked_message), so one can arrive for
+        a pane the snapshot has not described yet. It has to appear -- and its heading must not
+        offer to drill into a space that does not exist."""
+        self.page.evaluate("""() => {
+          agents.push({pane_id: 'w?:p1', agent: 'claude', status: 'blocked',
+                       project: 'pushed', host: 'local'});
+          render();
+        }""")
+        # Both groups are asking, and a space herdr actually numbered comes ahead of a placeholder.
+        self.assertEqual(
+            self.page.eval_on_selector_all(".space-header", """els => els.map(e =>
+              [e.querySelector('.space-name').textContent, e.disabled, !!e.dataset.wsKey])"""),
+            [["billing", False, True], ["Unsorted", True, False], ["api", False, True],
+             ["logs", False, True], ["orphan", False, True]])
+        self.assertIn("w?:p1", [n["id"] for n in self.sequence() if n["kind"] == "agent"])
+
+    def test_a_card_that_shows_the_pane_id_still_knows_the_panes_real_name(self):
+        """`data-agent-name` prefills the rename dialog. An id there let long-press, Rename, Enter
+        send `rename_agent {label: "wA:pH"}` and overwrite the real herdr label on every client."""
+        shown, named = self.page.evaluate("""() => {
+          const card = document.querySelector('#agents [data-pane-id="wA:pH"]');
+          return [card.querySelector('.project').innerText, card.dataset.agentName];
+        }""")
+        self.assertEqual(shown, "wA:pH")
+        self.assertEqual(named, "api")
+
+    def test_an_operators_own_label_is_never_replaced_by_an_id(self):
+        """Even when it is the same string the heading carries -- the operator typed it."""
+        self.page.evaluate("""() => {
+          agents.find(a => a.pane_id === 'wA:pH').label = 'api'; render();
+        }""")
+        card = self.page.evaluate("""() => {
+          const c = document.querySelector('#agents [data-pane-id="wA:pH"]');
+          return [c.querySelector('.project').innerText, c.dataset.agentName];
+        }""")
+        self.assertEqual(card, ["api", "api"])
 
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
@@ -369,6 +442,50 @@ class WebSiblingStripTests(unittest.TestCase):
                            without)
         self.assertEqual(self.strip(), [])
         self.assertFalse(self.visible())
+
+    def test_one_chip_per_pane_even_when_a_pane_is_in_both_arrays(self):
+        """A `blocked` push adds an agent record for a pane that may still be in shellPanes, and
+        paneById's own comment admits the overlap. Two chips for one pane, one hollow and one
+        coloured, would read as two panes."""
+        self.page.evaluate("""() => {
+          agents.push({...shellPanes.find(p => p.pane_id === 'wA:p2'),
+                       agent: 'claude', status: 'blocked'});
+          openTerminal('wA:pH');
+        }""")
+        self.assertEqual([c[1] for c in self.strip() if c[0] == "chip"], ["wA:p2", "wA:p3"])
+
+    def test_no_tab_hierarchy_means_no_tab_claim(self):
+        """`Tab` says these panes are on the operator's screen beside this one. With no tab ids to
+        go by there is nothing to base that on, so everything is simply elsewhere in the space."""
+        self.page.evaluate("""() => {
+          [...agents, ...shellPanes].forEach(p => { delete p.tab_id; });
+          spaces = {workspaces: spaces.workspaces, tabs: []};
+          openTerminal('wA:pH');
+        }""")
+        self.assertEqual(self.strip(), [
+            ["label", "Space"], ["chip", "wA:p2", True], ["chip", "wA:p3", True]])
+
+    def test_switching_pane_from_the_strip_does_not_carry_the_search_over(self):
+        """`originalContent` is one global holding the open pane's output. Switching with the search
+        open left pane A's HTML in it, and the next keystroke restored A's output into B's session
+        -- reachable only since a chip made switching a one-tap move from inside the session."""
+        self.page.evaluate("""() => {
+          openTerminal('wA:pH');
+          document.getElementById('termContent').innerHTML = 'AAA-pane-A-output';
+          toggleSearch();
+          document.getElementById('searchInput').value = 'AAA';
+          doSearch();
+        }""")
+        self.assertNotEqual(self.page.evaluate("originalContent"), "")
+        self.page.eval_on_selector('#termSiblings [data-sib-id="wA:p2"]', "e => e.click()")
+        self.assertEqual(self.page.evaluate("originalContent"), "")
+        self.assertEqual(self.page.eval_on_selector("#searchInput", "e => e.value"), "")
+        self.page.evaluate("""() => {
+          document.getElementById('termContent').innerHTML = 'BBB-pane-B-output';
+          doSearch();
+        }""")
+        self.assertIn("BBB-pane-B-output",
+                      self.page.eval_on_selector("#termContent", "e => e.innerHTML"))
 
     def test_the_strip_costs_a_bounded_slice_of_a_phone_screen(self):
         """It sits above the output, and the output is the point. Measured at 390x844."""

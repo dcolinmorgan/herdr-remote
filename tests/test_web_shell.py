@@ -151,19 +151,16 @@ class WebShellPaneListTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in self.cards() if c["shell"]],
                          ["wE:p2", "wE:p5", "w6:p3"])
 
-    def test_a_terminal_never_lands_in_an_agent_section(self):
-        """The whole reason the relay ships them in a separate array. Grouped by workspace the
-        claim is per group: within one, every agent comes before every terminal."""
-        seen_shell = None
-        for node in self.sequence():
-            if node["kind"] == "space":
-                seen_shell = None
-            elif node["kind"] == "shell":
-                seen_shell = node["id"]
-            elif node["kind"] == "agent":
-                self.assertIsNone(
-                    seen_shell,
-                    f"agent {node['id']} rendered after terminal {seen_shell} in its own group")
+    def test_a_terminal_is_never_drawn_as_an_agent(self):
+        """The whole reason the relay ships them in a separate array. Not an ordering claim: a group
+        is ordered by tab, so a terminal in an earlier tab legitimately precedes an agent in a later
+        one. What must hold is that no `panes` entry is ever rendered by agentCard -- it would show
+        up with an empty harness name and a fourth shade of status grey."""
+        drawn = {n["id"]: n["kind"] for n in self.sequence() if n["kind"] in ("agent", "shell")}
+        for pane in SNAPSHOT["panes"]:
+            self.assertEqual(drawn.get(pane["pane_id"]), "shell", pane["pane_id"])
+        for agent in SNAPSHOT["agents"]:
+            self.assertEqual(drawn.get(agent["pane_id"]), "agent", agent["pane_id"])
 
     def test_a_terminal_is_visibly_not_an_agent(self):
         """A status dot it does not have would be a fourth shade of grey; hollow is not a shade."""

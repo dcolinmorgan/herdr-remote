@@ -175,7 +175,11 @@ What a card is *called* is one rule for both kinds, `paneLabel`: the operator's 
 said the project, a card whose name **equals** that heading falls through to the **pane id**.
 `project` is one string per workspace by construction, so on the real host it produced four cards
 reading `herdr` under a heading reading `herdr`, and three reading `tuyaos-ai-qemu` under
-`tuyaos-ai-qemu`. Only the exact duplicates collapse: `relay`, `Files`, `kv-tool-v2` and
+`tuyaos-ai-qemu`. An **operator's own `label` is never suppressed**, whatever the heading says, and
+the id the fallback produces is the *display* string only: `data-agent-name` carries `paneName` —
+the pane's real name — because that attribute prefills the rename dialog, and an id there let
+long-press, Rename, Enter send `rename_agent {label: "w6:pH"}` and overwrite the real herdr label on
+every client. Only the exact duplicates collapse: `relay`, `Files`, `kv-tool-v2` and
 `herdr-file-viewer-c993314e2614` all differ from their space's name and survive. Directories are no
 help here either — 20 shell panes on that host share only 12 distinct `cwd` basenames, and only 12
 *within their own workspaces*: three sit in one directory in `wS`, two in `wE`, because a workspace
@@ -199,11 +203,14 @@ absent and the page renders exactly as it did before, which `test_web_shell.py` 
 unit of work (`workspace list` reports a `worktree` block for a git one), so it is what an agent
 and the terminals beside it actually have in common; grouping by status instead put this host's
 `wT` agent and `wT` build terminal twenty rows apart, and left the three workspaces that hold no
-agent at all reachable only through a chip. Spaces with a blocked agent sort first and the rest
-keep herdr's own numbering — only whole groups move, never a row inside one — which is why this
-view carries **no "Needs you" hoist**: the hoist exists because a status-grouped list buries the
-blocked card among nine others, and a hoist over a list whose first group is the one asking would
-render that card twice. Inside a group the order is by tab with the agent ahead of its tabmates; a
+agent at all reachable only through a chip. Spaces with a blocked agent sort first and the rest keep
+herdr's own numbering, and inside a group a blocked pane sorts ahead of its tab — so **the first
+card in the list is always the one asking**, which is what lets this view carry **no "Needs you"
+hoist**: the hoist exists because a status-grouped list buries the blocked card among nine others,
+and a hoist over a list that cannot bury it would render that card twice. The intra-group jump is
+load-bearing, not cosmetic: ordering by tab alone put the blocked agent third in its own group
+whenever a tabmate came from an earlier tab, and dropping the hoist on top of that was simply a
+regression. Inside a group the order is by tab with the agent ahead of its tabmates; a
 heading per tab would spend a row on each for at most four panes (one to three is typical), so the
 ordering carries the relation instead. The header is the chip's twin — same `data-ws-key`, so
 long-press reaches `Focus in herdr` from either, and a tap drills in.
@@ -214,7 +221,20 @@ renders a pane it cannot place, and the grouped view is the only one that can lo
 so `spaceGroups` buckets the panes first and uses the hierarchy only to name and order the buckets.
 And the **hoist that survives in the drilled-in view is now scoped to the filter** — it used to be
 unfiltered, so drilling into `api` put billing's blocked agent on top of the space you had just
-chosen. Cost, measured at 390×844 on the real 30-pane host: a group header is 23px plus 24px of
+chosen.
+
+`spaceKey` is what makes any of that safe, and it is a one-token fix worth knowing about:
+`` `${host}|${id}` `` turned a missing id into the string `local|undefined`, which reads as a real
+space to everything downstream — `splitKey` returns the truthy `"undefined"`, `render()`'s
+`!k.endsWith('|')` guard passes it, and the `Unsorted` fallback is unreachable. A relay that reports
+no hierarchy at all — **`demo-worker`, which serves six agents with no `workspace_id` across three
+hosts**, or any relay older than `spaces` — therefore got one fabricated group per host, named after
+whichever project happened to be first, with the blocked agent buried inside it. With `${id || ''}`
+those panes key to `host|`, the guard sees them, and such a relay falls back to the flat status list
+it always had; `test_web_spaces.py` asserts that against the demo payload directly. A `blocked` push
+is the same shape (`blocked_message` carries no `workspace_id`), so a pane pushed ahead of its first
+snapshot lands in an `Unsorted` group whose header is a heading rather than a button — there is no
+space to drill into and nothing for `Focus in herdr` to focus. Cost, measured at 390×844 on the real 30-pane host: a group header is 23px plus 24px of
 margin, exactly what a status header cost, so ten groups instead of four status headings is +282px
 on a 2,539px list.
 
@@ -225,8 +245,10 @@ a menu because the set is tiny: measured on that host, **at most 3 tabmates and 
 a workspace**, and 7 of the 10 agent panes have at least one terminal beside them. It costs **32px,
 3.8% of a 390×844 screen**, and nothing at all for the other 3 — or for every pane when
 `HERDR_SHELL_PANES` is off, which is the same "renders exactly as before" guarantee the list has.
-It sits in **normal flow** under the header, so the history and search panels cover it the way they
-already cover the output and `positionHistoryPanel` is untouched. It is rebuilt from every `agents`
+It sits in **normal flow** under the header, which is why the absolutely-positioned history panel
+covers it exactly as it already covered the output and `positionHistoryPanel` is untouched. The
+search bar is in that same flow *after* it, so opening search pushes the output down rather than
+hiding the strip. It is rebuilt from every `agents`
 snapshot, so a terminal appearing beside the open pane shows up without a reopen. A chip is DOM
 nodes, not an HTML string; it carries the same hollow-or-status-coloured dot its card does, so the
 strip needs no legend and the two places cannot come to disagree about a pane; and it is named by

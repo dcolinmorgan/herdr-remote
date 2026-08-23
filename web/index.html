@@ -115,6 +115,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .space-header .space-host { font-size: 0.6rem; color: var(--orange); }
 .space-header .space-count { flex: 1; font-size: 0.65rem; color: var(--muted); white-space: nowrap; }
 .space-header .space-go { color: var(--muted); font-size: 1rem; line-height: 1; }
+.space-header:disabled { cursor: default; }
 .space-header.focused .space-name { box-shadow: inset 0 -1.5px 0 var(--green); }
 .space-header.alert .space-name::after { content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--red); }
 .agent.focused { border-color: color-mix(in srgb, var(--green) 55%, var(--border)); background: color-mix(in srgb, var(--green) 4%, var(--surface)); }
@@ -1169,7 +1170,12 @@ function handleMessage(msg) {
   }
 }
 
-function spaceKey(host, id) { return `${host || 'local'}|${id}`; }
+// A missing id must NOT reach the key as the string "undefined". It did, and everything downstream
+// read `local|undefined` as a real space: splitKey handed back the truthy "undefined", render()'s
+// `!k.endsWith('|')` guard let it through, and a relay that reports no hierarchy at all -- the demo
+// worker, any relay older than `spaces` -- got one fabricated group per host, named after whichever
+// project happened to be first, with its blocked agent buried inside it.
+function spaceKey(host, id) { return `${host || 'local'}|${id || ''}`; }
 function agentWorkspaceKey(a) { return spaceKey(a.host, a.workspace_id); }
 function agentTabKey(a) { return spaceKey(a.host, a.tab_id); }
 
@@ -1244,6 +1250,9 @@ function render() {
 
 function renderWorkspaces(rows) {
   let html = '';
+  // One lookup, used by the hoist and by the sections under it: two would let the same pane be
+  // named one way above the chips and another way below them.
+  const spaceName = activeWorkspace ? rows.find(r => r.key === activeWorkspace)?.name : undefined;
   // Hoist blocked agents -- but only over the status-grouped list further down, which is the one
   // that buries them. The unfiltered list groups by workspace and puts the asking space first, so
   // a hoist there would render the same card twice (see spaceGroups). Scoped to the filter, too:
@@ -1254,7 +1263,7 @@ function renderWorkspaces(rows) {
          && (!activeTab || agentTabKey(a) === activeTab));
   if (blocked.length) {
     html += `<div class="section-header" style="color:var(--red)"><span class="dot" style="background:var(--red)"></span>Needs you <span style="opacity:0.6">(${blocked.length})</span></div>`;
-    html += blocked.map(a => agentCard(a, rows.find(r => r.key === activeWorkspace)?.name)).join('');
+    html += blocked.map(a => agentCard(a, spaceName)).join('');
   }
   // Space chip strip
   html += `<div class="chip-strip"><span class="chip-label">Spaces</span>`;
@@ -1262,7 +1271,12 @@ function renderWorkspaces(rows) {
   for (const w of rows) {
     const wsAgents = agents.filter(a => agentWorkspaceKey(a) === w.key);
     const hasBlocked = wsAgents.some(a => a.status === 'blocked');
-    const hint = w.paneCount && !wsAgents.length ? ` (${w.paneCount})` : '';
+    // herdr's own count, shown whenever it exceeds what this client can serve rather than only when
+    // the space holds no agent: with HERDR_SHELL_PANES off, a space of five panes drew one card and
+    // said nothing at all about the other four.
+    const shownHere = wsAgents.length
+      + shellPanes.filter(pane => agentWorkspaceKey(pane) === w.key).length;
+    const hint = w.paneCount > shownHere ? ` (${w.paneCount})` : '';
     html += `<button class="chip${activeWorkspace===w.key?' active':''}${hasBlocked?' alert':''}${w.focused?' focused':''}"
       onclick="selectWorkspace('${escapeAttr(w.key)}')" data-ws-key="${escapeAttr(w.key)}" data-ws-name="${escapeAttr(w.name)}"
       title="${escapeAttr(w.focused ? w.name + ' — herdr is here' : w.name)}">${escapeHtml(w.name)}${hint}</button>`;
@@ -1296,7 +1310,6 @@ function renderWorkspaces(rows) {
     // The chip strip above has said which space this is, so the cards under it are named by the
     // same rule the grouped view uses -- a list that renamed its rows depending on how you got to
     // it would be worse than either.
-    const spaceName = rows.find(r => r.key === activeWorkspace)?.name;
     let filtered = agents.filter(a => agentWorkspaceKey(a) === activeWorkspace);
     if (activeTab) filtered = filtered.filter(a => agentTabKey(a) === activeTab);
     // Don't re-show blocked that are already hoisted
@@ -1365,24 +1378,37 @@ function spaceHeader(g) {
     ? `<span class="space-host">@${escapeHtml(g.host)}</span>` : '';
   const say = [g.name, counts, g.focused ? 'herdr is here' : '', g.blocked ? 'needs you' : '']
     .filter(Boolean).join(', ');
+  // A group built from panes that name no workspace has nothing to drill into and nothing for
+  // `Focus in herdr` to focus, so it is a heading rather than a button.
+  const nav = g.id
+    ? ` data-ws-key="${escapeAttr(g.key)}" data-ws-name="${escapeAttr(g.name)}"`
+      + ` onclick="selectWorkspace('${escapeAttr(g.key)}')"`
+    : ' disabled';
   return `<button class="space-header${g.blocked ? ' alert' : ''}${g.focused ? ' focused' : ''}"
-    data-ws-key="${escapeAttr(g.key)}" data-ws-name="${escapeAttr(g.name)}"
-    onclick="selectWorkspace('${escapeAttr(g.key)}')" aria-label="${escapeAttr(say)}">
+    ${nav} aria-label="${escapeAttr(say)}">
     <span class="space-name">${escapeHtml(g.name)}</span>${host}
     <span class="space-count">${escapeHtml(counts)}</span>
     <span class="space-go" aria-hidden="true">›</span>
   </button>`;
 }
 
-// Tabmates adjacent, and the agent ahead of the terminals it sits beside -- the same relation the
-// session view's sibling strip spells out. A heading per tab would spend a row on each for at most
-// four panes (one to three is typical here), so the ordering carries it instead.
+// A pane that is asking first, then tabmates adjacent with the agent ahead of the terminals it sits
+// beside -- the same relation the session view's sibling strip spells out. A heading per tab would
+// spend a row on each for at most four panes (one to three is typical here), so the ordering carries
+// it instead.
+//
+// The blocked pane jumps its tab because that is the whole claim this view rests on: dropping the
+// `Needs you` hoist is only honest if the first card of the first group IS the one asking, and
+// sorting by tab alone left it third in its group whenever a tabmate came from an earlier tab.
 function groupCards(g) {
   const order = new Map(tabRows(g.key).map((t, i) => [t.key, i]));
   const rank = p => order.has(agentTabKey(p)) ? order.get(agentTabKey(p)) : order.size;
+  const urgent = p => p.status === 'blocked' ? 0 : 1;
   const items = [...g.agents.map(a => ({pane: a, shell: false})),
                  ...g.shells.map(p => ({pane: p, shell: true}))];
-  items.sort((x, y) => rank(x.pane) - rank(y.pane) || (x.shell ? 1 : 0) - (y.shell ? 1 : 0));
+  items.sort((x, y) => urgent(x.pane) - urgent(y.pane)
+                    || rank(x.pane) - rank(y.pane)
+                    || (x.shell ? 1 : 0) - (y.shell ? 1 : 0));
   return items.map(i => i.shell ? shellCard(i.pane, g.name) : agentCard(i.pane, g.name)).join('');
 }
 
@@ -1567,15 +1593,24 @@ function focusItem() {
   hideContextMenu();
 }
 
-// What to call a pane on its card. `project` is one string per workspace, so under a heading that
-// has just said it, four cards reading `herdr` name none of the four -- and the thing that actually
-// separates two siblings is the id, which is why the sibling chips lead with it too. Suppressed
-// only when it is the SAME string: `relay`, `Files` and `kv-tool-v2` all differ from their space's
-// name and stay. `groupName` is undefined in the flat single-space list, where no heading said it.
+// What a pane is actually called, which is what `rename_agent` must be prefilled with.
+function paneName(p, fallback) { return p.label || p.project || fallback; }
+
+// What to SHOW on its card. `project` is one string per workspace, so under a heading that has just
+// said it, four cards reading `herdr` name none of the four -- and the thing that actually separates
+// two siblings is the id, which is why the sibling chips lead with it too. Suppressed only when it
+// is the SAME string: `relay`, `Files` and `kv-tool-v2` all differ from their space's name and stay.
+// `groupName` is undefined in the flat single-space list, where no heading said it.
+//
+// An operator's own `label` is never dropped, whatever the heading says. It used to be, and the id
+// that replaced it went into `data-agent-name` -- so long-press, Rename, Enter sent
+// `rename_agent {label: "w6:pH"}` and overwrote the real herdr label on every client.
 function paneLabel(p, fallback, groupName) {
-  // workspace_label sits after project on purpose: it names the *space*, so in the grouped list
-  // it is the group heading, and the dedupe below is what stops a card from repeating it.
-  const name = p.label || p.project || p.workspace_label || fallback;
+  // An explicit label is never renamed away, whatever the group is called.
+  if (p.label) return p.label;
+  // workspace_label sits after project on purpose: it names the *space*, so in the grouped
+  // list it IS the group heading, and the dedupe below is what stops a card repeating it.
+  const name = p.project || p.workspace_label || fallback;
   return groupName && name === groupName ? p.pane_id : name;
 }
 
@@ -1584,7 +1619,11 @@ function agentCard(a, groupName) {
   const pulseClass = a.status==='working'?' pulse':'';
   const host = a.host&&a.host!=='local'?` <span style="color:var(--orange);font-size:0.6rem">@${a.host}</span>`:'';
   const cwd = a.cwd ? `<span style="font-family:monospace;opacity:0.7">${a.cwd.split('/').slice(-2).join('/')}</span>` : '';
+  // Two names on purpose: `label` is what the card reads, `named` is what the pane is called. They
+  // diverge only under a heading that already said the project, and it is `named` that goes into
+  // data-agent-name, because that string prefills the rename dialog.
   const label = paneLabel(a, a.agent, groupName);
+  const named = paneName(a, a.agent);
   const labelHtml = escapeHtml(label);
   // A working claude sets its terminal title to what it is doing right now ("fix P0, draft the P1
   // plan"); it clears the title when it goes idle, so this field is present on working panes only
@@ -1595,7 +1634,7 @@ function agentCard(a, groupName) {
   // `focused` marks the pane herdr itself has in front -- one per host, so this is where the
   // operator is standing rather than a state of the agent.
   const focused = a.focused ? ' focused' : '';
-  return `<div class="agent${a.status==='blocked'?' blocked':''}${focused}" role="button" tabindex="0" aria-label="${escapeAttr(label)}, ${a.status}${a.focused?', focused in herdr':''}" data-pane-id="${escapeAttr(a.pane_id)}" data-agent-name="${escapeAttr(label)}" onclick="openTerminal('${escapeAttr(a.pane_id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(a.pane_id)}')}">
+  return `<div class="agent${a.status==='blocked'?' blocked':''}${focused}" role="button" tabindex="0" aria-label="${escapeAttr(label)}, ${a.status}${a.focused?', focused in herdr':''}" data-pane-id="${escapeAttr(a.pane_id)}" data-agent-name="${escapeAttr(named)}" onclick="openTerminal('${escapeAttr(a.pane_id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(a.pane_id)}')}">
     <span class="dot${pulseClass}" style="background:${color}" aria-hidden="true"></span>
     <div class="info"><div class="project">${labelHtml}${host}</div><div class="meta">${escapeHtml(a.agent)} · ${detail}</div></div>
     <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
@@ -1608,6 +1647,7 @@ function shellCard(p, groupName) {
   // distinct cwd basenames, so eight of them are indistinguishable from a sibling by directory.
   // The id always separates them; `process` (one extra CLI call) is fetched only on open.
   const label = paneLabel(p, p.pane_id, groupName);
+  const named = paneName(p, p.pane_id);
   const host = p.host && p.host !== 'local'
     ? ` <span style="color:var(--orange);font-size:0.6rem">@${escapeHtml(p.host)}</span>` : '';
   const cwd = p.cwd ? p.cwd.split('/').slice(-2).join('/') : '';
@@ -1618,7 +1658,7 @@ function shellCard(p, groupName) {
   const focused = p.focused ? ' focused' : '';
   return `<div class="agent shell${focused}" role="button" tabindex="0" data-shell="1"
     aria-label="${escapeAttr(label)}, terminal${p.focused ? ', focused in herdr' : ''}"
-    data-pane-id="${escapeAttr(p.pane_id)}" data-agent-name="${escapeAttr(label)}"
+    data-pane-id="${escapeAttr(p.pane_id)}" data-agent-name="${escapeAttr(named)}"
     onclick="openTerminal('${escapeAttr(p.pane_id)}')"
     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(p.pane_id)}')}">
     <span class="dot dot-hollow" aria-hidden="true"></span>
@@ -1653,14 +1693,23 @@ function renderSiblings() {
   // No workspace id means this relay reports no hierarchy at all, and every pane would look like a
   // sibling of every other one. Nothing is better than a wrong neighbourhood.
   const key = me && me.workspace_id ? agentWorkspaceKey(me) : null;
-  const near = key
-    ? [...agents, ...shellPanes].filter(
-        p => p.pane_id !== activePane && agentWorkspaceKey(p) === key)
-    : [];
+  // By pane_id, not by array: the two lists are disjoint in a snapshot, but a `blocked` push can
+  // add an agent record for a pane still sitting in shellPanes, and that pane would draw two chips.
+  const near = [], seen = new Set([activePane]);
+  if (key) {
+    for (const p of [...agents, ...shellPanes]) {
+      if (seen.has(p.pane_id) || agentWorkspaceKey(p) !== key) continue;
+      seen.add(p.pane_id);
+      near.push(p);
+    }
+  }
   if (!near.length) { strip.style.display = 'none'; return; }
-  const mine = agentTabKey(me);
-  for (const [label, list] of [['Tab', near.filter(p => agentTabKey(p) === mine)],
-                               ['Space', near.filter(p => agentTabKey(p) !== mine)]]) {
+  // No tab id on the open pane means this relay reports no tabs at all, and there is no `beside it`
+  // left to claim -- everything it can reach is simply elsewhere in the space.
+  const mine = me.tab_id ? agentTabKey(me) : null;
+  const tabmates = mine ? near.filter(p => agentTabKey(p) === mine) : [];
+  for (const [label, list] of [['Tab', tabmates],
+                               ['Space', near.filter(p => !tabmates.includes(p))]]) {
     if (!list.length) continue;
     const tag = document.createElement('span');
     tag.className = 'sib-label';
@@ -1700,9 +1749,11 @@ function siblingChip(p) {
 }
 
 function openTerminal(paneId) {
-  // Re-entered on every blocked event for the pane already open, so only a real switch closes the
-  // history panel -- it belongs to one conversation.
-  if (activePane !== paneId) hideHistory();
+  // Re-entered on every blocked event for the pane already open, so only a real switch closes these
+  // -- the history panel belongs to one conversation, and the search holds the OTHER pane's output
+  // in `originalContent`. Leaving the search open across a switch (which the sibling chips made a
+  // one-tap move) meant the next keystroke restored pane A's output into pane B's session.
+  if (activePane !== paneId) { hideHistory(); hideSearch(); }
   activePane = paneId; paneLines = PANE_LINES_BASE; userScrolledUp = false;
   const a = agents.find(x => x.pane_id===paneId);
   const shell = shellPane(paneId);
