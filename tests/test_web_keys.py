@@ -40,6 +40,34 @@ except ImportError:  # pragma: no cover
     sync_playwright = None
 
 
+# One browser for the file. Each class used to launch its own chromium, and `unittest discover`
+# runs this alongside test_web_history.py in a single process -- four concurrent browsers was
+# enough to make `page.goto` time out intermittently, and it failed a full `tests/run.sh` once
+# before passing on the retry. Pages are still per-class, so a test that resizes the viewport or
+# leaves a panel open cannot reach another class.
+_shared = {}
+
+
+def setUpModule():  # noqa: N802 - unittest's own name
+    if sync_playwright is None or _chrome() is None:
+        return
+    _shared["playwright"] = sync_playwright().start()
+    _shared["browser"] = _shared["playwright"].chromium.launch(executable_path=_chrome())
+
+
+def tearDownModule():  # noqa: N802 - unittest's own name
+    if "browser" in _shared:
+        _shared["browser"].close()
+        _shared["playwright"].stop()
+    _shared.clear()
+
+
+def _open_page(viewport=None):
+    page = _shared["browser"].new_page(viewport=viewport or PHONE)
+    page.goto(PAGE)
+    return page
+
+
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
 @unittest.skipIf(_chrome() is None, "no chromium build available")
 class WebKeyPadTests(unittest.TestCase):
@@ -47,15 +75,11 @@ class WebKeyPadTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._playwright = sync_playwright().start()
-        cls._browser = cls._playwright.chromium.launch(executable_path=_chrome())
-        cls.page = cls._browser.new_page(viewport=PHONE)
-        cls.page.goto(PAGE)
+        cls.page = _open_page()
 
     @classmethod
     def tearDownClass(cls):
-        cls._browser.close()
-        cls._playwright.stop()
+        cls.page.close()
 
     def setUp(self):
         # Show the pad and capture what the page would put on the wire, without a relay.
@@ -287,15 +311,11 @@ class WebPanelLayeringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._playwright = sync_playwright().start()
-        cls._browser = cls._playwright.chromium.launch(executable_path=_chrome())
-        cls.page = cls._browser.new_page(viewport=PHONE)
-        cls.page.goto(PAGE)
+        cls.page = _open_page()
 
     @classmethod
     def tearDownClass(cls):
-        cls._browser.close()
-        cls._playwright.stop()
+        cls.page.close()
 
     def setUp(self):
         self.page.evaluate("""() => {
@@ -399,15 +419,11 @@ class WebToggleStateTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._playwright = sync_playwright().start()
-        cls._browser = cls._playwright.chromium.launch(executable_path=_chrome())
-        cls.page = cls._browser.new_page(viewport=PHONE)
-        cls.page.goto(PAGE)
+        cls.page = _open_page()
 
     @classmethod
     def tearDownClass(cls):
-        cls._browser.close()
-        cls._playwright.stop()
+        cls.page.close()
 
     def setUp(self):
         self.page.evaluate("""() => {
