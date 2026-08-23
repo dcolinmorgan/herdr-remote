@@ -117,13 +117,15 @@ Messages are JSON with a `type` field:
 
 **Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `focus`, `create_tab`, `rename_tab`, `close_tab`, `rename_agent`, `push_subscribe`/`push_unsubscribe`
 
-An `agents` entry carries, per pane: `pane_id`, `agent`, `label`, `workspace_label`, `title`
-(herdr's terminal title — live activity, not a session name: a working claude sets it to what it is
-doing, and `activity_title` drops the harness's own banner, which is all an idle or done pane
-leaves there. The durable title comes back from `get_history`), `status`, `cwd`, `project`, `host`,
-`remote`, `workspace_id`, `tab_id`, `focused` (the one pane per host herdr itself has in front),
-`scrollback` + `viewport_rows` (from herdr's `scroll`), and `has_session` (this pane names an agent
-transcript). The session ref itself stays server-side in `pane_session_map`.
+An `agents` entry carries, per pane: `pane_id`, `agent`, `label`, `workspace_label`, `title` (herdr's terminal title —
+live activity, not a session name: a working claude sets it to what it is doing, and
+`activity_title` drops the harness's own banner, which is all an idle or done pane leaves there.
+The durable title comes back from `get_history`), `status`, `cwd`, `project`, `host`, `remote`,
+`workspace_id`, `tab_id`, `focused` (the one pane per host herdr itself has in front),
+`scrollback` + `viewport_rows` (from herdr's `scroll`), `has_session` (this pane names an agent
+transcript), and `last_active_at` / `last_seen_at` (epoch **milliseconds**, because every client
+that will compare them is JavaScript). The session ref itself stays server-side in
+`pane_session_map`.
 
 The same `agents` message carries `spaces` — `{workspaces: [...], tabs: [...]}` from
 `herdr workspace list` and `herdr tab list`. `pane list` gives every pane a `workspace_id` and a
@@ -203,6 +205,50 @@ just stops answering anyone else while it runs:
 `_remote_locks_guard`), so the worker threads need no further synchronising. `_deliver_push` works
 off a snapshot of `push_subscriptions` and drops dead ones **by value**, since a `push_subscribe`
 arriving mid-flight would invalidate an index computed before it.
+
+### Pane activity: what moved, and what you have looked at
+
+herdr's pane records carry **no timestamps at all**, so the relay derives and owns two per pane and
+ships them on every `agents` entry *and* every `panes` entry:
+
+| field | meaning |
+|-------|---------|
+| `last_active_at` | the last agent status transition this relay observed |
+| `last_seen_at` | the last time a client opened or drove the pane through this relay |
+
+They exist so a client can answer the one question a status alone cannot: **did this finish while I
+wasn't looking?** That is a *comparison*, not a stored flag — `status == "done" && last_active_at >
+last_seen_at` — which is why opening the pane clears it with no bookkeeping on either side: the read
+bumps `last_seen_at` and the row leaves that section on the next snapshot.
+
+The rules are all rules about not lying to the operator:
+
+- **A first sighting seeds `active_at == seen_at`.** Only transitions observed *after* the relay
+  first saw a pane may mark it unread, so a fresh client never opens on a wall of alerts for work
+  already dealt with at the desk — the same rule the blocked-push path already follows by never
+  firing on a first sighting.
+- **Only a status change bumps `active_at`,** tracked against the ledger's *own* status memory rather
+  than `last_statuses` (which the blocked-push logic owns and updates on its own schedule; two
+  features reading one dict would be coupled by call order).
+- **`SEEN_ON` is the single chokepoint** for `seen_at`, applied ahead of every handler so a new one
+  cannot forget: `read_pane`, `get_history`, `respond`, `send_keys`, `send_text`, `agent_prompt`,
+  `question_toggle`, `question_submit`. **`focus` is deliberately absent** — it moves herdr's own
+  cursor at the desk without the client reading anything, and `seen` is about what *you* looked at
+  through the relay. An unknown pane id is ignored rather than seeded, so bogus ids cannot grow the
+  file.
+- **Keyed by `(host, pane_id)`,** unlike the other pane maps: every herdr numbers its own panes, and
+  this is the one such map written to disk, where a collision would stick.
+- **Forgetting rides the existing stale sweep** in `update_pane_maps` rather than a second reconcile
+  policy beside it — that sweep already decides when a caller's picture is complete enough to drop
+  anything, and it covers **shell panes**, which a removal event derived from an agent status map
+  never would.
+- **`activity.json` in `LOG_DIR`**, written temp-file-plus-rename (a half file would parse as nothing
+  and silently cost everyone's unread column), pruned at 30 days on load, and **debounced 10s**: an
+  open pane's 3s mirror tick marks it seen every tick, which is free in memory and one write per tick
+  forever on disk. Every field is re-validated on load, including that `True` is not a timestamp —
+  it is an `int` in python and would sort a pane unread for good.
+- **Both fields absent reads as "nothing known".** A relay older than this ships neither and a client
+  must treat that as "no unseen section", not as "everything is unread".
 
 ### Relay-side constraints clients must respect
 

@@ -128,6 +128,24 @@ push_subscriptions = []  # list of PushSubscription dicts
 PUSH_SUBS_FILE = os.path.join(LOG_DIR, "push_subs.json")
 ACTIVE_SESSIONS_FILE = os.path.join(LOG_DIR, "active_sessions.json")
 
+
+ACTIVITY_FILE = os.path.join(LOG_DIR, "activity.json")
+# Entries untouched for this long are dropped on load -- a backstop for panes whose removal we
+# missed (an unclean shutdown). `activity_forget` is the real reaper.
+ACTIVITY_PRUNE_AFTER = 30 * 24 * 60 * 60
+# At most one disk write per this window. An open pane's mirror tick marks it seen every 3s; in
+# memory that is free, on disk it would be a write per tick forever. Losing <=10s of "seen"
+# precision to a crash is imperceptible in a feature whose finest unit is "just now".
+ACTIVITY_FLUSH_DEBOUNCE = 10.0
+# Messages that mean a client is looking at or driving a pane, which is what clears its unread
+# state. One place, so a new handler cannot forget. `focus` is absent on purpose: it moves herdr's
+# own cursor at the desk without the client reading anything, and `seen` is about what YOU looked
+# at through the relay. So are the tab/workspace verbs, which name no pane.
+SEEN_ON = frozenset({
+    "read_pane", "get_history", "respond", "send_keys", "send_text", "agent_prompt",
+    "question_toggle", "question_submit",
+})
+
 if RELAY_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_TOKEN:
     raise SystemExit("HERDR_RELAY_TOKEN is required when HERDR_RELAY_HOST binds beyond loopback")
 
@@ -153,6 +171,28 @@ QUESTION_OTHER = "Other (type your own)"
 
 clients = set()
 last_statuses = {}
+
+# --- Pane activity: what moved, and what you have looked at ---
+#
+# herdr's pane records carry no timestamps at all, so the relay derives and owns both. Two numbers
+# per pane are enough for a client to triage a herd:
+#   active_at -- the last agent status transition this relay observed
+#   seen_at   -- the last time a client opened or drove the pane through this relay
+#
+# "Unseen" is then a COMPARISON, not a stored flag: an agent is newly-finished-and-unread exactly
+# when `status == "done" and active_at > seen_at`. Opening the pane sets seen_at = now and the row
+# leaves that section on its own -- nothing to mark read, nothing to keep in sync.
+#
+# Keyed by (host, pane_id), unlike the maps above: every herdr numbers its own panes, so a bare pane
+# id is not unique across the hosts this relay polls, and this is the one such map written to disk,
+# where a collision would stick.
+pane_activity = {}
+# The status this ledger last saw, kept separately from `last_statuses` above -- that one belongs to
+# the blocked-push logic and is updated on its own schedule, and two features reading one dict would
+# be coupled by call order.
+_activity_status = {}
+_activity_dirty = False
+_activity_flush_task = None
 last_blocked_prompts = {}
 event_queue = asyncio.Queue()
 pane_remote_map = {}
@@ -376,7 +416,9 @@ def audit(action: str, ip: str, device: str, pane_id: str, detail: str = ""):
     """Append a write action to the audit log as structured JSONL."""
     import datetime
     entry = {
-        "ts": datetime.datetime.utcnow().isoformat() + "Z",
+        # Same wire format as before -- `Z`, not `+00:00` -- now that utcnow() is deprecated
+        # and warned once per audit() per process into the journal.
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "action": action,
         "paneId": pane_id,
         "ip": ip,
@@ -430,6 +472,156 @@ def _load_active_sessions():
         if value is not None and not isinstance(value, str):
             continue
         ACTIVE_SESSIONS[None if key == "local" else key] = value
+
+
+# --- Pane activity ledger ---
+def _load_activity():
+    """Read the ledger, dropping anything malformed and anything past the prune horizon.
+
+    Every field is checked because this file outlives the process that wrote it: a shape change, a
+    truncated write or a hand-edit must cost the unread column, not the relay's startup.
+    """
+    global pane_activity
+    if not os.path.isfile(ACTIVITY_FILE):
+        return
+    try:
+        with open(ACTIVITY_FILE) as f:
+            raw = json.load(f)
+    except Exception as e:
+        log.warning("could not read %s: %s", ACTIVITY_FILE, e)
+        return
+    if not isinstance(raw, dict):
+        return
+    now = time.time()
+    loaded = {}
+    for host, panes in raw.items():
+        if not isinstance(host, str) or not isinstance(panes, dict):
+            continue
+        for pane_id, entry in panes.items():
+            if not isinstance(pane_id, str) or not isinstance(entry, dict):
+                continue
+            active, seen = entry.get("active_at"), entry.get("seen_at")
+            # bool is an int in python, and `True` as a timestamp would sort every pane unread.
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (active, seen)):
+                continue
+            if now - max(active, seen) > ACTIVITY_PRUNE_AFTER:
+                continue
+            loaded[(host, pane_id)] = {"active_at": float(active), "seen_at": float(seen)}
+    pane_activity = loaded
+
+
+def _write_activity():
+    """BLOCKING. Temp file plus rename, so a crash mid-write cannot leave a half file behind that
+    then fails to parse and silently costs everyone's unread state."""
+    payload = {}
+    for (host, pane_id), entry in pane_activity.items():
+        payload.setdefault(host, {})[pane_id] = entry
+    tmp = ACTIVITY_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, ACTIVITY_FILE)
+    except Exception as e:
+        log.warning("could not persist %s: %s", ACTIVITY_FILE, e)
+
+
+async def flush_activity():
+    """Write now if anything changed. Called on shutdown; otherwise the debounce drives it."""
+    global _activity_dirty
+    if not _activity_dirty:
+        return
+    _activity_dirty = False
+    await asyncio.to_thread(_write_activity)
+
+
+async def _activity_flush_later():
+    await asyncio.sleep(ACTIVITY_FLUSH_DEBOUNCE)
+    await flush_activity()
+
+
+def _activity_mark_dirty():
+    global _activity_dirty, _activity_flush_task
+    _activity_dirty = True
+    if _activity_flush_task is not None and not _activity_flush_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no loop yet, or none any more -- flush_activity() still writes when asked
+    _activity_flush_task = loop.create_task(_activity_flush_later())
+
+
+def pane_host(pane_id):
+    """The host label a pane belongs to, from what the poll already recorded. The ledger's key half."""
+    return pane_remote_map.get(pane_id) or "local"
+
+
+def activity_ensure(host, pane_id):
+    """First sighting: seed active_at = seen_at = now, so the pane starts out exactly `seen`.
+
+    A client must never open on a screen full of unread alerts, so only transitions observed AFTER
+    the relay first saw a pane may mark it unread -- the same rule the blocked-push path already
+    applies by never firing on a first sighting.
+    """
+    if (host, pane_id) in pane_activity:
+        return
+    now = time.time()
+    pane_activity[(host, pane_id)] = {"active_at": now, "seen_at": now}
+    _activity_mark_dirty()
+
+
+def activity_note_active(host, pane_id):
+    """The agent moved. The only thing that can make a pane unread."""
+    held = pane_activity.get((host, pane_id))
+    now = time.time()
+    pane_activity[(host, pane_id)] = {
+        "active_at": now, "seen_at": held["seen_at"] if held else now,
+    }
+    _activity_mark_dirty()
+
+
+def activity_note_seen(pane_id):
+    """A client opened or drove this pane. Clears its unread state by construction.
+
+    Unknown panes are ignored rather than seeded: a client naming a pane the relay has never listed
+    would otherwise grow the file by one entry per bogus id.
+    """
+    if not pane_id or pane_id not in known_panes:
+        return
+    key = (pane_host(pane_id), pane_id)
+    held = pane_activity.get(key)
+    now = time.time()
+    pane_activity[key] = {"active_at": held["active_at"] if held else now, "seen_at": now}
+    _activity_mark_dirty()
+
+
+def activity_forget(host, pane_id):
+    """The pane is gone. Drop it so a reused pane id cannot inherit a dead pane's history."""
+    _activity_status.pop((host, pane_id), None)
+    if pane_activity.pop((host, pane_id), None) is not None:
+        _activity_mark_dirty()
+
+
+def activity_note_statuses(agents):
+    """Bump active_at wherever a status changed since this ledger last looked."""
+    for agent in agents:
+        key = (agent.get("host", "local"), agent["pane_id"])
+        status = agent.get("status")
+        if key in _activity_status and _activity_status[key] != status:
+            activity_note_active(*key)
+        _activity_status[key] = status
+
+
+def stamp_activity(records):
+    """Put the two timestamps on records about to go out, in MILLISECONDS -- every client that will
+    compare them is JavaScript, and a client should not have to know which unit this relay thinks in.
+    A pane with no entry carries neither key, and `isUnseen` is false for both absent."""
+    for record in records:
+        entry = pane_activity.get((record.get("host", "local"), record["pane_id"]))
+        if entry:
+            record["last_active_at"] = int(entry["active_at"] * 1000)
+            record["last_seen_at"] = int(entry["seen_at"] * 1000)
+
 
 
 def _save_active_sessions():
@@ -492,6 +684,7 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
 
 _load_push_subs()
 _load_active_sessions()
+_load_activity()
 
 
 def _ssh_base_args():
@@ -908,22 +1101,33 @@ def update_pane_maps(agents, shells=()):
         pane_remote_map[pane_id] = agent.get("remote")
         known_panes.add(pane_id)
         agent_cache[pane_id] = agent
+        activity_ensure(agent.get("host", "local"), pane_id)
     for pane in shells:
         pane_id = pane["pane_id"]
         pane_remote_map[pane_id] = pane.get("remote")
         known_panes.add(pane_id)
         shell_pane_map[pane_id] = pane
+        activity_ensure(pane.get("host", "local"), pane_id)
+    activity_note_statuses(agents)
 
     stale = known_panes - current_pane_ids
     if stale:
         known_panes.difference_update(stale)
         for pane_id in stale:
+            # Before pane_remote_map loses the pane, since that map is what names its host. Reusing
+            # this sweep rather than reconciling the ledger separately is deliberate: the guard on
+            # `shells` above already decides when the caller has a full enough picture to forget
+            # anything, and a second policy beside it would be a second thing to keep true.
+            activity_forget(pane_host(pane_id), pane_id)
             pane_remote_map.pop(pane_id, None)
             pane_session_map.pop(pane_id, None)
             last_statuses.pop(pane_id, None)
             last_blocked_prompts.pop(pane_id, None)
             agent_cache.pop(pane_id, None)
             shell_pane_map.pop(pane_id, None)
+    # Last, so the records carry whatever this call just seeded or bumped.
+    stamp_activity(agents)
+    stamp_activity(shells)
 
 
 POLL_GENERATION = 0
@@ -1833,6 +2037,11 @@ async def handle_client(ws):
             except json.JSONDecodeError:
                 continue
             msg_type = msg.get("type")
+            # One place, ahead of every handler, so a new one cannot forget to clear a pane's unread
+            # state (see SEEN_ON). Ahead of validation too: a client that named a known pane did
+            # look at it, whatever the rest of the message turns out to be.
+            if msg_type in SEEN_ON:
+                activity_note_seen(msg.get("pane_id", ""))
             if msg_type == "question_toggle":
                 pane_id = msg["pane_id"]
                 option = msg.get("option", "")
@@ -2356,6 +2565,7 @@ async def main():
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await flush_activity()
         if zc is not None:
             try:
                 if info is not None:

@@ -186,10 +186,239 @@ class RelayPaneStateTests(unittest.TestCase):
             # poll rather than keeping whatever was cached previously.
             self.assertNotIn("stale-pane", relay.agent_cache)
             self.assertNotIn("stale-pane", relay.known_panes)
-            self.assertEqual(
-                relay.agent_cache,
-                {"active-pane": {"pane_id": "active-pane", "remote": None}},
-            )
+            self.assertEqual(list(relay.agent_cache), ["active-pane"])
+            # `project: current` is gone -- the point of the assertion. The two activity stamps are
+            # added by the same call (stamp_activity) and are asserted where they belong.
+            cached = dict(relay.agent_cache["active-pane"])
+            for stamp in ("last_active_at", "last_seen_at"):
+                cached.pop(stamp, None)
+            self.assertEqual(cached, {"pane_id": "active-pane", "remote": None})
+
+
+class _Clock:
+    """A hand-cranked wall clock. The ledger's whole meaning is `active_at > seen_at`, so a test of
+    it that races the real clock would be a test of the clock's resolution."""
+
+    def __init__(self, start=1_700_000_000.0):
+        self.now = start
+
+    def time(self):
+        return self.now
+
+    def tick(self, seconds=1.0):
+        self.now += seconds
+        return self.now
+
+
+@contextmanager
+def frozen_clock(relay, start=1_700_000_000.0):
+    clock = _Clock(start)
+    stub = types.SimpleNamespace(time=clock.time, monotonic=time.monotonic, sleep=time.sleep)
+    with mock.patch.object(relay, "time", stub):
+        yield clock
+
+
+def relay_seen_on():
+    with loaded_relay() as relay:
+        return relay.SEEN_ON
+
+
+def _pane(pane_id, host="local", **extra):
+    return {"pane_id": pane_id, "host": host, "remote": None if host == "local" else host, **extra}
+
+
+class RelayActivityLedgerTests(unittest.TestCase):
+    """The two timestamps a client needs to say "this finished while you weren't looking".
+
+    herdr reports neither, so the relay owns both, and every rule here is one that decides whether
+    a phone opens on a useful column or on a screen of false alerts.
+    """
+
+    def test_a_pane_starts_out_seen(self):
+        """A first sighting seeds active_at == seen_at, so nothing is unread on a fresh relay. The
+        alternative is that every client's first connection is a wall of alerts for work it has
+        already looked at at the desk."""
+        with loaded_relay() as relay, frozen_clock(relay):
+            relay.update_pane_maps([_pane("w1:p1", status="done")], [])
+            entry = relay.pane_activity[("local", "w1:p1")]
+            self.assertEqual(entry["active_at"], entry["seen_at"])
+
+    def test_a_pane_first_seen_as_done_is_not_unread(self):
+        """The same rule stated the way it will be read: only transitions observed AFTER the relay
+        first saw a pane may mark it unread -- which is what the blocked-push path already does by
+        never firing on a first sighting."""
+        with loaded_relay() as relay, frozen_clock(relay) as clock:
+            agents = [_pane("w1:p1", status="done")]
+            relay.update_pane_maps(agents, [])
+            clock.tick(60)
+            relay.update_pane_maps([_pane("w1:p1", status="done")], [])
+            entry = relay.pane_activity[("local", "w1:p1")]
+            self.assertEqual(entry["active_at"], entry["seen_at"],
+                             "a pane that never moved was marked unread")
+
+    def test_a_status_change_is_the_only_thing_that_marks_a_pane_unread(self):
+        with loaded_relay() as relay, frozen_clock(relay) as clock:
+            relay.update_pane_maps([_pane("w1:p1", status="working")], [])
+            clock.tick(30)
+            relay.update_pane_maps([_pane("w1:p1", status="done")], [])
+            entry = relay.pane_activity[("local", "w1:p1")]
+            self.assertGreater(entry["active_at"], entry["seen_at"])
+
+    def test_looking_at_a_pane_clears_it(self):
+        """seen_at = now, and the row leaves the section on its own -- nothing to mark read."""
+        with loaded_relay() as relay, frozen_clock(relay) as clock:
+            relay.update_pane_maps([_pane("w1:p1", status="working")], [])
+            clock.tick(30)
+            relay.update_pane_maps([_pane("w1:p1", status="done")], [])
+            clock.tick(5)
+            relay.activity_note_seen("w1:p1")
+            entry = relay.pane_activity[("local", "w1:p1")]
+            self.assertGreater(entry["seen_at"], entry["active_at"])
+
+    def test_only_the_messages_that_mean_you_looked_clear_it(self):
+        """`focus` moves herdr's own cursor at the desk without the client reading anything, and the
+        tab/workspace verbs name no pane at all."""
+        self.assertLessEqual(
+            {"read_pane", "get_history", "respond", "send_keys", "send_text", "agent_prompt"},
+            set(relay_seen_on()))
+        for absent in ("focus", "create_tab", "rename_tab", "close_tab", "rename_agent",
+                       "push_subscribe", "push_unsubscribe", "agents"):
+            self.assertNotIn(absent, relay_seen_on())
+
+    def test_an_unknown_pane_cannot_grow_the_ledger(self):
+        """Otherwise a client naming bogus ids writes one durable entry per id."""
+        with loaded_relay() as relay, frozen_clock(relay):
+            relay.activity_note_seen("nobody:p9")
+            self.assertEqual(relay.pane_activity, {})
+
+    def test_a_gone_pane_is_forgotten_so_a_reused_id_starts_clean(self):
+        with loaded_relay() as relay, frozen_clock(relay) as clock:
+            relay.update_pane_maps([_pane("w1:p1", status="working")], [_pane("w1:p2")])
+            clock.tick(30)
+            relay.update_pane_maps([_pane("w1:p1", status="working")], [_pane("w1:p3")])
+            self.assertNotIn(("local", "w1:p2"), relay.pane_activity,
+                             "a closed pane kept its history for the next pane to inherit")
+            self.assertIn(("local", "w1:p3"), relay.pane_activity)
+
+    def test_shell_panes_are_in_the_ledger_too(self):
+        """The reason this hangs off the pane sweep rather than a status-transition listener: a
+        removal event derived from an agent status map never fires for a pane with no agent."""
+        with loaded_relay() as relay, frozen_clock(relay):
+            relay.update_pane_maps([], [_pane("w1:p2"), _pane("w1:p5")])
+            self.assertEqual(sorted(k[1] for k in relay.pane_activity), ["w1:p2", "w1:p5"])
+
+    def test_the_same_pane_id_on_two_hosts_is_two_panes(self):
+        """Every herdr numbers its own panes, and this is the one map that reaches disk -- where a
+        collision would stick."""
+        with loaded_relay() as relay, frozen_clock(relay) as clock:
+            relay.update_pane_maps(
+                [_pane("w1:p1", status="working"), _pane("w1:p1", host="gpu", status="working")], [])
+            clock.tick(30)
+            relay.update_pane_maps(
+                [_pane("w1:p1", status="done"), _pane("w1:p1", host="gpu", status="working")], [])
+            local = relay.pane_activity[("local", "w1:p1")]
+            gpu = relay.pane_activity[("gpu", "w1:p1")]
+            self.assertGreater(local["active_at"], local["seen_at"])
+            self.assertEqual(gpu["active_at"], gpu["seen_at"],
+                             "a transition on one host marked the other host's pane unread")
+
+    def test_the_stamps_go_out_in_milliseconds(self):
+        """Every client that will compare them is JavaScript; it should not have to know which unit
+        this relay thinks in."""
+        with loaded_relay() as relay, frozen_clock(relay, start=1_700_000_000.5):
+            agents = [_pane("w1:p1", status="idle")]
+            shells = [_pane("w1:p2")]
+            relay.update_pane_maps(agents, shells)
+            for record in (agents[0], shells[0]):
+                self.assertEqual(record["last_active_at"], 1_700_000_000_500)
+                self.assertEqual(record["last_seen_at"], 1_700_000_000_500)
+
+    def test_a_pane_with_no_entry_carries_neither_stamp(self):
+        """Both absent must read as "nothing known", which is how a client older than this file --
+        and this relay before it -- keeps working."""
+        with loaded_relay() as relay:
+            records = [_pane("w9:p9")]
+            relay.stamp_activity(records)
+            self.assertNotIn("last_active_at", records[0])
+            self.assertNotIn("last_seen_at", records[0])
+
+
+class RelayActivityPersistenceTests(unittest.TestCase):
+    def test_a_write_survives_a_reload(self):
+        with loaded_relay() as relay, frozen_clock(relay, start=1_700_000_000.0):
+            relay.update_pane_maps([_pane("w1:p1", status="idle")], [])
+            relay._write_activity()
+            relay.pane_activity = {}
+            relay._load_activity()
+            self.assertEqual(relay.pane_activity,
+                             {("local", "w1:p1"): {"active_at": 1_700_000_000.0,
+                                                   "seen_at": 1_700_000_000.0}})
+
+    def test_the_write_is_atomic(self):
+        """A crash mid-write must not leave a half file that then fails to parse and silently costs
+        everyone's unread column."""
+        with loaded_relay() as relay, frozen_clock(relay):
+            relay.update_pane_maps([_pane("w1:p1", status="idle")], [])
+            relay._write_activity()
+            self.assertTrue(os.path.isfile(relay.ACTIVITY_FILE))
+            self.assertFalse(os.path.isfile(relay.ACTIVITY_FILE + ".tmp"),
+                             "the temp file was left behind, so the rename did not happen")
+
+    def test_load_drops_what_it_cannot_trust(self):
+        """This file outlives the process that wrote it: a shape change, a truncated write or a
+        hand-edit costs the unread column, not the relay's startup. `True` is an int in python and
+        as a timestamp would sort a pane unread forever."""
+        with loaded_relay() as relay, frozen_clock(relay, start=1_700_000_000.0):
+            with open(relay.ACTIVITY_FILE, "w") as f:
+                json.dump({
+                    "local": {
+                        "good": {"active_at": 1_699_999_999.0, "seen_at": 1_699_999_999.0},
+                        "bool": {"active_at": True, "seen_at": True},
+                        "text": {"active_at": "now", "seen_at": 1.0},
+                        "half": {"active_at": 1.0},
+                        "notdict": 5,
+                        "ancient": {"active_at": 1.0, "seen_at": 1.0},
+                    },
+                    "notdict": 7,
+                }, f)
+            relay.pane_activity = {}
+            relay._load_activity()
+            self.assertEqual(list(relay.pane_activity), [("local", "good")])
+
+    def test_an_unreadable_file_is_not_fatal(self):
+        with loaded_relay() as relay:
+            with open(relay.ACTIVITY_FILE, "w") as f:
+                f.write("{ this is not json")
+            relay.pane_activity = {"sentinel": 1}
+            relay._load_activity()
+            self.assertEqual(relay.pane_activity, {"sentinel": 1},
+                             "a corrupt ledger replaced the in-memory one")
+
+    def test_writes_are_debounced(self):
+        """An open pane's mirror tick marks it seen every 3s. In memory that is free; on disk it
+        would be one write per tick, forever."""
+        async def scenario():
+            with loaded_relay() as relay, frozen_clock(relay):
+                writes = []
+                with mock.patch.object(relay, "_write_activity", side_effect=lambda: writes.append(1)):
+                    relay.update_pane_maps([_pane("w1:p1", status="idle")], [])
+                    for _ in range(20):
+                        relay.activity_note_seen("w1:p1")
+                    await asyncio.sleep(0)
+                    self.assertEqual(writes, [], "the ledger wrote before the debounce elapsed")
+                    self.assertIsNotNone(relay._activity_flush_task)
+                    await relay.flush_activity()
+                    self.assertEqual(writes, [1], "21 changes cost more than one write")
+                    relay._activity_flush_task.cancel()
+        asyncio.run(scenario())
+
+    def test_flush_with_nothing_pending_writes_nothing(self):
+        async def scenario():
+            with loaded_relay() as relay:
+                with mock.patch.object(relay, "_write_activity") as write:
+                    await relay.flush_activity()
+                    write.assert_not_called()
+        asyncio.run(scenario())
 
     @staticmethod
     def _pane_list(label=None):
@@ -1682,6 +1911,13 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                             await task
 
                 expected_prompt_id = relay.question_prompt_id("event-pane", "approve all pending")
+                # update_pane_maps stamps last_active_at/last_seen_at onto the records on their way
+                # out (stamp_activity). Asserted here as present-on-every-agent, then dropped, so
+                # this test stays about the ORDER of the two broadcasts.
+                for agent in messages[0]["agents"]:
+                    self.assertIn("last_active_at", agent)
+                    self.assertIn("last_seen_at", agent)
+                    del agent["last_active_at"], agent["last_seen_at"]
                 self.assertEqual(
                     messages,
                     [
