@@ -166,11 +166,22 @@ Two things were found by measuring rather than reading, both in the same trim pa
 
 Panes with no agent in them render as a **Terminals** section in the same list, from the relay's
 `panes` array — a hollow dot rather than a fourth shade of grey competing with Done and Idle,
-because a terminal has no status to colour. The card's identity line is the **pane id**, not the
-harness name an agent card carries: measured on a real host, 20 shell panes shared only 12 distinct
-`cwd` basenames, so eight of them are indistinguishable from a sibling by directory. The workspace
-and tab chips filter them like anything else, and a tab holding only a terminal now shows it
-instead of falling through to "N panes here, none running an agent".
+because a terminal has no status to colour. The workspace and tab chips filter them like anything
+else, and a tab holding only a terminal now shows it instead of falling through to "N panes here,
+none running an agent".
+
+What a card is *called* is one rule for both kinds, `paneLabel`: the operator's `label`, else
+`project`, else the harness name or the pane id — except that under a heading which has already
+said the project, a card whose name **equals** that heading falls through to the **pane id**.
+`project` is one string per workspace by construction, so on the real host it produced four cards
+reading `herdr` under a heading reading `herdr`, and three reading `tuyaos-ai-qemu` under
+`tuyaos-ai-qemu`. Only the exact duplicates collapse: `relay`, `Files`, `kv-tool-v2` and
+`herdr-file-viewer-c993314e2614` all differ from their space's name and survive. Directories are no
+help here either — 20 shell panes on that host share only 12 distinct `cwd` basenames, and only 12
+*within their own workspaces*: three sit in one directory in `wS`, two in `wE`, because a workspace
+is usually one worktree. The id is the only field that always separates two siblings, which is also
+why it moves out of a shell card's meta line once it has become the card's name — printing it twice
+said it no better. The flat single-space list passes no heading name and is unchanged.
 
 Opening one differs from opening an agent pane in three measured ways, all of them tested:
 `canLoadMore` is **true** (agent panes report `scrollback: 0` without exception, these report up to
@@ -182,6 +193,45 @@ running (`herdr-remote-dev · zsh`). Typing goes out as a single `respond` rathe
 `send_text` + `Enter`, so the relay audits it as `respond_shell` — the line that says a command was
 run rather than text typed at an agent. With `HERDR_SHELL_PANES` off the `panes` key is simply
 absent and the page renders exactly as it did before, which `test_web_shell.py` asserts directly.
+
+**The unfiltered list groups by workspace, agents and terminals together** — `spaceGroups` /
+`spaceHeader` / `groupCards`, tested in `tests/test_web_spaces.py`. The workspace is herdr's own
+unit of work (`workspace list` reports a `worktree` block for a git one), so it is what an agent
+and the terminals beside it actually have in common; grouping by status instead put this host's
+`wT` agent and `wT` build terminal twenty rows apart, and left the three workspaces that hold no
+agent at all reachable only through a chip. Spaces with a blocked agent sort first and the rest
+keep herdr's own numbering — only whole groups move, never a row inside one — which is why this
+view carries **no "Needs you" hoist**: the hoist exists because a status-grouped list buries the
+blocked card among nine others, and a hoist over a list whose first group is the one asking would
+render that card twice. Inside a group the order is by tab with the agent ahead of its tabmates; a
+heading per tab would spend a row on each for at most four panes (one to three is typical), so the
+ordering carries the relation instead. The header is the chip's twin — same `data-ws-key`, so
+long-press reaches `Focus in herdr` from either, and a tap drills in.
+
+Two things about that grouping are load-bearing rather than cosmetic. **A pane in a space
+`workspace list` never reported gets a group of its own** instead of vanishing: every other view
+renders a pane it cannot place, and the grouped view is the only one that can lose one by omission,
+so `spaceGroups` buckets the panes first and uses the hierarchy only to name and order the buckets.
+And the **hoist that survives in the drilled-in view is now scoped to the filter** — it used to be
+unfiltered, so drilling into `api` put billing's blocked agent on top of the space you had just
+chosen. Cost, measured at 390×844 on the real 30-pane host: a group header is 23px plus 24px of
+margin, exactly what a status header cost, so ten groups instead of four status headings is +282px
+on a 2,539px list.
+
+**The session view carries a strip of the open pane's neighbours** (`renderSiblings`), split into
+the ones sharing its tab and the rest of its workspace — the distinction herdr itself draws, since
+a tabmate is a pane the operator has on screen beside this one. It is the whole control rather than
+a menu because the set is tiny: measured on that host, **at most 3 tabmates and at most 5 panes in
+a workspace**, and 7 of the 10 agent panes have at least one terminal beside them. It costs **32px,
+3.8% of a 390×844 screen**, and nothing at all for the other 3 — or for every pane when
+`HERDR_SHELL_PANES` is off, which is the same "renders exactly as before" guarantee the list has.
+It sits in **normal flow** under the header, so the history and search panels cover it the way they
+already cover the output and `positionHistoryPanel` is untouched. It is rebuilt from every `agents`
+snapshot, so a terminal appearing beside the open pane shows up without a reopen. A chip is DOM
+nodes, not an HTML string; it carries the same hollow-or-status-coloured dot its card does, so the
+strip needs no legend and the two places cannot come to disagree about a pane; and it is named by
+`label` or the pane id, **never** `project` — that produced a chip reading `tmp-workspace` under a
+title reading `tmp-workspace`.
 
 Every toggle in the session view says whether its panel is open through **`aria-pressed`**, and the
 CSS fills the chip off that attribute alone — `setPressed` is the only writer, so the pixels and the

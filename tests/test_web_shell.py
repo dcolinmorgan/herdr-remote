@@ -125,17 +125,45 @@ class WebShellPaneListTests(unittest.TestCase):
         return self.page.eval_on_selector_all(
             "#agents .section-header", "els => els.map(e => e.innerText.split('\\n')[0])")
 
+    def sequence(self):
+        """The list in document order, headings included -- group boundaries matter now."""
+        return self.page.eval_on_selector_all("#agents > *", """els => els.map(e =>
+          e.classList.contains('space-header')
+            ? {kind: 'space', name: e.querySelector('.space-name').textContent,
+               count: e.querySelector('.space-count').textContent,
+               alert: e.classList.contains('alert'), focused: e.classList.contains('focused')}
+            : e.classList.contains('section-header')
+              ? {kind: 'head', name: e.innerText.split('\\n')[0]}
+              : e.classList.contains('agent')
+                ? {kind: e.dataset.shell === '1' ? 'shell' : 'agent', id: e.dataset.paneId}
+                : {kind: e.classList.contains('chip-strip') ? 'chips' : 'other'})""")
+
     def test_terminals_are_listed_under_their_own_heading(self):
+        """Once a space is chosen. The unfiltered list groups by workspace instead, which is where
+        a terminal and the agent beside it belong together."""
+        self.page.evaluate("selectWorkspace('local|wE')")
         self.assertIn("TERMINALS", self.headers())
+        self.assertEqual([c["id"] for c in self.cards() if c["shell"]], ["wE:p2", "wE:p5"])
+
+    def test_every_terminal_reaches_the_unfiltered_list(self):
+        """Including w6:p3, whose host disagrees with its space's -- grouping is the one view that
+        could drop a pane it cannot place, so spaceGroups gives it a group of its own."""
         self.assertEqual([c["id"] for c in self.cards() if c["shell"]],
                          ["wE:p2", "wE:p5", "w6:p3"])
 
     def test_a_terminal_never_lands_in_an_agent_section(self):
-        """The whole reason the relay ships them in a separate array."""
-        order = self.cards()
-        first_shell = next(i for i, c in enumerate(order) if c["shell"])
-        self.assertTrue(all(c["shell"] for c in order[first_shell:]),
-                        "an agent card was rendered after the terminals section")
+        """The whole reason the relay ships them in a separate array. Grouped by workspace the
+        claim is per group: within one, every agent comes before every terminal."""
+        seen_shell = None
+        for node in self.sequence():
+            if node["kind"] == "space":
+                seen_shell = None
+            elif node["kind"] == "shell":
+                seen_shell = node["id"]
+            elif node["kind"] == "agent":
+                self.assertIsNone(
+                    seen_shell,
+                    f"agent {node['id']} rendered after terminal {seen_shell} in its own group")
 
     def test_a_terminal_is_visibly_not_an_agent(self):
         """A status dot it does not have would be a fourth shade of grey; hollow is not a shade."""
@@ -165,10 +193,15 @@ class WebShellPaneListTests(unittest.TestCase):
             [])
 
     def test_the_id_is_on_the_card_because_the_directory_is_not_unique(self):
-        """Measured on a real host: 20 shell panes, 12 distinct cwd basenames."""
-        meta = self.page.eval_on_selector(
-            '[data-pane-id="wE:p2"] .meta', "e => e.innerText")
-        self.assertIn("wE:p2", meta)
+        """Measured on a real host: 20 shell panes, 12 distinct cwd basenames -- and only 12 within
+        their own workspaces either. Which line it lands on depends on whether a heading has
+        already said the project (paneLabel); that it is on the card at all does not."""
+        for view in ("activeWorkspace = null", "selectWorkspace('local|wE')"):
+            with self.subTest(view=view):
+                self.page.evaluate(f"() => {{ {view}; render(); }}")
+                card = self.page.eval_on_selector('[data-pane-id="wE:p2"]', "e => e.innerText")
+                self.assertIn("wE:p2", card)
+                self.assertEqual(card.count("wE:p2"), 1, "the id was printed twice")
 
     def test_a_remote_terminal_says_which_host(self):
         text = self.page.eval_on_selector('[data-pane-id="w6:p3"]', "e => e.innerText")

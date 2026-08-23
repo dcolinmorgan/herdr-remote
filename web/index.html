@@ -103,6 +103,20 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .session-mark { display: inline-block; width: 1.1em; }
 /* Where herdr itself is pointed. Drawn inside the chip so it reads the same on the selected one. */
 .chip.focused { box-shadow: inset 0 0 0 1.5px var(--green); }
+
+/* One group per workspace in the unfiltered list. The workspace is herdr's own unit of work --
+   `workspace list` reports a `worktree` block for a git one -- so it is what an agent and the
+   terminals beside it actually have in common; grouping by status instead put this host's wT agent
+   and wT build terminal twenty rows apart, and left the three workspaces that hold no agent at all
+   reachable only through a chip. A button, because tapping it drills in exactly as the chip above
+   does, and it carries the same alert and focused marks so the two cannot disagree. */
+.space-header { width: 100%; display: flex; align-items: baseline; gap: 8px; margin: 16px 0 8px; padding: 0 0 6px; background: none; border: none; border-bottom: 1px solid var(--border); text-align: left; color: var(--text); cursor: pointer; font-family: inherit; }
+.space-header .space-name { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.space-header .space-host { font-size: 0.6rem; color: var(--orange); }
+.space-header .space-count { flex: 1; font-size: 0.65rem; color: var(--muted); white-space: nowrap; }
+.space-header .space-go { color: var(--muted); font-size: 1rem; line-height: 1; }
+.space-header.focused .space-name { box-shadow: inset 0 -1.5px 0 var(--green); }
+.space-header.alert .space-name::after { content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--red); }
 .agent.focused { border-color: color-mix(in srgb, var(--green) 55%, var(--border)); background: color-mix(in srgb, var(--green) 4%, var(--surface)); }
 .agent .info { flex: 1; min-width: 0; }
 .agent .project { font-size: 0.9rem; font-weight: 500; }
@@ -123,6 +137,18 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-header .icon-toggle { background: none; border: 1px solid transparent; border-radius: 7px; color: var(--muted); cursor: pointer; padding: 4px; display: flex; align-items: center; }
 .term-header .icon-toggle:hover, .term-header .refresh-btn:hover { color: var(--text); }
 .term-header .icon-toggle[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+/* The open pane's reachable neighbours, split by the relation that matters: a tabmate is a pane
+   the operator has on screen beside this one, anything else in the workspace is a tab away. In
+   normal flow rather than absolute, so the history and search panels cover it the way they cover
+   the output. Measured on a real host: at most three tabmates and at most five panes in a
+   workspace, so a strip is the whole control -- no menu, no scroll on a phone -- and it is absent
+   for three of ten agent panes and for every pane when HERDR_SHELL_PANES is off. */
+.term-siblings { display: flex; align-items: center; gap: 6px; overflow-x: auto; padding: 5px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.term-siblings::-webkit-scrollbar { display: none; }
+.term-siblings .sib-label { font-size: 0.55rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
+.term-sib { display: flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 9999px; border: 1px solid var(--border); background: none; color: var(--text); font-size: 0.7rem; font-family: inherit; white-space: nowrap; cursor: pointer; }
+.term-sib .dot { width: 6px; height: 6px; }
+.term-sib:active { transform: scale(0.95); }
 /* top is set from the header's real height when the panel opens (positionHistoryPanel); 45px is
    the phone-sized fallback for a first paint before JS runs. */
 .term-history { position: absolute; top: 45px; left: 0; right: 0; bottom: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
@@ -309,6 +335,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   .terminal-view.active { display: flex; height: calc(100dvh - 49px); }
   .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
   .section-header { grid-column: 1 / -1; }
+  .space-header { grid-column: 1 / -1; }
   .chip-strip { grid-column: 1 / -1; }
   .term-content { min-height: 400px; }
 }
@@ -393,6 +420,10 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
     <button class="history-btn icon-toggle" id="historyBtn" aria-pressed="false" onclick="toggleHistory()" aria-label="Conversation history"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></button>
     <button class="refresh-btn" onclick="refreshPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
   </div>
+  <!-- The other panes in this one's workspace. Built by renderSiblings as DOM nodes, and hidden
+       outright when there are none -- which is 3 of 10 agent panes on the host this was measured
+       on, and every pane when the relay ships no `panes` array at all. -->
+  <div class="term-siblings" id="termSiblings" style="display:none"></div>
   <div class="term-history" id="termHistory" style="display:none">
     <div class="hist-bar">
       <span class="hist-title" id="historyTitle">Conversation History</span>
@@ -1192,6 +1223,10 @@ function tabRows(workspaceKey) {
 
 function render() {
   document.getElementById('agentCount').textContent = agents.length ? `${agents.length}` : '';
+  // A terminal that appears or goes away beside the open pane changes the strip, and this is every
+  // path a snapshot arrives by. Cheap: it reads two arrays already in hand and draws at most five
+  // chips.
+  renderSiblings();
   const rows = workspaceRows();
   // The strip appears exactly as often as it did before this view knew the real hierarchy: when
   // the agents themselves span more than one space. Spaces holding only shell panes are worth
@@ -1209,11 +1244,17 @@ function render() {
 
 function renderWorkspaces(rows) {
   let html = '';
-  // Hoist blocked agents
-  const blocked = agents.filter(a => a.status === 'blocked');
+  // Hoist blocked agents -- but only over the status-grouped list further down, which is the one
+  // that buries them. The unfiltered list groups by workspace and puts the asking space first, so
+  // a hoist there would render the same card twice (see spaceGroups). Scoped to the filter, too:
+  // an unscoped hoist put another space's blocked agent at the top of the space you had just
+  // drilled into, contradicting the chip you tapped to get there.
+  const blocked = !activeWorkspace ? [] : agents.filter(
+    a => a.status === 'blocked' && agentWorkspaceKey(a) === activeWorkspace
+         && (!activeTab || agentTabKey(a) === activeTab));
   if (blocked.length) {
     html += `<div class="section-header" style="color:var(--red)"><span class="dot" style="background:var(--red)"></span>Needs you <span style="opacity:0.6">(${blocked.length})</span></div>`;
-    html += blocked.map(a => agentCard(a)).join('');
+    html += blocked.map(a => agentCard(a, rows.find(r => r.key === activeWorkspace)?.name)).join('');
   }
   // Space chip strip
   html += `<div class="chip-strip"><span class="chip-label">Spaces</span>`;
@@ -1244,25 +1285,105 @@ function renderWorkspaces(rows) {
     html += `<button class="chip chip-add" onclick="createTab()" title="New tab here">+</button>`;
     html += `</div>`;
   }
-  // Agent list (filtered)
-  let filtered = agents;
-  if (activeWorkspace) filtered = filtered.filter(a => agentWorkspaceKey(a) === activeWorkspace);
-  if (activeTab) filtered = filtered.filter(a => agentTabKey(a) === activeTab);
-  // Don't re-show blocked that are already hoisted
-  const working = filtered.filter(a => a.status==='working');
-  const done = filtered.filter(a => a.status==='done');
-  const idle = filtered.filter(a => a.status==='idle'||a.status==='unknown');
-  let shells = shellPanes;
-  if (activeWorkspace) shells = shells.filter(p => agentWorkspaceKey(p) === activeWorkspace);
-  if (activeTab) shells = shells.filter(p => agentTabKey(p) === activeTab);
-  if (working.length) html += section('Working', 'var(--green)', working);
-  if (done.length) html += section('Done', 'var(--muted)', done);
-  if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  html += shellSection(shells);
-  if (!filtered.length && !shells.length) html += emptySpaceNotice(rows);
+  // Two axes are available and the one worth grouping by is whichever the chips above have not
+  // already established. Unfiltered, the workspace is the unknown -- and it is what makes an agent
+  // and the terminals beside it legible as one piece of work -- so group by that and let each
+  // card's own dot carry the status. Drilled into one space the workspace is a given and status is
+  // what is left to say, so that branch is exactly what it was.
+  if (!activeWorkspace) {
+    for (const g of spaceGroups(rows)) html += spaceHeader(g) + groupCards(g);
+  } else {
+    // The chip strip above has said which space this is, so the cards under it are named by the
+    // same rule the grouped view uses -- a list that renamed its rows depending on how you got to
+    // it would be worse than either.
+    const spaceName = rows.find(r => r.key === activeWorkspace)?.name;
+    let filtered = agents.filter(a => agentWorkspaceKey(a) === activeWorkspace);
+    if (activeTab) filtered = filtered.filter(a => agentTabKey(a) === activeTab);
+    // Don't re-show blocked that are already hoisted
+    const working = filtered.filter(a => a.status==='working');
+    const done = filtered.filter(a => a.status==='done');
+    const idle = filtered.filter(a => a.status==='idle'||a.status==='unknown');
+    let shells = shellPanes.filter(p => agentWorkspaceKey(p) === activeWorkspace);
+    if (activeTab) shells = shells.filter(p => agentTabKey(p) === activeTab);
+    if (working.length) html += section('Working', 'var(--green)', working, spaceName);
+    if (done.length) html += section('Done', 'var(--muted)', done, spaceName);
+    if (idle.length) html += section('Idle', 'var(--muted)', idle, spaceName);
+    html += shellSection(shells, spaceName);
+    if (!filtered.length && !shells.length) html += emptySpaceNotice(rows);
+  }
   if (!agents.length && !shellPanes.length && !spaces.workspaces.length) html = '<div class="empty">Waiting for agents…</div>';
   document.getElementById('agents').innerHTML = html;
   bindLongPressHandlers();
+}
+
+// The workspaces with something to draw, urgency first. A space the relay lists but whose panes
+// are all invisible to this client -- HERDR_SHELL_PANES off and no agent in it, which is three of
+// the ten on this host -- is skipped rather than given an empty header: its chip above already
+// carries herdr's own pane count, and a header with nothing under it reads as a failed load.
+function spaceGroups(rows) {
+  const bucket = new Map();
+  const add = (pane, kind) => {
+    const key = agentWorkspaceKey(pane);
+    if (!bucket.has(key)) bucket.set(key, {agents: [], shells: []});
+    bucket.get(key)[kind].push(pane);
+  };
+  agents.forEach(a => add(a, 'agents'));
+  shellPanes.forEach(p => add(p, 'shells'));
+  // Named and ordered by the hierarchy where it covers them, but the LIST is the panes. A pane in
+  // a space `workspace list` never reported -- a host whose spaces read failed, a space created
+  // between two polls, or a pane whose host disagrees with the space's -- gets a group of its own
+  // rather than vanishing. Every other view shows a pane it cannot place; this is the only one
+  // that could lose it by omission, so it does not get to.
+  const groups = [];
+  for (const w of rows) {
+    const held = bucket.get(w.key);
+    if (!held) continue;                       // chip above already carries herdr's pane count
+    bucket.delete(w.key);
+    groups.push({...w, ...held, blocked: held.agents.some(a => a.status === 'blocked')});
+  }
+  for (const [key, held] of bucket) {
+    const {host, id} = splitKey(key);
+    const first = held.agents[0] || held.shells[0];
+    groups.push({key, id, host, number: 0, focused: false, paneCount: 0, ...held,
+                 // An id-less key means this relay reports no hierarchy for the host; the pane
+                 // still has to land somewhere, and it cannot be named after a space it never named.
+                 name: id ? (first.project || id) : (host !== 'local' ? host : 'Unsorted'),
+                 blocked: held.agents.some(a => a.status === 'blocked')});
+  }
+  // Only the blocked/quiet split reorders, and only whole groups -- a row never moves inside one.
+  return [...groups.filter(g => g.blocked), ...groups.filter(g => !g.blocked)];
+}
+
+// Carries data-ws-key/name so long-press reaches `Focus in herdr` here exactly as it does on the
+// chip: the header is the chip's twin, not a decoration above the cards.
+function spaceHeader(g) {
+  const counts = [
+    g.agents.length ? `${g.agents.length} agent${g.agents.length === 1 ? '' : 's'}` : '',
+    g.shells.length ? `${g.shells.length} terminal${g.shells.length === 1 ? '' : 's'}` : '',
+  ].filter(Boolean).join(' · ');
+  const host = g.host && g.host !== 'local'
+    ? `<span class="space-host">@${escapeHtml(g.host)}</span>` : '';
+  const say = [g.name, counts, g.focused ? 'herdr is here' : '', g.blocked ? 'needs you' : '']
+    .filter(Boolean).join(', ');
+  return `<button class="space-header${g.blocked ? ' alert' : ''}${g.focused ? ' focused' : ''}"
+    data-ws-key="${escapeAttr(g.key)}" data-ws-name="${escapeAttr(g.name)}"
+    onclick="selectWorkspace('${escapeAttr(g.key)}')" aria-label="${escapeAttr(say)}">
+    <span class="space-name">${escapeHtml(g.name)}</span>${host}
+    <span class="space-count">${escapeHtml(counts)}</span>
+    <span class="space-go" aria-hidden="true">›</span>
+  </button>`;
+}
+
+// Tabmates adjacent, and the agent ahead of the terminals it sits beside -- the same relation the
+// session view's sibling strip spells out. A heading per tab would spend a row on each for at most
+// four panes (one to three is typical here), so the ordering carries it instead.
+function groupCards(g) {
+  const order = new Map(tabRows(g.key).map((t, i) => [t.key, i]));
+  const rank = p => order.has(agentTabKey(p)) ? order.get(agentTabKey(p)) : order.size;
+  const items = [...g.agents.map(a => ({pane: a, shell: false})),
+                 ...g.shells.map(p => ({pane: p, shell: true}))];
+  items.sort((x, y) => rank(x.pane) - rank(y.pane) || (x.shell ? 1 : 0) - (y.shell ? 1 : 0));
+  return items.map(i => i.shell ? shellCard(i.pane, g.name) : agentCard(i.pane, g.name)).join('');
 }
 
 function emptySpaceNotice(rows) {
@@ -1446,12 +1567,24 @@ function focusItem() {
   hideContextMenu();
 }
 
-function agentCard(a) {
+// What to call a pane on its card. `project` is one string per workspace, so under a heading that
+// has just said it, four cards reading `herdr` name none of the four -- and the thing that actually
+// separates two siblings is the id, which is why the sibling chips lead with it too. Suppressed
+// only when it is the SAME string: `relay`, `Files` and `kv-tool-v2` all differ from their space's
+// name and stay. `groupName` is undefined in the flat single-space list, where no heading said it.
+function paneLabel(p, fallback, groupName) {
+  // workspace_label sits after project on purpose: it names the *space*, so in the grouped list
+  // it is the group heading, and the dedupe below is what stops a card from repeating it.
+  const name = p.label || p.project || p.workspace_label || fallback;
+  return groupName && name === groupName ? p.pane_id : name;
+}
+
+function agentCard(a, groupName) {
   const color = a.status==='blocked'?'var(--red)':a.status==='working'?'var(--green)':'var(--muted)';
   const pulseClass = a.status==='working'?' pulse':'';
   const host = a.host&&a.host!=='local'?` <span style="color:var(--orange);font-size:0.6rem">@${a.host}</span>`:'';
   const cwd = a.cwd ? `<span style="font-family:monospace;opacity:0.7">${a.cwd.split('/').slice(-2).join('/')}</span>` : '';
-  const label = a.label||a.workspace_label||a.project||a.agent;
+  const label = paneLabel(a, a.agent, groupName);
   const labelHtml = escapeHtml(label);
   // A working claude sets its terminal title to what it is doing right now ("fix P0, draft the P1
   // plan"); it clears the title when it goes idle, so this field is present on working panes only
@@ -1469,15 +1602,19 @@ function agentCard(a) {
   </div>`;
 }
 
-function shellCard(p) {
+function shellCard(p, groupName) {
   // Same shape as an agent card so the list reads as one list, but the identity line is the
   // pane id rather than a harness name: measured on a real host, 20 shell panes shared only 12
   // distinct cwd basenames, so eight of them are indistinguishable from a sibling by directory.
   // The id always separates them; `process` (one extra CLI call) is fetched only on open.
-  const label = p.label || p.project || p.pane_id;
+  const label = paneLabel(p, p.pane_id, groupName);
   const host = p.host && p.host !== 'local'
     ? ` <span style="color:var(--orange);font-size:0.6rem">@${escapeHtml(p.host)}</span>` : '';
   const cwd = p.cwd ? p.cwd.split('/').slice(-2).join('/') : '';
+  // The id moves out of the meta line when it has become the card's own name, which is what
+  // paneLabel does inside a workspace group. Printing it twice said it no better.
+  const idLine = label === p.pane_id ? ''
+    : `<span style="font-family:monospace">${escapeHtml(p.pane_id)}</span>${cwd ? ' · ' : ''}`;
   const focused = p.focused ? ' focused' : '';
   return `<div class="agent shell${focused}" role="button" tabindex="0" data-shell="1"
     aria-label="${escapeAttr(label)}, terminal${p.focused ? ', focused in herdr' : ''}"
@@ -1485,20 +1622,81 @@ function shellCard(p) {
     onclick="openTerminal('${escapeAttr(p.pane_id)}')"
     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(p.pane_id)}')}">
     <span class="dot dot-hollow" aria-hidden="true"></span>
-    <div class="info"><div class="project">${escapeHtml(label)}${host}</div><div class="meta"><span style="font-family:monospace">${escapeHtml(p.pane_id)}</span>${cwd ? ' · ' + escapeHtml(cwd) : ''}</div></div>
+    <div class="info"><div class="project">${escapeHtml(label)}${host}</div><div class="meta">${idLine}${cwd ? escapeHtml(cwd) : ''}</div></div>
     <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
   </div>`;
 }
 
-function shellSection(list) {
+function shellSection(list, groupName) {
   if (!list.length) return '';
   return `<div class="section-header"><span class="dot dot-hollow"></span>Terminals <span style="opacity:0.6">(${list.length})</span></div>`
-    + list.map(p => shellCard(p)).join('');
+    + list.map(p => shellCard(p, groupName)).join('');
 }
 
-function section(title, color, list) {
+function section(title, color, list, groupName) {
   return `<div class="section-header"><span class="dot" style="background:${color}"></span>${title}</div>` +
-    list.map(a => agentCard(a)).join('');
+    list.map(a => agentCard(a, groupName)).join('');
+}
+
+// The other panes in the open one's workspace, tabmates first and labelled as such -- which is the
+// distinction herdr itself draws: a tabmate is on the operator's screen beside this pane, anything
+// else in the workspace is a tab away. Both are one tap from here either way; the labels say which
+// is which rather than making the reader guess from an id prefix.
+//
+// DOM nodes, not an HTML string, for the same reason the history renderers are: every character
+// that came off a pane lands in a `textContent`.
+function renderSiblings() {
+  const strip = document.getElementById('termSiblings');
+  if (!strip) return;
+  strip.replaceChildren();
+  const me = paneById(activePane);
+  // No workspace id means this relay reports no hierarchy at all, and every pane would look like a
+  // sibling of every other one. Nothing is better than a wrong neighbourhood.
+  const key = me && me.workspace_id ? agentWorkspaceKey(me) : null;
+  const near = key
+    ? [...agents, ...shellPanes].filter(
+        p => p.pane_id !== activePane && agentWorkspaceKey(p) === key)
+    : [];
+  if (!near.length) { strip.style.display = 'none'; return; }
+  const mine = agentTabKey(me);
+  for (const [label, list] of [['Tab', near.filter(p => agentTabKey(p) === mine)],
+                               ['Space', near.filter(p => agentTabKey(p) !== mine)]]) {
+    if (!list.length) continue;
+    const tag = document.createElement('span');
+    tag.className = 'sib-label';
+    tag.textContent = label;
+    strip.append(tag, ...list.map(siblingChip));
+  }
+  strip.style.display = 'flex';
+}
+
+function siblingChip(p) {
+  // A `panes` entry has no `agent` field at all; an agent entry always does. Same test the card
+  // renderers use, one array apart.
+  const shell = !p.agent;
+  const chip = document.createElement('button');
+  chip.className = 'term-sib';
+  chip.dataset.sibId = p.pane_id;
+  chip.dataset.sibShell = shell ? '1' : '0';
+  const dot = document.createElement('span');
+  dot.className = shell ? 'dot dot-hollow' : 'dot';
+  if (!shell) {
+    dot.style.background = p.status === 'blocked' ? 'var(--red)'
+      : p.status === 'working' ? 'var(--green)' : 'var(--muted)';
+  }
+  const name = document.createElement('span');
+  // An operator's label if there is one, and otherwise the pane id -- never `project`, which by
+  // construction every pane in one workspace shares: a chip reading `tmp-workspace` beside a group
+  // header reading `tmp-workspace` named nothing, and w6's three agents would have produced three
+  // identical chips. The directory is no better (the 20 shell panes on this host collapse to 12
+  // distinct cwd basenames WITHIN their own workspace -- three share one in wS, two in wE, because
+  // a workspace is usually one worktree). The id is the only field that always separates two
+  // siblings, which is the same reason the list card leads with it.
+  name.textContent = p.label || p.pane_id;
+  chip.append(dot, name);
+  chip.setAttribute('aria-label', `${shell ? 'Terminal' : 'Agent'} ${name.textContent}`);
+  chip.onclick = () => openTerminal(p.pane_id);
+  return chip;
 }
 
 function openTerminal(paneId) {
@@ -1517,6 +1715,7 @@ function openTerminal(paneId) {
   // the relay doesn't report it, and the button stays. A terminal never has one.
   const historyBtn = document.querySelector('.history-btn');
   if (historyBtn) historyBtn.style.display = (shell || (a && a.has_session === false)) ? 'none' : '';
+  renderSiblings();
   document.getElementById('agentListView').style.display = 'none';
   if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
