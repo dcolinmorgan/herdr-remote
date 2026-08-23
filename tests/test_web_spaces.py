@@ -61,31 +61,40 @@ def tearDownModule():  # noqa: N802 - unittest's own name
     _shared.clear()
 
 
-def _agent(pane_id, workspace, tab, status="idle", **extra):
+# Fixed timestamps in ms, because `ready` IS a comparison of two of them and a test that raced the
+# real clock would be a test of the clock.
+T0 = 1_700_000_000_000
+
+
+def _agent(pane_id, workspace, tab, status="idle", active=0, seen=0, **extra):
     return {"pane_id": pane_id, "agent": "claude", "label": "", "status": status,
             "cwd": "/work/api", "project": "api", "host": "local", "remote": None,
             "workspace_id": workspace, "tab_id": tab, "title": "", "focused": False,
-            "scrollback": 0, "viewport_rows": 40, "has_session": True, **extra}
+            "scrollback": 0, "viewport_rows": 40, "has_session": True,
+            "last_active_at": T0 + active, "last_seen_at": T0 + seen, **extra}
 
 
 def _shell(pane_id, workspace, tab, **extra):
     return {"pane_id": pane_id, "label": "", "cwd": "/work/api", "project": "api",
             "host": "local", "remote": None, "workspace_id": workspace, "tab_id": tab,
-            "focused": False, "scrollback": 693, "viewport_rows": 68, **extra}
+            "focused": False, "scrollback": 693, "viewport_rows": 68,
+            "last_active_at": T0, "last_seen_at": T0, **extra}
 
 
-# Four spaces' worth of shapes, one of each that matters: a space whose agent is asking (sorts
-# first), a space herdr is pointed at with a tabmate terminal AND one a tab away, a space holding
-# nothing but terminals, and an agent in a space `workspace list` never reported.
+# One of every shape that matters: a space whose agent is asking, a space herdr is pointed at with a
+# tabmate terminal AND one a tab away, a space holding nothing but terminals, an agent in a space
+# `workspace list` never reported, and a space carrying the two halves of `done` -- one finished while
+# you were away and one you have already looked at.
 SNAPSHOT = {
     "type": "agents",
     "agents": [
-        # No operator label: its chip has to fall back to the pane id, because `project` is the
-        # same string for every pane in a workspace and names none of them.
-        _agent("wA:pH", "wA", "wA:t1", status="working"),
-        _agent("wB:pH", "wB", "wB:t1", status="blocked", label="billing", project="billing",
-               options=["Yes", "No"]),
-        _agent("wD:pH", "wD", "wD:t1", label="orphan", project="orphan"),
+        # No operator label: its herd title is the SPACE label, not this per-pane `project`.
+        _agent("wA:pH", "wA", "wA:t1", status="working", active=300, seen=300),
+        _agent("wB:pH", "wB", "wB:t1", status="blocked", project="billing",
+               active=500, seen=0, options=["Yes", "No"]),
+        _agent("wD:pH", "wD", "wD:t1", project="orphan", active=200, seen=900),
+        _agent("wE:pR", "wE", "wE:t1", status="done", project="extras", active=400, seen=100),
+        _agent("wE:pD", "wE", "wE:t1", status="done", project="extras", active=100, seen=800),
     ],
     "spaces": {
         "workspaces": [
@@ -94,6 +103,8 @@ SNAPSHOT = {
             {"workspace_id": "wB", "label": "billing", "number": 2, "focused": False,
              "tab_count": 1, "pane_count": 2, "host": "local"},
             {"workspace_id": "wC", "label": "logs", "number": 3, "focused": False,
+             "tab_count": 1, "pane_count": 2, "host": "local"},
+            {"workspace_id": "wE", "label": "extras", "number": 4, "focused": False,
              "tab_count": 1, "pane_count": 2, "host": "local"},
         ],
         "tabs": [
@@ -104,6 +115,8 @@ SNAPSHOT = {
             {"tab_id": "wB:t1", "workspace_id": "wB", "label": "1", "number": 1,
              "focused": False, "pane_count": 2, "host": "local"},
             {"tab_id": "wC:t1", "workspace_id": "wC", "label": "1", "number": 1,
+             "focused": False, "pane_count": 2, "host": "local"},
+            {"tab_id": "wE:t1", "workspace_id": "wE", "label": "1", "number": 1,
              "focused": False, "pane_count": 2, "host": "local"},
         ],
     },
@@ -116,14 +129,43 @@ SNAPSHOT = {
     ],
 }
 
-ALL_PANES = ([a["pane_id"] for a in SNAPSHOT["agents"]]
-             + [p["pane_id"] for p in SNAPSHOT["panes"]])
+
+class _Page:
+    """The DOM readers both suites use."""
+
+    def sequence(self):
+        return self.page.eval_on_selector_all("#agents > *", """els => els.map(e =>
+          e.classList.contains('section-header')
+            ? {kind: 'section', label: e.querySelector('.sec-label').textContent,
+               count: (e.innerText.match(/\\((\\d+)\\)/) || [])[1],
+               dot: getComputedStyle(e.querySelector('.dot')).backgroundColor,
+               controls: e.querySelectorAll('.sec-btn').length}
+            : e.classList.contains('tab-heading')
+              ? {kind: 'tab', label: e.innerText.split('\\n')[0].replace(/\\s*\\(\\d+\\).*$/, '')}
+              : e.classList.contains('agent')
+                ? {kind: e.dataset.shell === '1' ? 'shell' : 'agent', id: e.dataset.paneId,
+                   bucket: e.dataset.bucket || null,
+                   title: [...e.querySelectorAll('.project > span')].map(x => x.textContent),
+                   meta: e.querySelector('.meta').textContent,
+                   named: e.dataset.agentName}
+                : {kind: e.classList.contains('chip-strip') ? 'chips'
+                     : e.classList.contains('empty-tab') ? 'empty-tab' : 'other',
+                   label: e.innerText})""")
+
+    def sections(self):
+        out = []
+        for node in self.sequence():
+            if node["kind"] == "section":
+                out.append((node["label"], []))
+            elif node["kind"] == "agent":
+                out[-1][1].append(node["id"])
+        return out
 
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
 @unittest.skipIf(_chrome() is None, "no chromium build available")
-class WebSpaceGroupTests(unittest.TestCase):
-    """The unfiltered list: one group per workspace, the asking one first."""
+class WebTriageTests(unittest.TestCase, _Page):
+    """The herd list: Needs you -> Ready · unseen -> Working -> Recent, and nothing else."""
 
     @classmethod
     def setUpClass(cls):
@@ -135,184 +177,317 @@ class WebSpaceGroupTests(unittest.TestCase):
         cls.page.close()
 
     def setUp(self):
-        self.page.evaluate("s => { activeWorkspace = null; activeTab = null; handleMessage(s); }",
-                           SNAPSHOT)
-
-    def sequence(self):
-        return self.page.eval_on_selector_all("#agents > *", """els => els.map(e =>
-          e.classList.contains('space-header')
-            ? {kind: 'space', name: e.querySelector('.space-name').textContent,
-               count: e.querySelector('.space-count').textContent,
-               alert: e.classList.contains('alert'), focused: e.classList.contains('focused')}
-            : e.classList.contains('section-header')
-              ? {kind: 'head', name: e.innerText.split('\\n')[0]}
-              : e.classList.contains('agent')
-                ? {kind: e.dataset.shell === '1' ? 'shell' : 'agent', id: e.dataset.paneId}
-                : {kind: e.classList.contains('chip-strip') ? 'chips' : 'other'})""")
-
-    def groups(self):
-        """[(space name, [pane ids in order]), ...]"""
-        out = []
-        for node in self.sequence():
-            if node["kind"] == "space":
-                out.append((node["name"], []))
-            elif node["kind"] in ("agent", "shell"):
-                out[-1][1].append(node["id"])
-        return out
-
-    def test_the_list_is_one_group_per_workspace(self):
-        self.assertEqual(self.groups(), [
-            ("billing", ["wB:pH", "wB:p2"]),
-            ("api", ["wA:pH", "wA:p2", "wA:p3"]),
-            ("logs", ["wC:p1", "wC:p2"]),
-            ("orphan", ["wD:pH"]),
-        ])
-
-    def test_the_space_that_is_asking_comes_first(self):
-        """And is the reason this view needs no `Needs you` hoist: a hoist plus a group would
-        render the blocked card twice, and the first group cannot bury it."""
-        first = next(n for n in self.sequence() if n["kind"] == "space")
-        self.assertEqual(first["name"], "billing")
-        self.assertTrue(first["alert"])
-        self.assertNotIn("NEEDS YOU", [n.get("name", "") for n in self.sequence()])
-
-    def test_every_pane_is_rendered_exactly_once(self):
-        ids = [n["id"] for n in self.sequence() if n["kind"] in ("agent", "shell")]
-        self.assertEqual(sorted(ids), sorted(ALL_PANES))
-
-    def test_a_space_the_hierarchy_never_reported_still_gets_a_group(self):
-        """`workspace list` knows nothing about wD. Every other view shows the pane anyway, so the
-        one view that groups does not get to lose it."""
-        self.assertIn("orphan", [name for name, _ in self.groups()])
-
-    def test_a_space_holding_only_terminals_is_no_longer_just_a_chip(self):
-        """Three of the ten workspaces on the host this was measured on hold no agent at all."""
-        logs = dict(self.groups())["logs"]
-        self.assertEqual(logs, ["wC:p1", "wC:p2"])
-
-    def test_the_header_counts_what_is_under_it(self):
-        counts = {n["name"]: n["count"] for n in self.sequence() if n["kind"] == "space"}
-        self.assertEqual(counts["api"], "1 agent · 2 terminals")
-        self.assertEqual(counts["logs"], "2 terminals")
-        self.assertEqual(counts["orphan"], "1 agent")
-
-    def test_the_header_marks_where_herdr_is_standing(self):
-        marked = [n["name"] for n in self.sequence() if n["kind"] == "space" and n["focused"]]
-        self.assertEqual(marked, ["api"])
-
-    def test_tabmates_are_adjacent_and_the_agent_leads_its_tab(self):
-        """wA:p3 is a tab away; it sorts after the t1 pair rather than between them."""
-        self.assertEqual(dict(self.groups())["api"], ["wA:pH", "wA:p2", "wA:p3"])
-
-    def test_status_headings_are_gone_from_the_unfiltered_list(self):
-        """Two axes, and the useful one is whichever the chips have not established."""
-        self.assertEqual([n["name"] for n in self.sequence() if n["kind"] == "head"], [])
-
-    def test_drilling_in_restores_the_status_axis(self):
-        self.page.evaluate("selectWorkspace('local|wA')")
-        heads = [n["name"] for n in self.sequence() if n["kind"] == "head"]
-        self.assertEqual(heads, ["WORKING", "TERMINALS"])
-        self.assertEqual([n["name"] for n in self.sequence() if n["kind"] == "space"], [])
-
-    def test_the_hoist_inside_a_space_is_about_that_space(self):
-        """It used to be unfiltered, so drilling into `api` put billing's blocked agent on top."""
-        self.page.evaluate("selectWorkspace('local|wA')")
-        self.assertEqual([n["name"] for n in self.sequence() if n["kind"] == "head"],
-                         ["WORKING", "TERMINALS"])
-        self.page.evaluate("selectWorkspace('local|wB')")
-        seq = self.sequence()
-        self.assertEqual(seq[0]["name"], "NEEDS YOU")
-        self.assertEqual([n["id"] for n in seq if n["kind"] == "agent"], ["wB:pH"])
-
-    def test_the_header_drills_in_the_way_its_chip_does(self):
-        self.page.evaluate("""() => document.querySelectorAll('.space-header')[1].click()""")
-        self.assertEqual(self.page.evaluate("activeWorkspace"), "local|wA")
-
-    def test_the_header_is_the_chips_twin_for_long_press(self):
-        """Same data attributes, so `Focus in herdr` reaches a space from either one."""
-        pairs = self.page.eval_on_selector_all(
-            ".space-header", "els => els.map(e => [e.dataset.wsKey, e.dataset.wsName])")
-        self.assertIn(["local|wA", "api"], pairs)
-
-    def test_a_relay_that_reports_no_hierarchy_gets_the_flat_status_list(self):
-        """The shape `demo-worker` actually serves: no `workspace_id` on any pane, three hosts. It
-        used to render three fabricated groups named after whichever project came first, with the
-        blocked agent buried as the third card -- because `spaceKey` stringified `undefined` into
-        `local|undefined`, which reads as a real space to every guard downstream."""
-        demo = {"type": "agents", "agents": [
-            {"pane_id": "demo:1", "agent": "claude", "status": "working",
-             "project": "phoenix-api", "cwd": "/dev/phoenix-api", "host": "local"},
-            {"pane_id": "demo:3", "agent": "kiro", "status": "blocked",
-             "project": "orbit-ui", "cwd": "/dev/orbit-ui", "host": "local"},
-            {"pane_id": "demo:4", "agent": "grok", "status": "working",
-             "project": "atlas-core", "cwd": "/dev/atlas-core", "host": "remote-1"},
-            {"pane_id": "demo:6", "agent": "claude", "status": "working",
-             "project": "nebula-ml", "cwd": "/dev/nebula-ml", "host": "remote-2"},
-        ]}
         self.page.evaluate("""s => {
           activeWorkspace = null; activeTab = null;
-          shellPanes = []; spaces = {workspaces: [], tabs: []};
+          recentDir = 'newest'; recentOpen = true;
           handleMessage(s);
-        }""", demo)
-        seq = self.sequence()
-        self.assertEqual([n["name"] for n in seq if n["kind"] == "space"], [],
-                         "a relay with no hierarchy was given fabricated workspaces")
-        self.assertEqual([n["name"] for n in seq if n["kind"] == "head"], ["BLOCKED", "WORKING"])
-        self.assertEqual(next(n for n in seq if n["kind"] == "agent")["id"], "demo:3")
-
-    def test_the_pane_that_is_asking_is_the_first_card_in_the_list(self):
-        """Dropping the `Needs you` hoist is only honest if this holds, and sorting a group by tab
-        alone left the blocked agent below any tabmate that came from an earlier tab."""
-        self.page.evaluate("""s => {
-          const snap = JSON.parse(JSON.stringify(s));
-          snap.agents.find(a => a.pane_id === 'wB:pH').tab_id = 'wB:t2';
-          snap.spaces.tabs.push({tab_id: 'wB:t2', workspace_id: 'wB', label: '2', number: 2,
-                                 focused: false, pane_count: 1, host: 'local'});
-          activeWorkspace = null; activeTab = null; handleMessage(snap);
         }""", SNAPSHOT)
-        seq = self.sequence()
-        self.assertEqual(next(n for n in seq if n["kind"] == "space")["name"], "billing")
-        self.assertEqual(
-            next(n for n in seq if n["kind"] in ("agent", "shell"))["id"], "wB:pH",
-            "the blocked pane was not the first card in the list")
 
-    def test_a_pane_that_names_no_space_lands_somewhere_unclickable(self):
-        """A `blocked` push carries no workspace_id (relay: blocked_message), so one can arrive for
-        a pane the snapshot has not described yet. It has to appear -- and its heading must not
-        offer to drill into a space that does not exist."""
+    def test_the_herd_is_in_the_one_order_the_app_agrees_on(self):
+        self.assertEqual(self.sections(), [
+            ("Needs you", ["wB:pH"]),
+            ("Ready · unseen", ["wE:pR"]),
+            ("Working", ["wA:pH"]),
+            ("Recent", ["wD:pH", "wE:pD"]),
+        ])
+
+    def test_ready_is_a_comparison_not_a_flag(self):
+        """wE:pR and wE:pD are both `done`. What separates them is whether the relay saw the pane
+        move after you last looked at it."""
         self.page.evaluate("""() => {
-          agents.push({pane_id: 'w?:p1', agent: 'claude', status: 'blocked',
-                       project: 'pushed', host: 'local'});
+          agents.find(a => a.pane_id === 'wE:pR').last_seen_at = 9e12;   // you just opened it
           render();
         }""")
-        # Both groups are asking, and a space herdr actually numbered comes ahead of a placeholder.
-        self.assertEqual(
-            self.page.eval_on_selector_all(".space-header", """els => els.map(e =>
-              [e.querySelector('.space-name').textContent, e.disabled, !!e.dataset.wsKey])"""),
-            [["billing", False, True], ["Unsorted", True, False], ["api", False, True],
-             ["logs", False, True], ["orphan", False, True]])
-        self.assertIn("w?:p1", [n["id"] for n in self.sequence() if n["kind"] == "agent"])
+        buckets = {n["id"]: n["bucket"] for n in self.sequence() if n["kind"] == "agent"}
+        self.assertEqual(buckets["wE:pR"], "recent")
+        self.assertNotIn("Ready · unseen", [label for label, _ in self.sections()])
 
-    def test_a_card_that_shows_the_pane_id_still_knows_the_panes_real_name(self):
-        """`data-agent-name` prefills the rename dialog. An id there let long-press, Rename, Enter
-        send `rename_agent {label: "wA:pH"}` and overwrite the real herdr label on every client."""
-        shown, named = self.page.evaluate("""() => {
-          const card = document.querySelector('#agents [data-pane-id="wA:pH"]');
-          return [card.querySelector('.project').innerText, card.dataset.agentName];
+    def test_opening_a_pane_is_all_it_takes_to_clear_it(self):
+        """No bookkeeping on either side: the relay's next snapshot carries a bumped last_seen_at
+        and the row falls into Recent on its own."""
+        moved = {**SNAPSHOT}
+        self.page.evaluate("""s => {
+          const snap = JSON.parse(JSON.stringify(s));
+          const p = snap.agents.find(a => a.pane_id === 'wE:pR');
+          p.last_seen_at = p.last_active_at + 1;
+          handleMessage(snap);
+        }""", moved)
+        self.assertEqual([label for label, _ in self.sections()],
+                         ["Needs you", "Working", "Recent"])
+
+    def test_a_relay_with_no_timestamps_costs_nothing(self):
+        """Every comparator returns 0 and sort is stable, so the sections keep the order the relay
+        sent. No feature detection, no branch -- and Ready is simply empty."""
+        self.page.evaluate("""s => {
+          const snap = JSON.parse(JSON.stringify(s));
+          snap.agents.forEach(a => { delete a.last_active_at; delete a.last_seen_at; });
+          activeWorkspace = null; handleMessage(snap);
+        }""", SNAPSHOT)
+        self.assertEqual(self.sections(), [
+            ("Needs you", ["wB:pH"]),
+            ("Working", ["wA:pH"]),
+            # wE:pR is `done` and can no longer be told from wE:pD, so both are Recent -- and in the
+            # order the relay sent them, because every comparator returned 0 and sort is stable.
+            ("Recent", ["wD:pH", "wE:pR", "wE:pD"]),
+        ])
+
+    def test_only_recent_folds_and_only_recent_inverts(self):
+        """Collapsing an alert defeats the alert, and an attention section is ordered by urgency,
+        which does not invert. The absence of controls on the first three is what marks the fourth."""
+        controls = {n["label"]: n["controls"] for n in self.sequence() if n["kind"] == "section"}
+        self.assertEqual(controls,
+                         {"Needs you": 0, "Ready · unseen": 0, "Working": 0, "Recent": 2})
+
+    def test_recent_folds_away_and_the_others_cannot(self):
+        self.page.evaluate("toggleRecentOpen()")
+        self.assertEqual(dict(self.sections())["Recent"], [])
+        # Every other section still has its rows.
+        self.assertEqual(dict(self.sections())["Needs you"], ["wB:pH"])
+        self.page.evaluate("toggleRecentOpen()")
+        self.assertEqual(dict(self.sections())["Recent"], ["wD:pH", "wE:pD"])
+
+    def test_the_direction_toggle_reaches_recent_and_nothing_else(self):
+        before = dict(self.sections())
+        self.page.evaluate("flipRecentDir()")
+        after = dict(self.sections())
+        self.assertEqual(after["Recent"], list(reversed(before["Recent"])))
+        for pinned in ("Needs you", "Ready · unseen", "Working"):
+            self.assertEqual(after[pinned], before[pinned])
+
+    def test_a_dot_says_which_bucket_not_which_status(self):
+        """`done` means two different things depending on whether you have looked at it, and only the
+        bucket knows which -- so wE:pR and wE:pD, both `done`, must not share a colour."""
+        dots = self.page.evaluate("""() => {
+          const g = id => getComputedStyle(
+            document.querySelector(`[data-pane-id="${id}"] .dot`)).backgroundColor;
+          return {ready: g('wE:pR'), recent: g('wE:pD'), needs: g('wB:pH'), working: g('wA:pH')};
         }""")
-        self.assertEqual(shown, "wA:pH")
-        self.assertEqual(named, "api")
+        self.assertNotEqual(dots["ready"], dots["recent"])
+        self.assertEqual(len({dots["ready"], dots["recent"], dots["needs"], dots["working"]}), 4)
 
-    def test_an_operators_own_label_is_never_replaced_by_an_id(self):
-        """Even when it is the same string the heading carries -- the operator typed it."""
+    def test_a_section_dot_matches_the_rows_it_collects(self):
+        """One map, so a heading cannot drift from what is under it."""
+        headings = {n["label"]: n["dot"] for n in self.sequence() if n["kind"] == "section"}
+        row = self.page.eval_on_selector(
+            '[data-pane-id="wE:pR"] .dot', "e => getComputedStyle(e).backgroundColor")
+        self.assertEqual(headings["Ready · unseen"], row)
+
+    def test_the_herd_is_agents_only(self):
+        """Two thirds of the panes on a real host are bare shells with no status at all. Triaging
+        them would bury ten agents under twenty rows that can never be anything but Recent."""
+        kinds = [n["kind"] for n in self.sequence() if n["kind"] in ("agent", "shell")]
+        self.assertNotIn("shell", kinds)
+        self.assertEqual(len(kinds), len(SNAPSHOT["agents"]))
+
+    def test_with_no_agents_the_herd_points_at_the_terminals_rather_than_lying(self):
+        self.page.evaluate("""s => {
+          const snap = JSON.parse(JSON.stringify(s));
+          snap.agents = [];
+          activeWorkspace = null; handleMessage(snap);
+        }""", SNAPSHOT)
+        text = self.page.eval_on_selector("#agents .empty", "e => e.innerText")
+        self.assertIn("5 terminals", text)
+
+    def test_a_chip_carries_one_dot_from_the_one_classifier(self):
+        """So a space chip and the row it stands for cannot disagree about what a colour means."""
+        chips = self.page.eval_on_selector_all(
+            "#agents .chip-strip:first-of-type .chip", """els => els.map(e => {
+              const d = e.querySelector('.chip-dot');
+              return [e.textContent.trim(), d ? getComputedStyle(d).backgroundColor : null];
+            })""")
+        by_name = {name.split(" (")[0]: dot for name, dot in chips}
+        row = self.page.eval_on_selector(
+            '[data-pane-id="wB:pH"] .dot', "e => getComputedStyle(e).backgroundColor")
+        self.assertEqual(by_name["billing"], row)
+        # A space holding only terminals has nothing to report, and a resting dot would claim
+        # otherwise -- worstTriage returns null and no dot is drawn.
+        self.assertIsNone(by_name["logs"])
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebSpaceViewTests(unittest.TestCase, _Page):
+    """One space's panes, grouped by tab -- agents and bare shells together."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = _shared["browser"].new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    def setUp(self):
+        self.page.evaluate("""s => {
+          activeWorkspace = null; activeTab = null; handleMessage(s);
+        }""", SNAPSHOT)
+
+    def groups(self):
+        out = []
+        for node in self.sequence():
+            if node["kind"] == "tab":
+                out.append((node["label"], []))
+            elif node["kind"] in ("agent", "shell"):
+                out[-1][1].append(node["id"])
+            elif node["kind"] == "empty-tab":
+                out[-1][1].append("(empty)")
+        return out
+
+    def test_a_space_is_grouped_by_tab_with_both_kinds_together(self):
+        self.page.evaluate("selectWorkspace('local|wA')")
+        self.assertEqual(self.groups(), [
+            ("Tab 1", ["wA:pH", "wA:p2"]),
+            ("deploy", ["wA:p3"]),
+        ])
+
+    def test_an_empty_tab_is_a_thing_to_see_not_an_absence_to_hide(self):
+        """A freshly created tab holds one shell the relay may not have listed yet; hiding the tab
+        would leave nowhere to go and launch an agent in it."""
         self.page.evaluate("""() => {
-          agents.find(a => a.pane_id === 'wA:pH').label = 'api'; render();
+          spaces.tabs.push({tab_id: 'wA:t9', workspace_id: 'wA', label: 'fresh', number: 9,
+                            focused: false, pane_count: 1, host: 'local'});
+          selectWorkspace('local|wA');
         }""")
-        card = self.page.evaluate("""() => {
-          const c = document.querySelector('#agents [data-pane-id="wA:pH"]');
-          return [c.querySelector('.project').innerText, c.dataset.agentName];
+        self.assertEqual(self.groups()[-1], ("fresh", ["(empty)"]))
+
+    def test_a_pane_whose_tab_is_not_listed_yet_is_never_lost(self):
+        """The poll race right after a create: `pane list` has the pane, `tab list` has not caught up."""
+        self.page.evaluate("""() => {
+          shellPanes.push({...shellPanes[0], pane_id: 'wA:p9', tab_id: 'wA:t7'});
+          selectWorkspace('local|wA');
         }""")
-        self.assertEqual(card, ["api", "api"])
+        self.assertEqual(self.groups()[-1], ("…", ["wA:p9"]))
+
+    def test_a_card_in_a_tab_leads_with_the_panes_own_name(self):
+        """The heading above it already said the space and the tab. Repeating them says nothing --
+        and two panes in one tab would become indistinguishable, since their own name is the only
+        thing telling them apart."""
+        self.page.evaluate("selectWorkspace('local|wA')")
+        card = next(n for n in self.sequence() if n.get("id") == "wA:p2")
+        self.assertEqual(card["title"], ["wA:p2"])
+        self.assertNotIn("api", card["title"])
+        # And the id does not then appear twice -- it has become the title, so the meta line drops it.
+        self.assertEqual(card["meta"], "work/api")
+
+    def test_the_tab_filter_still_narrows_to_one_group(self):
+        self.page.evaluate("selectWorkspace('local|wA'); selectTab('local|wA:t2')")
+        self.assertEqual([n["id"] for n in self.sequence() if n["kind"] in ("agent", "shell")],
+                         ["wA:p3"])
+        # With one tab shown its own heading would only repeat the chip that selected it.
+        self.assertEqual([n for n in self.sequence() if n["kind"] == "tab"], [])
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebPaneNamingTests(unittest.TestCase, _Page):
+    """What a row is called, which is two questions and therefore two functions."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = _shared["browser"].new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    def setUp(self):
+        self.page.evaluate("""s => {
+          activeWorkspace = null; activeTab = null; handleMessage(s);
+        }""", SNAPSHOT)
+
+    def card(self, pane_id):
+        return next(n for n in self.sequence() if n.get("id") == pane_id)
+
+    def test_the_herd_title_is_the_space_label_not_the_cwd_basename(self):
+        """The relay sets `project` to basename(cwd), which is a per-pane fact. What locates a piece
+        of work is the space's own label."""
+        self.assertEqual(self.card("wA:pH")["title"][0], "api")
+        self.assertEqual(self.card("wD:pH")["title"][0], "orphan")   # unlisted space, best guess
+
+    def test_the_tab_rides_the_title_as_its_own_span(self):
+        """Not a joined string: at 390px tail-truncating `space · tab` eats the tab, and the
+        characters that survive are the ones every row in that space shares."""
+        self.page.evaluate("""() => {
+          agents.find(a => a.pane_id === 'wA:pH').tab_id = 'wA:t2';
+          render();
+        }""")
+        self.assertEqual(self.card("wA:pH")["title"], ["api", " · ", "deploy"])
+        # And the separator's own spaces survive: they sit inside the span, and a flex container
+        # collapses them unless told not to -- the title rendered `api·deploy`.
+        self.assertIn(
+            " · ",
+            self.page.eval_on_selector('[data-pane-id="wA:pH"] .project', "e => e.innerText"))
+
+    def test_a_positional_tab_label_is_dropped_when_there_is_only_one_tab(self):
+        """herdr labels an unlabelled tab positionally, so `billing · 1` reads as a bug. With two or
+        more tabs the number stays -- weak, but the only thing telling two panes in one space apart."""
+        self.assertEqual(self.card("wB:pH")["title"], ["billing"])
+        self.page.evaluate("""() => {
+          spaces.tabs.push({tab_id: 'wB:t2', workspace_id: 'wB', label: '2', number: 2,
+                            focused: false, pane_count: 1, host: 'local'});
+          render();
+        }""")
+        self.assertEqual(self.card("wB:pH")["title"], ["billing", " · ", "1"])
+
+    def test_the_cwd_is_dropped_when_it_repeats_the_space(self):
+        """A space is almost always named after its directory, so this line spent itself repeating
+        line one -- `api` above `work/api`, row after row. What is left when everything drops out is
+        the pane id, because something has to separate two rows: measured on a real host, three
+        agents share one tab of one space whose directory IS the space's name, and all three read
+        `tuyaos-ai-qemu` with an empty second line."""
+        self.assertEqual(self.card("wA:pH")["meta"], "claude · wA:pH")
+        self.page.evaluate("""() => {
+          agents.find(a => a.pane_id === 'wA:pH').cwd = '/work/api/worktrees/hotfix';
+          render();
+        }""")
+        self.assertEqual(self.card("wA:pH")["meta"], "claude · worktrees/hotfix")
+
+    def test_a_hand_set_name_beats_the_cwd_and_the_title(self):
+        self.page.evaluate("""() => {
+          Object.assign(agents.find(a => a.pane_id === 'wA:pH'),
+                        {label: 'ingest rework', title: 'running tests'});
+          render();
+        }""")
+        self.assertEqual(self.card("wA:pH")["meta"], "claude · ingest rework")
+
+    def test_what_a_pane_is_called_never_depends_on_scope(self):
+        """`data-agent-name` prefills the rename dialog, so it carries the real thing in both views
+        even where the card shows something shorter."""
+        herd = self.card("wA:pH")["named"]
+        self.page.evaluate("selectWorkspace('local|wA')")
+        self.assertEqual(self.card("wA:pH")["named"], herd)
+        # Never `project`: the relay sets that to basename(cwd), which a space's panes nearly all
+        # share -- on a real host every card in `tmp-workspace` was called `tmp-workspace`, and so
+        # was the heading above them.
+        self.assertEqual(herd, "wA:pH")
+        self.page.evaluate("""() => {
+          agents.find(a => a.pane_id === 'wA:pH').label = 'ingest'; render();
+        }""")
+        self.assertEqual(self.card("wA:pH")["named"], "ingest")
+
+    def test_the_project_gives_up_width_before_the_tab_does(self):
+        """The whole reason line one is spans. Measured, not read off the CSS."""
+        # Through the snapshot, not through spaceNameByKey: render() rebuilds that map every time,
+        # which is the point of it existing.
+        self.page.evaluate("""() => {
+          agents.find(x => x.pane_id === 'wA:pH').tab_id = 'wA:t2';
+          spaces.workspaces.find(w => w.workspace_id === 'wA').label =
+            'a-very-long-workspace-name-that-cannot-possibly-fit-on-a-phone';
+          render();
+        }""")
+        boxes = self.page.evaluate("""() => {
+          const card = document.querySelector('[data-pane-id="wA:pH"]');
+          const w = sel => card.querySelector(sel).getBoundingClientRect().width;
+          return {project: w('.pane-project'), tab: w('.pane-tab'),
+                  tabText: card.querySelector('.pane-tab').textContent,
+                  clipped: card.querySelector('.pane-project').scrollWidth
+                           > card.querySelector('.pane-project').clientWidth + 1};
+        }""")
+        self.assertTrue(boxes["clipped"], "the project was not the part that gave up width")
+        self.assertEqual(boxes["tabText"], "deploy")
+        self.assertGreater(boxes["tab"], 20, "the tab was squeezed to nothing")
 
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")

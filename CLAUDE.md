@@ -163,80 +163,72 @@ Two things were found by measuring rather than reading, both in the same trim pa
   of a dark dock — unhittable, and invisible as a group. `#actionKeys` is now a 3-column grid of
   30px keys tinted from the same accents as the answers above them; it costs the dock 14px while a
   pane is blocked.
+Panes with no agent in them are **not in the herd list**, which is agents only. Two thirds of the
+panes on a real host are these — 20 of 30 — they carry no `status` at all, and triaging them would
+bury ten agents under twenty rows that can never be anything but Recent. They are reached by picking
+a space (which groups by tab and shows both kinds together) and from the sibling strip inside a
+session. A terminal's dot is **hollow** rather than a fifth shade competing with the four buckets,
+which is the same thing `worstTriage` says by returning null for a set holding only these.
 
-Panes with no agent in them render as a **Terminals** section in the same list, from the relay's
-`panes` array — a hollow dot rather than a fourth shade of grey competing with Done and Idle,
-because a terminal has no status to colour. The workspace and tab chips filter them like anything
-else, and a tab holding only a terminal now shows it instead of falling through to "N panes here,
-none running an agent".
+**The herd list is `triage`, the one ordering the whole page agrees on**: `Needs you` → `Ready ·
+unseen` → `Working` → `Recent`, tested in `tests/test_web_spaces.py`. Ported from Collie's
+`lib/triage.ts`, and the point of it is one classifier — `bucketOf` — that the rows, the space chips
+and the tab chips all route through, so a chip and the row it stands for cannot come to disagree
+about what a colour means.
 
-What a card is *called* is one rule for both kinds, `paneLabel`: the operator's `label`, else
-`project`, else the harness name or the pane id — except that under a heading which has already
-said the project, a card whose name **equals** that heading falls through to the **pane id**.
-`project` is one string per workspace by construction, so on the real host it produced four cards
-reading `herdr` under a heading reading `herdr`, and three reading `tuyaos-ai-qemu` under
-`tuyaos-ai-qemu`. An **operator's own `label` is never suppressed**, whatever the heading says, and
-the id the fallback produces is the *display* string only: `data-agent-name` carries `paneName` —
-the pane's real name — because that attribute prefills the rename dialog, and an id there let
-long-press, Rename, Enter send `rename_agent {label: "w6:pH"}` and overwrite the real herdr label on
-every client. Only the exact duplicates collapse: `relay`, `Files`, `kv-tool-v2` and
-`herdr-file-viewer-c993314e2614` all differ from their space's name and survive. Directories are no
-help here either — 20 shell panes on that host share only 12 distinct `cwd` basenames, and only 12
-*within their own workspaces*: three sit in one directory in `wS`, two in `wE`, because a workspace
-is usually one worktree. The id is the only field that always separates two siblings, which is also
-why it moves out of a shell card's meta line once it has become the card's name — printing it twice
-said it no better. The flat single-space list passes no heading name and is unchanged.
+- **`Ready · unseen` is the section that could not exist before** the relay kept timestamps: an agent
+  that finished while you weren't looking. It is a **comparison, not a flag** — `status === "done" &&
+  last_active_at > last_seen_at` — so opening the pane clears it with no bookkeeping on either side.
+- **The dot is the bucket's colour, not the status's.** `done` means two different things depending
+  on whether you have looked at it, and only the bucket knows which. Orange for `ready` sits where it
+  belongs on red → orange → green → grey and leaves blue meaning *selection*, which is all it means
+  anywhere else on this page.
+- **Only `Recent` folds, and only `Recent` inverts.** Collapsing an alert defeats the alert, and an
+  attention section is ordered by urgency, which does not invert. The three above it have **no
+  controls at all**, and that absence is what marks the fourth as the one you may put away. Both
+  preferences persist, because a phone reopens this page constantly.
+- **Sorting:** the attention sections by `last_active_at` desc, `Recent` by `last_seen_at` desc.
+- **The no-timestamp path is free.** Every comparator returns 0, `Array.prototype.sort` is stable, so
+  each section keeps the order the relay already sent and `Ready` is simply empty. No feature
+  detection, no branch — which is what keeps an older relay, and `demo-worker`, working untouched.
 
-Opening one differs from opening an agent pane in three measured ways, all of them tested:
-`canLoadMore` is **true** (agent panes report `scrollback: 0` without exception, these report up to
-693, and the read costs 10ms rather than a multi-second harvest), the History chip is **hidden**
-(there is no transcript, and the relay would answer `no-session`), and the opening read carries
-`process: true` **once** — one extra CLI call, one SSH round trip for a remote host, so the 3s
-mirror tick must not repeat it. When it comes back the title swaps the pane id for what is actually
-running (`herdr-remote-dev · zsh`). Typing goes out as a single `respond` rather than
-`send_text` + `Enter`, so the relay audits it as `respond_shell` — the line that says a command was
-run rather than text typed at an agent. With `HERDR_SHELL_PANES` off the `panes` key is simply
-absent and the page renders exactly as it did before, which `test_web_shell.py` asserts directly.
+**Picking a space groups its panes by tab** (`groupPanesByTab`) — agents *and* bare shells, because
+that is the one view where "what is in this tab" is the question being asked. **Empty tabs render**
+(`(empty tab)`): a freshly created tab holds a shell the relay may not have listed yet, and hiding
+the tab would leave nowhere to go and start an agent in it. A pane whose tab `tab list` has not
+caught up with — the poll race right after a create — lands in a trailing `…` group rather than
+vanishing.
 
-**The unfiltered list groups by workspace, agents and terminals together** — `spaceGroups` /
-`spaceHeader` / `groupCards`, tested in `tests/test_web_spaces.py`. The workspace is herdr's own
-unit of work (`workspace list` reports a `worktree` block for a git one), so it is what an agent
-and the terminals beside it actually have in common; grouping by status instead put this host's
-`wT` agent and `wT` build terminal twenty rows apart, and left the three workspaces that hold no
-agent at all reachable only through a chip. Spaces with a blocked agent sort first and the rest keep
-herdr's own numbering, and inside a group a blocked pane sorts ahead of its tab — so **the first
-card in the list is always the one asking**, which is what lets this view carry **no "Needs you"
-hoist**: the hoist exists because a status-grouped list buries the blocked card among nine others,
-and a hoist over a list that cannot bury it would render that card twice. The intra-group jump is
-load-bearing, not cosmetic: ordering by tab alone put the blocked agent third in its own group
-whenever a tabmate came from an earlier tab, and dropping the hoist on top of that was simply a
-regression. Inside a group the order is by tab with the agent ahead of its tabmates; a
-heading per tab would spend a row on each for at most four panes (one to three is typical), so the
-ordering carries the relation instead. The header is the chip's twin — same `data-ws-key`, so
-long-press reaches `Focus in herdr` from either, and a tap drills in.
+**What a row is called is two questions, so two functions and an explicit scope** (`paneParts` /
+`paneTitleInTab`), not one function guessing from whatever heading happens to be above it:
 
-Two things about that grouping are load-bearing rather than cosmetic. **A pane in a space
-`workspace list` never reported gets a group of its own** instead of vanishing: every other view
-renders a pane it cannot place, and the grouped view is the only one that can lose one by omission,
-so `spaceGroups` buckets the panes first and uses the hierarchy only to name and order the buckets.
-And the **hoist that survives in the drilled-in view is now scoped to the filter** — it used to be
-unfiltered, so drilling into `api` put billing's blocked agent on top of the space you had just
-chosen.
-
-`spaceKey` is what makes any of that safe, and it is a one-token fix worth knowing about:
-`` `${host}|${id}` `` turned a missing id into the string `local|undefined`, which reads as a real
-space to everything downstream — `splitKey` returns the truthy `"undefined"`, `render()`'s
-`!k.endsWith('|')` guard passes it, and the `Unsorted` fallback is unreachable. A relay that reports
-no hierarchy at all — **`demo-worker`, which serves six agents with no `workspace_id` across three
-hosts**, or any relay older than `spaces` — therefore got one fabricated group per host, named after
-whichever project happened to be first, with the blocked agent buried inside it. With `${id || ''}`
-those panes key to `host|`, the guard sees them, and such a relay falls back to the flat status list
-it always had; `test_web_spaces.py` asserts that against the demo payload directly. A `blocked` push
-is the same shape (`blocked_message` carries no `workspace_id`), so a pane pushed ahead of its first
-snapshot lands in an `Unsorted` group whose header is a heading rather than a button — there is no
-space to drill into and nothing for `Focus in herdr` to focus. Cost, measured at 390×844 on the real 30-pane host: a group header is 23px plus 24px of
-margin, exactly what a status header cost, so ten groups instead of four status headings is +282px
-on a 2,539px list.
+- In the **herd** the title carries the two things that *locate* a piece of work, the space and the
+  tab, **as separate spans rather than a joined string**. At 390px tail-truncating the join eats the
+  tab name and leaves every row reading `herdr-remote-dev · d…`, where the characters that survive
+  are the ones every row in that space shares. Separate spans let the **project** give up width
+  first and the tab — the only discriminator — survive; `test_the_project_gives_up_width_before_the_tab_does`
+  measures it rather than reading the CSS.
+- The project is the **space's label**, never `p.project`: the relay sets that to `basename(cwd)`,
+  which is a per-pane fact and the very thing `informativeCwd` decides whether to show on line two.
+- In a **space's own view** both are already established by the heading, so repeating them says
+  nothing — and worse, two panes in one tab would become indistinguishable. There the pane's own name
+  leads and the cwd sits beneath.
+- **`paneName` is `label || pane_id`, and never `project`.** On the real host every card in
+  `tmp-workspace` was called `tmp-workspace`, and so was the heading above them. The id is the only
+  field that always separates two siblings, and the same string feeds `data-agent-name` (the rename
+  prefill) and the row's `aria-label`, so what a pane is *called* cannot drift from what it announces.
+- **`informativeCwd`** drops the cwd when its basename equals the space label — a space is almost
+  always named after its directory, so that line spent itself repeating line one. What is left when
+  everything drops out is the **pane id**: measured here, three agents share one tab of one space
+  whose directory *is* the space's name, so their label, tab and cwd are all empty or identical and
+  all three rows read `tuyaos-ai-qemu` with an empty second line.
+- **`meaningfulTabLabel`** drops a *positional* tab label when the space has only one tab — herdr
+  labels an unlabelled tab `"1"`, and `billing · 1` reads as a bug rather than a name. With two or
+  more the number stays: weak, but the only thing telling two panes in one project apart.
+- Relatedly, **a tab has been renamed when its label is not a bare integer** — *not* when it differs
+  from `number`. Live on this host, `wT:t4` has label `"2"` and number `4`, because herdr's label is
+  the tab's **position** in its space while the number is a separate counter; comparing the two
+  called that a rename and rendered a heading reading `2` beside one reading `Tab 1`.
 
 **The session view carries a strip of the open pane's neighbours** (`renderSiblings`), split into
 the ones sharing its tab and the rest of its workspace — the distinction herdr itself draws, since

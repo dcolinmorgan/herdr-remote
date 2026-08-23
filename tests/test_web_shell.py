@@ -126,44 +126,56 @@ class WebShellPaneListTests(unittest.TestCase):
             "#agents .section-header", "els => els.map(e => e.innerText.split('\\n')[0])")
 
     def sequence(self):
-        """The list in document order, headings included -- group boundaries matter now."""
+        """The list in document order, headings included."""
         return self.page.eval_on_selector_all("#agents > *", """els => els.map(e =>
-          e.classList.contains('space-header')
-            ? {kind: 'space', name: e.querySelector('.space-name').textContent,
-               count: e.querySelector('.space-count').textContent,
-               alert: e.classList.contains('alert'), focused: e.classList.contains('focused')}
-            : e.classList.contains('section-header')
-              ? {kind: 'head', name: e.innerText.split('\\n')[0]}
+          e.classList.contains('section-header')
+            ? {kind: 'head', name: e.querySelector('.sec-label').textContent}
+            : e.classList.contains('tab-heading')
+              ? {kind: 'tab', name: e.innerText.split('\\n')[0].replace(/\\s*\\(\\d+\\)$/, '')}
               : e.classList.contains('agent')
                 ? {kind: e.dataset.shell === '1' ? 'shell' : 'agent', id: e.dataset.paneId}
                 : {kind: e.classList.contains('chip-strip') ? 'chips' : 'other'})""")
 
-    def test_terminals_are_listed_under_their_own_heading(self):
-        """Once a space is chosen. The unfiltered list groups by workspace instead, which is where
-        a terminal and the agent beside it belong together."""
-        self.page.evaluate("selectWorkspace('local|wE')")
-        self.assertIn("TERMINALS", self.headers())
-        self.assertEqual([c["id"] for c in self.cards() if c["shell"]], ["wE:p2", "wE:p5"])
+    def in_space(self, key):
+        """Every pane the space view draws for one space, in order."""
+        self.page.evaluate(f"selectWorkspace('{key}')")
+        return [n["id"] for n in self.sequence() if n["kind"] in ("agent", "shell")]
 
-    def test_every_terminal_reaches_the_unfiltered_list(self):
-        """Including w6:p3, whose host disagrees with its space's -- grouping is the one view that
-        could drop a pane it cannot place, so spaceGroups gives it a group of its own."""
-        self.assertEqual([c["id"] for c in self.cards() if c["shell"]],
-                         ["wE:p2", "wE:p5", "w6:p3"])
+    def test_a_terminal_lives_under_its_tab_in_the_space_view(self):
+        """Not in the herd, which is agents only: two thirds of the panes on a real host are these,
+        and they have no status to triage. The space view is where "what is in this tab" is the
+        question being asked, so it shows both kinds together."""
+        self.page.evaluate("selectWorkspace('local|wE')")
+        self.assertEqual(
+            [(n.get("name") or n.get("id")) for n in self.sequence()
+             if n["kind"] in ("tab", "agent", "shell")],
+            ["Tab 1", "wE:pH", "wE:p2", "logs", "wE:p5"])
+
+    def test_no_terminal_is_stranded(self):
+        """Including w6:p3, whose host disagrees with its space's. The herd cannot show it, so every
+        one of them has to be reachable by picking a space -- and w6's chip is what offers it."""
+        reachable = set(self.in_space("local|wE")) | set(self.in_space("gpu-box|w6"))
+        self.assertLessEqual({p["pane_id"] for p in SNAPSHOT["panes"]}, reachable)
 
     def test_a_terminal_is_never_drawn_as_an_agent(self):
         """The whole reason the relay ships them in a separate array. Not an ordering claim: a group
         is ordered by tab, so a terminal in an earlier tab legitimately precedes an agent in a later
         one. What must hold is that no `panes` entry is ever rendered by agentCard -- it would show
         up with an empty harness name and a fourth shade of status grey."""
-        drawn = {n["id"]: n["kind"] for n in self.sequence() if n["kind"] in ("agent", "shell")}
+        drawn = {}
+        for key in ("local|wE", "gpu-box|w6"):
+            self.page.evaluate(f"selectWorkspace('{key}')")
+            drawn.update({n["id"]: n["kind"] for n in self.sequence()
+                          if n["kind"] in ("agent", "shell")})
         for pane in SNAPSHOT["panes"]:
             self.assertEqual(drawn.get(pane["pane_id"]), "shell", pane["pane_id"])
         for agent in SNAPSHOT["agents"]:
             self.assertEqual(drawn.get(agent["pane_id"]), "agent", agent["pane_id"])
 
     def test_a_terminal_is_visibly_not_an_agent(self):
-        """A status dot it does not have would be a fourth shade of grey; hollow is not a shade."""
+        """A status dot it does not have would be a fifth shade competing with the four triage
+        buckets; hollow is not a shade."""
+        self.page.evaluate("selectWorkspace('local|wE')")
         filled, hollow = self.page.evaluate("""() => {
           const dot = sel => {
             const s = getComputedStyle(document.querySelector(sel + ' .dot'));
@@ -193,7 +205,7 @@ class WebShellPaneListTests(unittest.TestCase):
         """Measured on a real host: 20 shell panes, 12 distinct cwd basenames -- and only 12 within
         their own workspaces either. Which line it lands on depends on whether a heading has
         already said the project (paneLabel); that it is on the card at all does not."""
-        for view in ("activeWorkspace = null", "selectWorkspace('local|wE')"):
+        for view in ("selectWorkspace('local|wE')", "selectWorkspace('local|wE'); selectTab('local|wE:t1')"):
             with self.subTest(view=view):
                 self.page.evaluate(f"() => {{ {view}; render(); }}")
                 card = self.page.eval_on_selector('[data-pane-id="wE:p2"]', "e => e.innerText")
@@ -201,6 +213,7 @@ class WebShellPaneListTests(unittest.TestCase):
                 self.assertEqual(card.count("wE:p2"), 1, "the id was printed twice")
 
     def test_a_remote_terminal_says_which_host(self):
+        self.page.evaluate("selectWorkspace('gpu-box|w6')")
         text = self.page.eval_on_selector('[data-pane-id="w6:p3"]', "e => e.innerText")
         self.assertIn("@gpu-box", text)
 
