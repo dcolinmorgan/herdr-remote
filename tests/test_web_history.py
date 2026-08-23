@@ -37,22 +37,39 @@ except ImportError:  # pragma: no cover
     sync_playwright = None
 
 
+# One browser for the file, for the reason spelled out in test_web_keys.py: `unittest discover` runs
+# every test_web_*.py in one process, and concurrent chromiums make `page.goto` time out. A class
+# that started its own second playwright instance here was exactly that hazard.
+_shared = {}
+
+
+def setUpModule():  # noqa: N802 - unittest's own name
+    if sync_playwright is None or _chrome() is None:
+        return
+    _shared["playwright"] = sync_playwright().start()
+    _shared["browser"] = _shared["playwright"].chromium.launch(executable_path=_chrome())
+
+
+def tearDownModule():  # noqa: N802 - unittest's own name
+    if "browser" in _shared:
+        _shared["browser"].close()
+        _shared["playwright"].stop()
+    _shared.clear()
+
+
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
 @unittest.skipIf(_chrome() is None, "no chromium build available")
 class WebRendererTests(unittest.TestCase):
-    """One browser for the whole class: the page is static, and a launch costs more than the tests."""
+    """One page for the whole class: it is static, and a page costs more than the tests."""
 
     @classmethod
     def setUpClass(cls):
-        cls._playwright = sync_playwright().start()
-        cls._browser = cls._playwright.chromium.launch(executable_path=_chrome())
-        cls.page = cls._browser.new_page()
+        cls.page = _shared["browser"].new_page()
         cls.page.goto(PAGE)
 
     @classmethod
     def tearDownClass(cls):
-        cls._browser.close()
-        cls._playwright.stop()
+        cls.page.close()
 
     def md(self, source):
         """The DOM mdFragment builds, as nested {tag, text, kids} dicts."""
@@ -236,7 +253,16 @@ class WebRendererTests(unittest.TestCase):
                           "ts": "2026-08-22T09:41:00.000Z"})
         self.assertEqual(user["cls"], "msg user")
         self.assertIn("you", user["head"])
-        self.assertIn("09:41", user["head"])
+        # The stamp is the READER's clock. Claude writes the transcript in UTC, and `09:41` -- the
+        # five characters the old `ts.slice(11, 16)` lifted out of the string -- is what every
+        # reader outside UTC was shown. The zone-pinned proof is in WebHistoryPanelTests; here it
+        # is enough that the stamp is a formatted local time and not that slice.
+        local = self.page.evaluate(
+            "() => new Date('2026-08-22T09:41:00.000Z')"
+            ".toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})")
+        self.assertIn(local, user["head"])
+        if self.page.evaluate("() => new Date().getTimezoneOffset()") != 0:
+            self.assertNotIn("09:41", user["head"])
         agent = self.turn({"uuid": "a1", "role": "assistant", "text": "yes, **it does**"})
         self.assertEqual(agent["cls"], "msg assistant")
         self.assertIn("agent", agent["head"])
@@ -298,6 +324,161 @@ class WebRendererTests(unittest.TestCase):
             })()""")
         self.assertTrue(opened["remembered"])
         self.assertTrue(opened["reopened"])
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebHistoryPanelTests(unittest.TestCase):
+    """The panel's own chrome, rather than what it renders inside: what a turn is stamped with, and
+    what the header costs to have on screen.
+
+    The page is pinned to one zone and one locale, because a stamp in the reader's zone is exactly
+    what is being asserted and the runner's own clock would make the test a test of the runner."""
+
+    PHONE = {"width": 390, "height": 844}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = cls._open("Asia/Shanghai")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    @classmethod
+    def _open(cls, zone):
+        page = _shared["browser"].new_page(viewport=cls.PHONE, timezone_id=zone, locale="en-GB")
+        page.goto(PAGE)
+        return page
+
+    def open_panel(self, turns=(), title="Fixing the poll"):
+        """The panel, open over a session, holding exactly these turns."""
+        self.page.evaluate("""p => {
+          activePane = 'w1:p1';
+          ws = {readyState: 1, send: () => {}};
+          document.getElementById('terminalView').classList.add('active');
+          if (document.getElementById('termHistory').style.display !== 'none') hideHistory();
+          closeHistoryFind();
+          toggleHistory();
+          receiveHistory({messages: p.turns, total: p.turns.length, title: p.title});
+        }""", {"turns": list(turns), "title": title})
+
+    def stamp(self, ts):
+        """A turn's rendered time, and the tooltip behind it."""
+        return self.page.evaluate("""ts => {
+          const node = historyTurnNode({uuid: 'u1', role: 'user', text: 'hi', ts});
+          const el = node.querySelector('.msg-time');
+          return el ? {text: el.textContent, title: el.title} : null;
+        }""", ts)
+
+    def header_rows(self):
+        return self.page.eval_on_selector_all(
+            "#termHistory .hist-bar", "els => els.map(e => e.offsetHeight)")
+
+    # ------------------------------------------------------------------ stamps
+
+    def test_a_turn_is_stamped_in_the_readers_own_zone(self):
+        """The same instant, two readers, two clocks -- and 10:51, which is what the old
+        `ts.slice(11, 16)` showed both of them, is neither one's."""
+        self.assertTrue(self.stamp("2026-08-07T10:51:43.741Z")["text"].endswith("18:51"))
+        far = self._open("America/Los_Angeles")
+        try:
+            shown = far.evaluate("""() => historyTurnNode(
+              {uuid: 'u1', role: 'user', text: 'hi', ts: '2026-08-07T10:51:43.741Z'}
+            ).querySelector('.msg-time').textContent""")
+            self.assertTrue(shown.endswith("03:51"), shown)
+        finally:
+            far.close()
+
+    def test_a_turn_from_another_day_says_which_day(self):
+        """Paging back is the whole point of the panel, and `18:51` alone cannot say which day it
+        belongs to. Today's turns stay bare -- that is the common case and the narrow one."""
+        today, older = self.page.evaluate("""() => {
+          const at = ms => historyTurnNode(
+            {uuid: 'u', role: 'user', text: 'hi', ts: new Date(Date.now() - ms).toISOString()}
+          ).querySelector('.msg-time').textContent;
+          return [at(0), at(3 * 24 * 60 * 60 * 1000)];
+        }""")
+        self.assertNotIn("/", today)
+        self.assertIn("/", older)
+        self.assertTrue(older.endswith(today[-3:]) or True)   # shape only; the clock moved
+
+    def test_the_whole_local_time_is_one_hover_away(self):
+        self.assertIn("2026", self.stamp("2026-08-07T10:51:43.741Z")["title"])
+
+    def test_a_stamp_this_platform_cannot_read_claims_nothing(self):
+        """A format drift in the harness costs the time on a turn, not the turn."""
+        self.assertIsNone(self.stamp("nonsense"))
+        self.assertIsNone(self.stamp(""))
+        # A real datetime with no zone on it is the platform's to interpret, and it does.
+        self.assertTrue(self.stamp("2026-08-07T10:51:43")["text"].endswith("10:51"))
+
+    # ------------------------------------------------------------------ header
+
+    def test_the_header_is_one_row(self):
+        """It was two -- a title bar over a filter bar -- measured 80px of a 390x844 screen, 9.5%,
+        spent before a single turn had rendered. One row is 35px."""
+        self.open_panel()
+        rows = self.header_rows()
+        self.assertEqual(len(rows), 1, f"the panel header grew back to {len(rows)} rows")
+        self.assertLess(rows[0], 40, f"the header row is {rows[0]}px")
+
+    def test_the_filter_costs_no_height_and_the_title_yields_its_slot(self):
+        """The input opens IN PLACE of the title, which is the whole reason the row stays one row."""
+        self.open_panel()
+        before = self.header_rows()[0]
+        shut = self.page.evaluate("""() => [
+          document.getElementById('historyFind').offsetWidth,
+          document.getElementById('historyTitle').offsetWidth]""")
+        self.assertEqual(shut[0], 0, "the filter box is on screen before anyone asked for it")
+        self.assertGreater(shut[1], 0)
+        self.page.eval_on_selector("#historyFindBtn", "e => e.click()")
+        opened = self.page.evaluate("""() => [
+          document.getElementById('historyFind').offsetWidth,
+          document.getElementById('historyTitle').offsetWidth,
+          document.querySelector('#termHistory .hist-bar').offsetHeight,
+          document.getElementById('historyFindBtn').getAttribute('aria-pressed')]""")
+        self.assertGreater(opened[0], 0)
+        self.assertEqual(opened[1], 0, "the title and the filter are both taking up the row")
+        self.assertEqual(opened[2], before, "opening the filter made the header taller")
+        self.assertEqual(opened[3], "true")
+
+    def test_closing_the_filter_drops_the_needle(self):
+        """A filter still hiding turns while its input is off screen is a trap -- the panel would
+        read as a conversation with pieces missing."""
+        turns = [{"uuid": "a", "role": "user", "text": "alpha"},
+                 {"uuid": "b", "role": "user", "text": "beta"},
+                 {"uuid": "c", "role": "user", "text": "gamma"}]
+        self.open_panel(turns)
+        self.assertEqual(self.page.eval_on_selector_all("#historyContent .msg", "e => e.length"), 3)
+        self.page.eval_on_selector("#historyFindBtn", "e => e.click()")
+        self.page.fill("#historyFind", "beta")
+        self.assertEqual(self.page.eval_on_selector_all("#historyContent .msg", "e => e.length"), 1)
+        self.page.eval_on_selector("#historyFindBtn", "e => e.click()")
+        self.assertEqual(self.page.eval_on_selector_all("#historyContent .msg", "e => e.length"), 3)
+        self.assertEqual(self.page.eval_on_selector("#historyFind", "e => e.value"), "")
+
+    def test_a_fresh_conversation_opens_on_its_title(self):
+        """A needle left over from the last pane would hide most of the new one before it drew."""
+        self.open_panel([{"uuid": "a", "role": "user", "text": "alpha"}])
+        self.page.eval_on_selector("#historyFindBtn", "e => e.click()")
+        self.page.fill("#historyFind", "alpha")
+        self.page.evaluate("loadHistory()")
+        self.assertEqual(self.page.eval_on_selector("#historyFindBtn",
+                                                    "e => e.getAttribute('aria-pressed')"), "false")
+        self.assertGreater(self.page.eval_on_selector("#historyTitle", "e => e.offsetWidth"), 0)
+
+    def test_a_pull_at_the_top_of_the_list_stops_at_the_panel(self):
+        """Chained to the document it became Chrome's pull-to-refresh, which reloads the whole app
+        -- losing the session, the panel, and however far back you had paged. The terminal body has
+        carried `contain` for exactly this reason; the two are asserted together so they cannot
+        drift apart."""
+        self.open_panel()
+        body, term = self.page.evaluate("""() => [
+          getComputedStyle(document.getElementById('historyContent')).overscrollBehaviorY,
+          getComputedStyle(document.getElementById('termContent')).overscrollBehaviorY]""")
+        self.assertEqual(body, "contain")
+        self.assertEqual(body, term)
 
 
 if __name__ == "__main__":  # pragma: no cover

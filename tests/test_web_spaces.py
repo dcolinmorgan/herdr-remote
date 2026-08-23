@@ -1,14 +1,14 @@
-"""Tests for the two things that make the workspace the unit of the web app rather than a filter.
+"""Tests for the two orderings the web app runs on, and the navigation between them.
 
-The unfiltered list groups by workspace, agents and terminals together, because that is what herdr
-itself groups by -- `workspace list` reports a `worktree` block for a git one -- and because status
-grouping put a real host's wT agent and wT build terminal twenty rows apart. The session view then
-carries a strip of the open pane's neighbours, split into the ones sharing its tab and the rest of
-its workspace: measured on that host, at most three tabmates and at most five panes in a space, so
-a strip is the whole control.
+The herd list is `triage` -- what needs you, then what is newly ready, then what is running, then
+everything else -- with the space and the tab riding on the row rather than becoming headings above
+it. Picking a space groups its panes by tab, agents and terminals together, because that is the one
+view where "what is in this tab" is the question. The session view then carries herdr's own two
+levels below the space: the tabs of this space, then the panes of this tab, so an agent, a tab or a
+terminal is reachable by name without backing out to the list.
 
-Both are claims about what a thumb finds on the screen, so all of it is asserted against the
-rendered DOM and, where it is geometry, against measured boxes rather than the CSS.
+All of it is a claim about what a thumb finds on the screen, so it is asserted against the rendered
+DOM and, where it is geometry, against measured boxes rather than the CSS.
 
 Skipped, not failed, when playwright or a chromium build is missing.
 """
@@ -492,8 +492,14 @@ class WebPaneNamingTests(unittest.TestCase, _Page):
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
 @unittest.skipIf(_chrome() is None, "no chromium build available")
-class WebSiblingStripTests(unittest.TestCase):
-    """The session view's strip of neighbours."""
+class WebSessionNavTests(unittest.TestCase):
+    """The two rows under the session header: the space's tabs, then the tab's panes.
+
+    What they replaced was one flat row of the OTHER panes in the workspace, tagged `Tab` and
+    `Space`, each chip named `label || pane_id`. On the measured host 28 of the 30 panes carry no
+    operator label, so that row read `w6:pH  w6:pQ  w6:pR`: three chips whose names differ by one
+    character, no mark for the pane you were standing in, and no way to reach a tab by name at all.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -505,109 +511,95 @@ class WebSiblingStripTests(unittest.TestCase):
         cls.page.close()
 
     def setUp(self):
+        # The panels outlive a snapshot -- openTerminal only closes them on a real pane switch, so a
+        # test that reopens the same pane would inherit whatever the last one left open.
         self.page.evaluate("""s => {
           activeWorkspace = null; activeTab = null;
+          hideHistory();
+          hideSearch();
           handleMessage(s);
           window.__sent = [];
           paneProcess = {};
           ws = {readyState: 1, send: p => window.__sent.push(JSON.parse(p))};
         }""", SNAPSHOT)
 
-    def strip(self):
-        """The strip's contents in order: ('label', text) or ('chip', id, is_shell)."""
-        return self.page.eval_on_selector_all("#termSiblings > *", """els => els.map(e =>
-          e.classList.contains('sib-label')
-            ? ['label', e.textContent]
-            : ['chip', e.dataset.sibId, e.dataset.sibShell === '1'])""")
+    def strip(self, sel):
+        """A strip in order: ('chip', id, name, tag, is-where-you-are)."""
+        return self.page.eval_on_selector_all(f"{sel} .term-sib", """els => els.map(e =>
+          ['chip', e.dataset.sibId || e.dataset.sibTab, e.children[1].textContent,
+           (e.querySelector('.sib-tag') || {textContent: ''}).textContent,
+           e.getAttribute('aria-current') === 'true'])""")
 
-    def visible(self):
-        return self.page.eval_on_selector("#termSiblings", "e => e.offsetHeight") > 0
+    def tabs(self):
+        return self.strip("#termTabs")
 
-    def test_an_agents_neighbours_are_split_by_tab(self):
-        """The distinction herdr itself draws: a tabmate is on the operator's screen beside this
-        pane, anything else in the space is a tab away."""
+    def panes(self):
+        return self.strip("#termSiblings")
+
+    def visible(self, sel):
+        return self.page.eval_on_selector(sel, "e => e.offsetHeight") > 0
+
+    def names(self, sel="#termSiblings"):
+        return [c[2] for c in self.strip(sel) if c[0] == "chip"]
+
+    # -------------------------------------------------------------- the levels
+
+    def test_the_session_view_carries_herdrs_own_two_levels_below_the_space(self):
+        """space > tab > pane, of which the space is the one left to the herd list -- a tap on Back.
+        wA:pH sits in wA:t1 beside a terminal, with a second tab holding one more."""
         self.page.evaluate("openTerminal('wA:pH')")
-        self.assertEqual(self.strip(), [
-            ["label", "Tab"], ["chip", "wA:p2", True],
-            ["label", "Space"], ["chip", "wA:p3", True],
+        self.assertEqual(self.tabs(), [
+            ["chip", "wA:t1", "Tab 1", "", True],
+            ["chip", "wA:t2", "deploy", "", False],
+        ])
+        self.assertEqual(self.panes(), [
+            ["chip", "wA:p2", "api", "p2", False],
+            ["chip", "wA:pH", "claude", "pH", True],
         ])
 
-    def test_the_second_label_is_absent_when_every_neighbour_is_a_tabmate(self):
-        self.page.evaluate("openTerminal('wB:pH')")
-        self.assertEqual(self.strip(), [["label", "Tab"], ["chip", "wB:p2", True]])
-
-    def test_a_pane_with_no_neighbours_costs_no_pixels(self):
-        """Three of the ten agent panes on the measured host have no terminal beside them."""
-        self.page.evaluate("openTerminal('wD:pH')")
-        self.assertEqual(self.strip(), [])
-        self.assertFalse(self.visible())
-
-    def test_from_a_terminal_the_agent_is_one_tap_back(self):
-        """Same rule read the other way -- the strip is every other pane in the workspace."""
-        self.page.evaluate("openTerminal('wA:p2')")
-        self.assertEqual(self.strip(), [
-            ["label", "Tab"], ["chip", "wA:pH", False],
-            ["label", "Space"], ["chip", "wA:p3", True],
-        ])
-
-    def test_a_chip_carries_the_same_mark_its_card_does(self):
-        """Hollow for a terminal, the agent's own status colour otherwise -- so the strip needs no
-        legend of its own, and the two places cannot come to disagree about a pane."""
-        self.page.evaluate("openTerminal('wA:p2')")
-        card, chip, shell = self.page.evaluate("""() => {
-          const g = sel => { const c = getComputedStyle(document.querySelector(sel));
-                             return [c.backgroundColor, c.borderStyle]; };
-          return [g('#agents [data-pane-id="wA:pH"] .dot'),
-                  g('#termSiblings [data-sib-id="wA:pH"] .dot'),
-                  g('#termSiblings [data-sib-id="wA:p3"] .dot')];
+    def test_the_pane_you_are_in_is_in_the_strip_and_marked(self):
+        """The old row listed the OTHER panes, so a row of chips had no `you are here` in it. Blue
+        is selection everywhere else on this page, and this is a selection."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        fills = self.page.evaluate("""() => {
+          const bg = sel => getComputedStyle(document.querySelector(sel)).backgroundColor;
+          return [bg('#termSiblings [data-sib-id="wA:pH"]'),
+                  bg('#termSiblings [data-sib-id="wA:p2"]'),
+                  bg('#termTabs [data-sib-tab="wA:t1"]'),
+                  bg('#termTabs [data-sib-tab="wA:t2"]')];
         }""")
-        self.assertEqual(chip[0], card[0], "the chip and the card disagree about a working agent")
-        self.assertEqual(chip[1], "none")
-        self.assertNotEqual(shell[1], "none")
-        self.assertIn(shell[0], ("rgba(0, 0, 0, 0)", "transparent"))
+        self.assertEqual(fills[0], fills[2], "the open pane and its tab are marked differently")
+        self.assertNotEqual(fills[0], fills[1], "the open pane's chip looks like its neighbour's")
+        self.assertEqual(fills[1], fills[3])
 
-    def test_a_chip_never_names_a_pane_after_something_its_siblings_share(self):
-        """`project` is one string per workspace, so it identifies nothing inside one -- on the real
-        host it produced a chip reading `tmp-workspace` under a header reading `tmp-workspace`, and
-        w6's three agents would have been three identical chips. Directories are no better: those 20
-        shell panes collapse to 12 distinct cwd basenames within their own spaces."""
-        self.page.evaluate("openTerminal('wA:p2')")
-        names = self.page.eval_on_selector_all(
-            "#termSiblings .term-sib", "els => els.map(e => e.innerText.trim())")
-        self.assertEqual(names, ["wA:pH", "wA:p3"])        # both unlabelled -> both by id
-        self.page.evaluate("openTerminal('wA:pH')")
-        self.assertNotIn("api", self.page.eval_on_selector("#termSiblings", "e => e.innerText"))
+    def test_one_tab_is_not_a_choice(self):
+        """6 of the 10 agent panes measured sit in a single-tab space, and would each have paid a
+        row to be told the name of the only tab there is."""
+        self.page.evaluate("openTerminal('wB:pH')")
+        self.assertEqual(self.tabs(), [])
+        self.assertFalse(self.visible("#termTabs"))
+        # wB:p2's `project` is `billing` and its cwd is /work/api. The chip says `api`, which is
+        # the directory -- the field that belongs to the pane rather than to the whole worktree.
+        self.assertEqual(self.names(), ["api", "claude"])
 
-    def test_an_operators_own_label_still_wins(self):
+    def test_a_tab_with_no_pane_to_land_on_is_not_a_chip(self):
+        """There is no CLI for pointing the web client at an empty tab, and a chip that does nothing
+        is worse than no chip. It is also what keeps the row honest with HERDR_SHELL_PANES off: it
+        becomes the tabs that hold agents."""
         self.page.evaluate("""() => {
-          shellPanes.find(p => p.pane_id === 'wA:p3').label = 'build';
+          shellPanes = shellPanes.filter(p => p.pane_id !== 'wA:p3');   // wA:t2 is now empty
+          render();
           openTerminal('wA:pH');
         }""")
-        self.assertEqual(
-            self.page.eval_on_selector_all("#termSiblings .term-sib",
-                                           "els => els.map(e => e.innerText.trim())"),
-            ["wA:p2", "build"])
+        self.assertEqual(self.tabs(), [])
+        self.assertFalse(self.visible("#termTabs"))
 
-    def test_tapping_a_chip_switches_pane(self):
-        self.page.evaluate("openTerminal('wA:pH')")
-        self.page.eval_on_selector('#termSiblings [data-sib-id="wA:p3"]', "e => e.click()")
-        self.assertEqual(self.page.evaluate("activePane"), "wA:p3")
-        # And the strip is redrawn around the pane that is now open: wA:p3 sits alone in
-        # wA:t2, so its two neighbours are a tab away rather than beside it.
-        self.assertEqual(self.strip(), [
-            ["label", "Space"], ["chip", "wA:pH", False], ["chip", "wA:p2", True],
-        ])
-
-    def test_a_terminal_appearing_beside_the_open_pane_shows_up_without_a_reopen(self):
-        """Every `agents` snapshot redraws it -- panes come and go while a session is open."""
-        self.page.evaluate("openTerminal('wB:pH')")
-        self.assertEqual(len([c for c in self.strip() if c[0] == "chip"]), 1)
-        self.page.evaluate("""s => {
-          const grown = JSON.parse(JSON.stringify(s));
-          grown.panes.push({...grown.panes[2], pane_id: 'wB:p9'});
-          handleMessage(grown);
-        }""", SNAPSHOT)
-        self.assertEqual([c[1] for c in self.strip() if c[0] == "chip"], ["wB:p2", "wB:p9"])
+    def test_a_pane_with_nothing_beside_it_costs_no_pixels(self):
+        """Three of the ten agent panes on the measured host have no pane beside them."""
+        self.page.evaluate("openTerminal('wD:pH')")
+        self.assertEqual(self.panes(), [])
+        self.assertFalse(self.visible("#termSiblings"))
+        self.assertFalse(self.visible("#termTabs"))
 
     def test_with_no_shell_panes_the_session_view_is_exactly_what_it_was(self):
         """HERDR_SHELL_PANES off: the relay ships no `panes` key, and wA:pH's only neighbours were
@@ -615,30 +607,169 @@ class WebSiblingStripTests(unittest.TestCase):
         without = {k: v for k, v in SNAPSHOT.items() if k != "panes"}
         self.page.evaluate("s => { shellPanes = []; handleMessage(s); openTerminal('wA:pH'); }",
                            without)
-        self.assertEqual(self.strip(), [])
-        self.assertFalse(self.visible())
+        self.assertEqual(self.panes(), [])
+        self.assertEqual(self.tabs(), [])
+        self.assertFalse(self.visible("#termSiblings"))
 
-    def test_one_chip_per_pane_even_when_a_pane_is_in_both_arrays(self):
-        """A `blocked` push adds an agent record for a pane that may still be in shellPanes, and
-        paneById's own comment admits the overlap. Two chips for one pane, one hollow and one
-        coloured, would read as two panes."""
+    # --------------------------------------------------------------- the names
+
+    def test_a_chip_is_named_by_what_the_pane_can_still_say_for_itself(self):
+        """28 of 30 panes carry no label, so `label || pane_id` was the pane id -- which is the one
+        thing on the chip that reads as machine output. An agent falls back to its harness, a
+        terminal to its directory, and `project` is never in it: the relay sets that to
+        basename(cwd), which by construction every pane in one worktree shares."""
         self.page.evaluate("""() => {
-          agents.push({...shellPanes.find(p => p.pane_id === 'wA:p2'),
-                       agent: 'claude', status: 'blocked'});
+          shellPanes.find(p => p.pane_id === 'wA:p2').cwd = '/work/api/build';
           openTerminal('wA:pH');
         }""")
-        self.assertEqual([c[1] for c in self.strip() if c[0] == "chip"], ["wA:p2", "wA:p3"])
+        self.assertEqual(self.names(), ["build", "claude"])
+        self.assertEqual(self.page.evaluate("agents.find(a => a.pane_id === 'wA:pH').project"),
+                         "api")
 
-    def test_no_tab_hierarchy_means_no_tab_claim(self):
-        """`Tab` says these panes are on the operator's screen beside this one. With no tab ids to
-        go by there is nothing to base that on, so everything is simply elsewhere in the space."""
+    def test_a_working_agent_is_named_by_what_it_says_it_is_doing(self):
+        """herdr's terminal title with the harness banner stripped -- 2 of the 10 agent panes
+        measured were saying something real, and both were the two you would want to find."""
         self.page.evaluate("""() => {
-          [...agents, ...shellPanes].forEach(p => { delete p.tab_id; });
-          spaces = {workspaces: spaces.workspaces, tabs: []};
+          agents.find(a => a.pane_id === 'wA:pH').title = 'fixing the poll';
           openTerminal('wA:pH');
         }""")
-        self.assertEqual(self.strip(), [
-            ["label", "Space"], ["chip", "wA:p2", True], ["chip", "wA:p3", True]])
+        self.assertEqual(self.names(), ["api", "fixing the poll"])
+
+    def test_an_operators_own_label_still_wins(self):
+        self.page.evaluate("""() => {
+          shellPanes.find(p => p.pane_id === 'wA:p2').label = 'build';
+          agents.find(a => a.pane_id === 'wA:pH').label = 'poller';
+          agents.find(a => a.pane_id === 'wA:pH').title = 'fixing the poll';
+          openTerminal('wA:pH');
+        }""")
+        self.assertEqual(self.names(), ["build", "poller"])
+
+    def test_the_pane_ids_own_suffix_is_the_handle_when_the_name_repeats(self):
+        """Three shells sitting in `herdr`, three claudes in one tab: the name is routinely shared
+        by every chip in the strip, and this is the only part that separates them."""
+        self.page.evaluate("""() => {
+          shellPanes.push({...shellPanes.find(p => p.pane_id === 'wA:p2'), pane_id: 'wA:p9'});
+          render();
+          openTerminal('wA:pH');
+        }""")
+        chips = [c for c in self.panes() if c[0] == "chip"]
+        self.assertEqual([c[2] for c in chips], ["api", "api", "claude"])
+        self.assertEqual([c[3] for c in chips], ["p2", "p9", "pH"])
+
+    def test_a_tab_is_named_by_its_label_and_a_bare_number_says_it_is_positional(self):
+        """herdr labels an unlabelled tab by its POSITION, so a chip reading `2` beside one reading
+        `deploy` would look like a name someone chose."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        self.assertEqual([c[2] for c in self.tabs() if c[0] == "chip"], ["Tab 1", "deploy"])
+
+    def test_the_two_rows_are_told_apart_without_spending_a_word_on_it(self):
+        """A written `Tabs` / `Panes` label cost 40px of the row including its gap, and 4 of the 5
+        rows that scrolled on the real host overflowed by less than that. So the tab is squarer than
+        the pane, the pane carries the id tag the tab has not got, and the name of each row lives on
+        its aria-label, where it is still announced and costs nothing."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        shape = self.page.evaluate("""() => [
+          getComputedStyle(document.querySelector('#termTabs .term-sib')).borderTopLeftRadius,
+          getComputedStyle(document.querySelector('#termSiblings .term-sib')).borderTopLeftRadius,
+          document.getElementById('termTabs').getAttribute('aria-label'),
+          document.getElementById('termSiblings').getAttribute('aria-label')]""")
+        self.assertNotEqual(shape[0], shape[1], "a tab chip and a pane chip are the same shape")
+        self.assertIn("Tab", shape[2])
+        self.assertIn("Pane", shape[3])
+        self.assertEqual([c[3] for c in self.tabs()], ["", ""])   # no id tag on a tab
+
+    # -------------------------------------------------------------- the marks
+
+    def test_a_chip_carries_the_same_mark_its_card_does(self):
+        """Hollow for a terminal, the bucket's colour otherwise -- so the strip needs no legend of
+        its own, and the two places cannot come to disagree about a pane."""
+        self.page.evaluate("openTerminal('wA:p2')")
+        card, chip, shell = self.page.evaluate("""() => {
+          const g = sel => { const c = getComputedStyle(document.querySelector(sel));
+                             return [c.backgroundColor, c.borderStyle]; };
+          return [g('#agents [data-pane-id="wA:pH"] .dot'),
+                  g('#termSiblings [data-sib-id="wA:pH"] .dot'),
+                  g('#termSiblings [data-sib-id="wA:p2"] .dot')];
+        }""")
+        self.assertEqual(chip[0], card[0], "the chip and the card disagree about a working agent")
+        self.assertEqual(chip[1], "none")
+        self.assertNotEqual(shell[1], "none")
+        self.assertIn(shell[0], ("rgba(0, 0, 0, 0)", "transparent"))
+
+    def test_a_tab_chip_says_what_is_going_on_inside_it(self):
+        """The same classifier as the card and the section header. A tab holding only terminals gets
+        the hollow dot -- worstTriage declining to invent a resting state for a pane that has none."""
+        self.page.evaluate("""() => {
+          agents.push({...agents.find(a => a.pane_id === 'wA:pH'),
+                       pane_id: 'wA:pX', tab_id: 'wA:t2', status: 'blocked'});
+          render();
+          openTerminal('wA:pH');
+        }""")
+        blocked, terminals = self.page.evaluate("""() => {
+          const g = sel => { const c = getComputedStyle(document.querySelector(sel));
+                             return [c.backgroundColor, c.borderStyle]; };
+          return [g('#termTabs [data-sib-tab="wA:t2"] .dot'),
+                  g('#termTabs [data-sib-tab="wA:t1"] .dot')];
+        }""")
+        red = self.page.eval_on_selector(
+            '#agents [data-bucket="needs"] .dot', "e => getComputedStyle(e).backgroundColor")
+        self.assertEqual(blocked[0], red)
+        self.page.evaluate("""() => {
+          agents = agents.filter(a => a.pane_id !== 'wA:pH' && a.pane_id !== 'wA:pX');
+          render();
+          openTerminal('wA:p2');
+        }""")
+        hollow = self.page.eval_on_selector('#termTabs [data-sib-tab="wA:t2"] .dot',
+                                            "e => getComputedStyle(e).borderStyle")
+        self.assertNotEqual(hollow, "none", "a tab of terminals was given a status it does not have")
+
+    # --------------------------------------------------------------- the taps
+
+    def test_tapping_a_pane_chip_switches_pane(self):
+        self.page.evaluate("openTerminal('wA:pH')")
+        self.page.eval_on_selector('#termSiblings [data-sib-id="wA:p2"]', "e => e.click()")
+        self.assertEqual(self.page.evaluate("activePane"), "wA:p2")
+        # And the strips are redrawn around the pane that is now open.
+        self.assertEqual([c[4] for c in self.panes() if c[0] == "chip"], [True, False])
+
+    def test_tapping_a_tab_lands_on_the_pane_in_it_that_needed_you(self):
+        """Ranked through `bucketOf` like everything else on this page, so the tap goes to whatever
+        would have been highest in the herd list -- if something in there is blocked, that is what
+        you meant."""
+        self.page.evaluate("""() => {
+          agents.push({...agents.find(a => a.pane_id === 'wB:pH'),
+                       pane_id: 'wA:pX', workspace_id: 'wA', tab_id: 'wA:t2', status: 'blocked'});
+          render();
+          openTerminal('wA:pH');
+        }""")
+        self.page.eval_on_selector('#termTabs [data-sib-tab="wA:t2"]', "e => e.click()")
+        self.assertEqual(self.page.evaluate("activePane"), "wA:pX")
+        # The tabs row follows you across; the panes row is now that tab's.
+        self.assertEqual([c[1] for c in self.tabs() if c[0] == "chip" and c[4]], ["wA:t2"])
+        self.assertEqual([c[1] for c in self.panes() if c[0] == "chip"], ["wA:p3", "wA:pX"])
+
+    def test_a_tab_with_only_terminals_in_it_is_still_reachable(self):
+        """The landing rule falls through to the first terminal -- a build log is a place to go."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        self.page.eval_on_selector('#termTabs [data-sib-tab="wA:t2"]', "e => e.click()")
+        self.assertEqual(self.page.evaluate("activePane"), "wA:p3")
+        # wA:p3 is alone in wA:t2, so there is nothing to switch to and the panes row goes away --
+        # while the tabs row stays, because that is the level that still has a choice on it.
+        self.assertFalse(self.visible("#termSiblings"))
+        self.assertTrue(self.visible("#termTabs"))
+
+    def test_the_tab_you_are_already_in_is_inert(self):
+        """Re-entering openTerminal would close the history panel you have open for no reason."""
+        self.page.evaluate("openTerminal('wA:pH'); toggleHistory()")
+        self.page.eval_on_selector('#termTabs [data-sib-tab="wA:t1"]', "e => e.click()")
+        self.assertEqual(self.page.evaluate("activePane"), "wA:pH")
+        self.assertNotEqual(
+            self.page.eval_on_selector("#termHistory", "e => e.style.display"), "none")
+
+    def test_from_a_terminal_the_agent_is_one_tap_back(self):
+        """Same rule read the other way -- the row is every pane in the tab, whichever kind."""
+        self.page.evaluate("openTerminal('wA:p2')")
+        self.assertEqual([c[1] for c in self.panes() if c[0] == "chip"], ["wA:p2", "wA:pH"])
 
     def test_switching_pane_from_the_strip_does_not_carry_the_search_over(self):
         """`originalContent` is one global holding the open pane's output. Switching with the search
@@ -662,24 +793,68 @@ class WebSiblingStripTests(unittest.TestCase):
         self.assertIn("BBB-pane-B-output",
                       self.page.eval_on_selector("#termContent", "e => e.innerHTML"))
 
-    def test_the_strip_costs_a_bounded_slice_of_a_phone_screen(self):
-        """It sits above the output, and the output is the point. Measured at 390x844."""
+    # ------------------------------------------------------- what stays honest
+
+    def test_a_terminal_appearing_beside_the_open_pane_shows_up_without_a_reopen(self):
+        """Every `agents` snapshot redraws both rows -- panes come and go while a session is open."""
+        self.page.evaluate("openTerminal('wB:pH')")
+        self.assertEqual(self.names(), ["api", "claude"])
+        self.page.evaluate("""s => {
+          const grown = JSON.parse(JSON.stringify(s));
+          grown.panes.push({...grown.panes[2], pane_id: 'wB:p9'});
+          handleMessage(grown);
+        }""", SNAPSHOT)
+        self.assertEqual([c[1] for c in self.panes() if c[0] == "chip"],
+                         ["wB:p2", "wB:p9", "wB:pH"])
+
+    def test_one_chip_per_pane_even_when_a_pane_is_in_both_arrays(self):
+        """A `blocked` push adds an agent record for a pane that may still be in shellPanes, and
+        paneById's own comment admits the overlap. Two chips for one pane, one hollow and one
+        coloured, would read as two panes."""
+        self.page.evaluate("""() => {
+          agents.push({...shellPanes.find(p => p.pane_id === 'wA:p2'),
+                       agent: 'claude', status: 'blocked'});
+          openTerminal('wA:pH');
+        }""")
+        self.assertEqual([c[1] for c in self.panes() if c[0] == "chip"], ["wA:p2", "wA:pH"])
+
+    def test_no_tab_hierarchy_means_no_tab_row_and_the_space_as_the_pane_row(self):
+        """With no tab ids to go by there is no level below the space to draw, and the panes row
+        falls back to the set it used to show."""
+        self.page.evaluate("""() => {
+          [...agents, ...shellPanes].forEach(p => { delete p.tab_id; });
+          spaces = {workspaces: spaces.workspaces, tabs: []};
+          openTerminal('wA:pH');
+        }""")
+        self.assertEqual(self.tabs(), [])
+        self.assertEqual([c[1] for c in self.panes() if c[0] == "chip"],
+                         ["wA:p2", "wA:p3", "wA:pH"])
+
+    def test_the_two_rows_cost_a_bounded_slice_of_a_phone_screen(self):
+        """They sit above the output, and the output is the point. Measured at 390x844, with both
+        rows showing -- which is 4 of the 10 agent panes on the measured host; the other 6 pay for
+        one."""
         self.page.evaluate("openTerminal('wA:pH')")
-        height, screen = self.page.evaluate(
-            "() => [document.getElementById('termSiblings').offsetHeight, window.innerHeight]")
-        self.assertGreater(height, 0)
-        self.assertLess(height / screen, 0.045, f"the strip grew to {height}px of {screen}px")
+        tabs, panes, screen = self.page.evaluate("""() => [
+          document.getElementById('termTabs').offsetHeight,
+          document.getElementById('termSiblings').offsetHeight,
+          window.innerHeight]""")
+        self.assertGreater(tabs, 0)
+        self.assertGreater(panes, 0)
+        self.assertLess((tabs + panes) / screen, 0.08,
+                        f"the two rows grew to {tabs + panes}px of {screen}px")
 
     def test_the_history_panel_still_covers_everything_under_the_header(self):
-        """The strip is in normal flow, so a panel opened over the output covers it too -- the same
-        geometry the panel already had, which is why positionHistoryPanel is untouched."""
+        """Both rows are in normal flow, so a panel opened over the output covers them too -- the
+        same geometry the panel already had, which is why positionHistoryPanel is untouched."""
         self.page.evaluate("openTerminal('wA:pH'); toggleHistory()")
-        covered = self.page.evaluate("""() => {
-          const s = document.getElementById('termSiblings').getBoundingClientRect();
-          const el = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
-          return document.getElementById('termHistory').contains(el);
-        }""")
-        self.assertTrue(covered, "the sibling strip was reachable through the history panel")
+        for sel in ("#termTabs", "#termSiblings"):
+            covered = self.page.evaluate("""sel => {
+              const s = document.querySelector(sel).getBoundingClientRect();
+              const el = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2);
+              return document.getElementById('termHistory').contains(el);
+            }""", sel)
+            self.assertTrue(covered, f"{sel} was reachable through the history panel")
 
 
 if __name__ == "__main__":  # pragma: no cover

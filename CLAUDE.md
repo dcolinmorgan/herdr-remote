@@ -125,10 +125,37 @@ holds and is what makes the escaping provable rather than remembered.
   rather than real `h1`s so an agent's `#` cannot outrank the panel's own title.
 - `diffFragment` colours `+`/`-`/context lines and moves the marker into its own gutter cell, so
   the code keeps its real indentation instead of being shifted a column.
+- A turn is stamped in the **reader's** zone, not the file's. Claude writes every transcript
+  timestamp in UTC — all 4,450 rows sampled here end in `Z` — and this was `ts.slice(11, 16)`, five
+  characters lifted straight out of the string, so a turn made at 17:08 in UTC+8 read 09:08.
+  `turnStamp` parses it and formats through `toLocaleTimeString`; the **date rides along when the
+  turn is not from today**, because paging back is the whole point of the panel and a bare `18:51`
+  cannot say which day it belongs to. A string the platform will not parse falls back to the old
+  slice, and an empty fallback yields no stamp rather than a blank one.
 - Renderer behaviour is tested in a real browser: `tests/test_web_history.py` loads
   `web/index.html` over `file://` with playwright and asserts the DOM (skipped, not failed, where
-  playwright or chromium is missing; `tests/run.sh` step 9d runs every `tests/test_web_*.py`
-  separately with playwright on the path).
+  playwright or chromium is missing; `tests/run.sh` step 9d runs every `tests/test_web_*.py` in one
+  process with playwright on the path, which is why each file shares **one** browser at module
+  scope — a class that started a second playwright instance is the contention that makes
+  `page.goto` time out). `WebHistoryPanelTests` pins the page to `Asia/Shanghai` and `en-GB` and
+  reopens it as `America/Los_Angeles`, because "the reader's zone" is exactly the claim and the
+  runner's own clock would make it a test of the runner.
+
+The panel's header is **one row**, and the filter opens *in place of* the conversation title
+(`toggleHistoryFind`) rather than beside it. It was two rows — a title bar over a filter bar,
+measured **80px of a 390×844 screen, 9.5%, spent before a single turn had rendered** — and the
+filter, which is only wanted while you are looking for something, paid for its input box
+permanently. It is 35px now, and the same 35px in both states: every child of that flex row is
+pinned to 22px, because the row's height is set by its tallest child and an input even two pixels
+taller than a chip would make the header jump every time the filter opened. Closing the filter
+**drops the needle** — one still hiding turns while its input is off screen would read as a
+conversation with pieces missing — and a fresh page closes it, so a needle cannot survive into the
+next conversation.
+
+The list carries **`overscroll-behavior: contain`**, for the same reason `.term-content` does: at
+the top of it a downward drag chained to the document and handed Chrome its pull-to-refresh, which
+reloads the whole app — losing the open session, the panel, and however far back you had paged. The
+two are asserted together so they cannot drift apart.
 
 The history panel asks for tool turns **by default** (`history_.tools` starts `true`). The relay's
 own default is still `include_tools: false` — this is the web client's choice, because a tool call
@@ -230,22 +257,53 @@ vanishing.
   the tab's **position** in its space while the number is a separate counter; comparing the two
   called that a rename and rendered a heading reading `2` beside one reading `Tab 1`.
 
-**The session view carries a strip of the open pane's neighbours** (`renderSiblings`), split into
-the ones sharing its tab and the rest of its workspace — the distinction herdr itself draws, since
-a tabmate is a pane the operator has on screen beside this one. It is the whole control rather than
-a menu because the set is tiny: measured on that host, **at most 3 tabmates and at most 5 panes in
-a workspace**, and 7 of the 10 agent panes have at least one terminal beside them. It costs **32px,
-3.8% of a 390×844 screen**, and nothing at all for the other 3 — or for every pane when
-`HERDR_SHELL_PANES` is off, which is the same "renders exactly as before" guarantee the list has.
-It sits in **normal flow** under the header, which is why the absolutely-positioned history panel
-covers it exactly as it already covered the output and `positionHistoryPanel` is untouched. The
-search bar is in that same flow *after* it, so opening search pushes the output down rather than
-hiding the strip. It is rebuilt from every `agents`
-snapshot, so a terminal appearing beside the open pane shows up without a reopen. A chip is DOM
-nodes, not an HTML string; it carries the same hollow-or-status-coloured dot its card does, so the
-strip needs no legend and the two places cannot come to disagree about a pane; and it is named by
-`label` or the pane id, **never** `project` — that produced a chip reading `tmp-workspace` under a
-title reading `tmp-workspace`.
+**The session view carries herdr's own two levels below the space** (`renderSiblings` →
+`renderTabStrip` / `renderPaneStrip`, ported from Collie's `TabStrip` + `PaneStrip`): the tabs of
+this space, then the panes of this tab. The space above them is the level left to the herd list,
+which is a tap on Back. Both rows are DOM nodes, both are rebuilt from every `agents` snapshot — so
+a terminal appearing beside the open pane shows up without a reopen — and each is **hidden outright
+when it holds no choice**: the tabs row unless the space has two *reachable* tabs (6 of the 10 agent
+panes measured sit in a single-tab space), the panes row unless the tab holds a second pane (10 of
+10 do, so that is the row which always shows). Together **66px, 7.8% of a 390×844 screen**; 33px for
+the six panes that only get the lower row; nothing at all when `HERDR_SHELL_PANES` is off and each
+tab holds one agent, which is the same "renders exactly as before" guarantee the list has. Both sit
+in **normal flow** under the header, which is why the absolutely-positioned history panel covers
+them exactly as it already covered the output and `positionHistoryPanel` is untouched. The search
+bar is in that same flow *after* them, so opening search pushes the output down rather than hiding
+them.
+
+What that replaced was one flat row of the *other* panes in the workspace, tagged `Tab` and `Space`,
+each chip named `label || pane_id`. Three things were wrong with it, and each is now a rule:
+
+- **A pane is named by what it can still say for itself** (`paneChipName`, Collie's
+  `paneDisplayName`): the operator's label, then — for an agent — the activity `title` it is
+  reporting, then the harness name; for a terminal, its cwd basename, then `shell`. **28 of the 30
+  panes on the measured host carry no label at all**, so `label || pane_id` *was* the pane id: the
+  row read `w6:pH  w6:pQ  w6:pR`, three chips whose names differ by one character. `project` is
+  never in it — the relay sets that to `basename(cwd)`, which by construction every pane in one
+  worktree shares. The pane id's **suffix** rides along as a muted tag, because a name is routinely
+  shared by every chip in the row (three shells in `herdr`, three claudes in one tab) and the suffix
+  is the only part that separates them.
+- **The pane you are standing in is in the row, filled.** The old row listed the others, so a row of
+  chips had no *you are here* in it. Blue is selection everywhere else on this page, and this is a
+  selection; the open pane and its tab carry it, and `aria-current` is what the CSS fills off.
+- **A tab is reachable by name.** Tapping one lands on `tabLandingPane` — the neediest agent in it
+  by `bucketOf`, and failing that its first terminal — so the tap goes to whatever would have been
+  highest in the herd list. A tab with no pane the client can name is **not a chip**: there is no CLI
+  for pointing at an empty tab, and that is also what keeps the row honest with `HERDR_SHELL_PANES`
+  off, where it becomes the tabs holding agents. The tab you are in is inert rather than
+  re-entering `openTerminal` and closing the panel you have open.
+
+A chip carries the same dot its card does, from the same `bucketOf`/`worstTriage` the herd uses, so
+the rows need no legend and the two places cannot disagree about a pane. **Neither row is labelled
+in words**: measured at 390×844, a `Tabs` / `Panes` label cost 40px of the row including its gap,
+and 4 of the 5 rows that scrolled on the real host overflowed by *less* than that (3px, 13px, 17px,
+41px) — so the label is on the strip's `aria-label`, where it is still announced and costs nothing,
+and the distinction is carried by shape (a tab chip is squarer) and by the id tag a tab has not got.
+A chip's own height is **fixed at 22px rather than padded**, because a name taken from an activity
+title carries CJK, whose glyphs are taller than latin at the same size, and the row grew 2px whenever
+one appeared; the name is capped at `min(32vw, 260px)` with the whole of it in the tooltip, since one
+205px title chip would otherwise be most of a 390px row.
 
 Every toggle in the session view says whether its panel is open through **`aria-pressed`**, and the
 CSS fills the chip off that attribute alone — `setPressed` is the only writer, so the pixels and the
