@@ -1315,6 +1315,79 @@ class RelayQuestionTests(unittest.TestCase):
             self.assertIn("prompt changed", json.loads(ws.sent[-1])["message"])
 
 
+class RelayKeyGrammarTests(unittest.TestCase):
+    """The relay forwards keys in herdr's grammar, not tmux's.
+
+    Live-verified against herdr 0.8.0 (protocol 19) on a throwaway session: `C-c` is the only
+    tmux-style spelling herdr still aliases, `BSpace` was never valid, and the `+`-joined chords
+    the web app composes at runtime are.
+    """
+
+    # herdr matches special names case-insensitively, so a client spelling `esc` or `shift+tab`
+    # in lower case is not wrong.
+    ACCEPTED = ("ctrl+c", "shift+tab", "alt+Up", "ctrl+shift+p", "C-c", "Enter", "Escape",
+                "esc", "tab", "Space", "Backspace", "F5", "f12", "Up", "1", "y")
+    REJECTED = ("BSpace", "BTab", "PageUp", "PageDown", "Home", "End", "Insert", "Delete",
+                "C-u", "M-x", "cmd+q", "ctrl+", "+c", "", "nonsense", "ctrl+ctrl+c")
+
+    def test_key_grammar_matches_what_herdr_accepts(self):
+        with loaded_relay() as relay:
+            for key in self.ACCEPTED:
+                with self.subTest(key=key):
+                    self.assertTrue(relay.key_is_allowed(key), f"{key!r} must be forwarded")
+            for key in self.REJECTED:
+                with self.subTest(key=key):
+                    self.assertFalse(relay.key_is_allowed(key), f"{key!r} must be refused")
+
+    def test_non_string_keys_are_refused(self):
+        with loaded_relay() as relay:
+            for key in (None, 1, ["ctrl", "c"], {"key": "c"}):
+                with self.subTest(key=key):
+                    self.assertFalse(relay.key_is_allowed(key))
+
+    def test_send_keys_forwards_a_modifier_chord_the_web_app_composes(self):
+        """The Ctrl presets in web/index.html were rejected wholesale by the old allowlist."""
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({
+                "type": "send_keys",
+                "pane_id": pane_id,
+                "keys": ["ctrl+c"],
+                "request_id": "req-1",
+            })])
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value=""), \
+                 mock.patch.object(relay, "run_herdr_result", return_value=completed) as run:
+                asyncio.run(relay.handle_client(ws))
+
+            self.assertEqual(
+                run.call_args.args,
+                ("pane", "send-keys", pane_id, "ctrl+c"),
+            )
+            self.assertEqual(
+                [json.loads(message) for message in ws.sent],
+                [{"type": "command_result", "command": "send_keys", "ok": True, "request_id": "req-1"}],
+            )
+
+    def test_send_keys_refuses_an_empty_or_non_list_keys_field(self):
+        pane_id = "w0:p1"
+        for keys in ([], "ctrl+c", None):
+            with self.subTest(keys=keys):
+                with loaded_relay() as relay:
+                    relay.known_panes.add(pane_id)
+                    ws = _FakeWebSocket([json.dumps({
+                        "type": "send_keys", "pane_id": pane_id, "keys": keys,
+                    })])
+                    with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                         mock.patch.object(relay, "read_pane", return_value=""), \
+                         mock.patch.object(relay, "run_herdr_result") as run:
+                        asyncio.run(relay.handle_client(ws))
+                    run.assert_not_called()
+                    self.assertEqual(json.loads(ws.sent[0])["type"], "error")
+
+
 class RelayCommandTests(unittest.TestCase):
     def test_command_connection_skips_snapshot_and_correlates_ack(self):
         with loaded_relay() as relay:

@@ -145,9 +145,68 @@ SAFE_RESPONSES = {
     "yes, single permission", "trust, always allow", "no (tab to edit)",
     "approve all pending", "configure individually", "exit (cancel subagents)",
 }
-SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
-    str(number) for number in range(10)
-}
+# Keys the relay will forward, in the grammar herdr actually validates. Live-verified against
+# herdr 0.8.0 (protocol 19) on a throwaway session:
+#   accepted -- bare specials (Enter Escape Tab Space Backspace BS Up Down Left Right F1..F12),
+#               any single character, `+`-joined chords (ctrl+c, shift+tab, alt+Up), and `C-c`,
+#               which is the ONE tmux-style spelling herdr still aliases to interrupt;
+#   rejected -- C-u, M-x, BTab, BSpace, PageUp, PageDown, Home, End, Insert, Delete.
+# `BSpace` used to sit in this set and could never have worked: herdr answers
+# `invalid_key: unsupported key BSpace`. Chords are validated by key_is_allowed(), not enumerated
+# here, because the web app composes them at runtime (ctrl+/shift+ any key) -- this set is the
+# bare-key half of the grammar, and it must stay a self-contained literal expression
+# (tests/test_telegram.py evaluates it straight out of the AST).
+SAFE_KEYS = {
+    "y", "n", "a",
+    "Enter", "Escape", "Tab", "Space", "Backspace", "BS",
+    "Up", "Down", "Left", "Right",
+    "C-c",
+} | {str(number) for number in range(10)} | {f"F{index}" for index in range(1, 13)}
+
+# Modifiers herdr accepts in a chord. `cmd`/`super` are also valid upstream but no client sends
+# them, so they stay out: an allowlist should not be wider than the UI that feeds it.
+SAFE_MODIFIERS = {"ctrl", "shift", "alt"}
+
+# Special key NAMES, lowercased, because herdr matches them case-insensitively -- `shift+tab` and
+# `esc` both ack, so a client spelling them that way is not wrong. Single characters stay
+# case-sensitive (they are typed literally), which is why they aren't in here.
+SAFE_SPECIAL_KEYS = {
+    "enter", "escape", "esc", "tab", "space", "backspace", "bs",
+    "up", "down", "left", "right",
+} | {f"f{index}" for index in range(1, 13)}
+
+
+def key_is_allowed(key):
+    """True when herdr's key validator would accept `key` AND the relay is willing to send it.
+
+    Two shapes pass: a bare key (SAFE_KEYS, or any special name in any case), and a `+`-joined
+    chord whose modifiers are all in SAFE_MODIFIERS and whose base is a single printable character
+    or a special name -- herdr takes `alt+Up`, `shift+tab` and `ctrl+c` alike.
+
+    Bare single characters stay limited to SAFE_KEYS (y/n/a/digits) even though herdr would type
+    any of them: send_keys is for control, and free text has its own gated channels.
+
+    A repeated modifier (`ctrl+ctrl+c`) is refused HERE regardless of what herdr does with it --
+    it only ever arrives from a client bug, and forwarding a malformed chord into a live terminal
+    is not the way to find that out.
+    """
+    if not isinstance(key, str) or not key:
+        return False
+    if key in SAFE_KEYS or key.lower() in SAFE_SPECIAL_KEYS:
+        return True
+    if "+" not in key:
+        return False
+    *modifiers, base = key.split("+")
+    if not modifiers or not base:
+        return False
+    modifiers = [modifier.lower() for modifier in modifiers]
+    if not all(modifier in SAFE_MODIFIERS for modifier in modifiers):
+        return False
+    if len(set(modifiers)) != len(modifiers):
+        return False
+    if base.lower() in SAFE_SPECIAL_KEYS:
+        return True
+    return len(base) == 1 and base.isprintable()
 
 
 # --- Audit logging ---
@@ -1351,7 +1410,7 @@ async def handle_client(ws):
                     await ws.send(json.dumps(command_error("unknown pane_id")))
                     continue
                 keys = msg.get("keys", [])
-                if not all(k in SAFE_KEYS for k in keys):
+                if not isinstance(keys, list) or not keys or not all(key_is_allowed(k) for k in keys):
                     await ws.send(json.dumps(command_error("keys contain disallowed values")))
                     continue
                 remote = pane_remote_map.get(pane_id)

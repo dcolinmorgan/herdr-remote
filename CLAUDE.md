@@ -118,7 +118,7 @@ which is **live activity, not a session name**. A working claude sets it to what
 Easy to get wrong — three of the existing clients do:
 
 - **`respond` is allowlisted.** Only the 12 values in `SAFE_RESPONSES` (`herdr_relay.py:90`) are accepted; anything else returns `response not in allowlist`. Free-form replies must use `agent_prompt` (≤10000 chars) or `send_text` (≤1000). The mac/iOS approval cards send custom text as `respond`, so their custom-reply box does not work against the relay.
-- **Interrupt is `C-c`.** `SAFE_KEYS` (`herdr_relay.py:91`) accepts `C-c`, not `Ctrl+c`, and `keys` must be an array. The mac app's `Ctrl+c` only works because it invokes the local CLI rather than the relay.
+- **Keys use herdr's `+` grammar, validated by `key_is_allowed`, and `keys` must be a non-empty array.** Bare specials (`Enter` `Escape` `Tab` `Space` `Backspace` `Up`…`F12`), single characters, and `ctrl+`/`shift+`/`alt+` chords all pass — special names case-insensitively, so `esc` and `shift+tab` are fine. `C-c` also passes: live-verified as the one tmux-style spelling herdr 0.8.0 still aliases to interrupt (`C-u`, `M-x`, `BTab` do not). `BSpace` is refused by herdr in every spelling, and `PageUp`/`PageDown`/`Home`/`End`/`Insert`/`Delete` are refused too.
 - **`question_toggle`/`question_submit` have no relay handler.** The web app, TUI, mac and iOS clients all send them; the relay ignores both, so multi-select questions cannot be answered from any client until it grows support.
 
 ## Deployment
