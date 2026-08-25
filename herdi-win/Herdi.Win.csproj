@@ -17,9 +17,9 @@
     <AssemblyName>Herdi</AssemblyName>
     <RootNamespace>Herdi</RootNamespace>
     <ApplicationIcon>Assets\herdi.ico</ApplicationIcon>
-    <Version>0.7.3</Version>
-    <AssemblyVersion>0.7.3.0</AssemblyVersion>
-    <FileVersion>0.7.3.0</FileVersion>
+    <Version>0.7.5</Version>
+    <AssemblyVersion>0.7.5.0</AssemblyVersion>
+    <FileVersion>0.7.5.0</FileVersion>
     <!-- Lets `dotnet build` run on Linux/macOS for compile verification. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
