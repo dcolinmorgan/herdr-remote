@@ -1327,8 +1327,13 @@ class RelayKeyGrammarTests(unittest.TestCase):
     # in lower case is not wrong.
     ACCEPTED = ("ctrl+c", "shift+tab", "alt+Up", "ctrl+shift+p", "C-c", "Enter", "Escape",
                 "esc", "tab", "Space", "Backspace", "F5", "f12", "Up", "1", "y")
-    REJECTED = ("BSpace", "BTab", "PageUp", "PageDown", "Home", "End", "Insert", "Delete",
-                "C-u", "M-x", "cmd+q", "ctrl+", "+c", "", "nonsense", "ctrl+ctrl+c")
+    # PageUp/PageDown/Home/End are accepted by the RELAY but refused by herdr in every spelling
+    # (re-probed on 0.8.2); they leave as CSI bytes through `pane send-text`. Insert and Delete are
+    # equally refused by herdr and deliberately not covered, which is why they stay rejected here.
+    ACCEPTED = ACCEPTED + ("PageUp", "pagedown", "Home", "End", "ctrl+Home", "shift+PageUp")
+    REJECTED = ("BSpace", "BTab", "PgUp", "Insert", "Delete",
+                "C-u", "M-x", "cmd+q", "ctrl+", "+c", "", "nonsense",
+                "ctrl+ctrl+c", "ctrl+ctrl+Home")
 
     def test_key_grammar_matches_what_herdr_accepts(self):
         with loaded_relay() as relay:
@@ -1411,6 +1416,109 @@ class RelayKeyGrammarTests(unittest.TestCase):
             self.assertTrue(
                 any("Insert" in str(call) for call in warned.call_args_list),
                 "the refused key must reach the log")
+
+
+class RelayCsiKeyTests(unittest.TestCase):
+    """Keys herdr refuses outright, delivered as the CSI bytes a terminal would send.
+
+    Live-probed on herdr 0.8.2: `pane send-keys` answers `unsupported key PageUp` to every
+    spelling of PageUp/PageDown/Home/End, while `pane send-text` passes ESC through byte for byte
+    (`cat -v` in a throwaway pane showed `^[[5~`). `less` on a 500-line file then paged from row 1
+    to row 70 on ESC[6~ and back on ESC[5~, so a real TUI reads the bytes AS the key.
+    """
+
+    # xterm's encoding: 1 + shift(1) + alt(2) + ctrl(4). The tilde keys carry the modifier as a
+    # second parameter; the letter keys grow a leading `1;` they do not have when bare.
+    EXPECTED = {
+        "PageUp": "\x1b[5~",
+        "PageDown": "\x1b[6~",
+        "pageup": "\x1b[5~",
+        "Home": "\x1b[H",
+        "End": "\x1b[F",
+        "ctrl+Home": "\x1b[1;5H",
+        "ctrl+End": "\x1b[1;5F",
+        "shift+PageUp": "\x1b[5;2~",
+        "alt+PageDown": "\x1b[6;3~",
+        "ctrl+shift+Home": "\x1b[1;6H",
+    }
+
+    def test_sequences_match_the_terminal_encoding(self):
+        with loaded_relay() as relay:
+            for key, sequence in self.EXPECTED.items():
+                with self.subTest(key=key):
+                    self.assertEqual(relay.key_escape_sequence(key), sequence)
+
+    def test_keys_herdr_can_send_itself_get_no_sequence(self):
+        """An empty return is what routes a key to `send-keys`, so it must stay empty."""
+        with loaded_relay() as relay:
+            for key in ("Enter", "Escape", "ctrl+c", "Up", "C-c", "y", "F5", "Delete", "Insert"):
+                with self.subTest(key=key):
+                    self.assertEqual(relay.key_escape_sequence(key), "")
+
+    def test_a_malformed_modifier_resolves_to_nothing_rather_than_the_bare_key(self):
+        """Silently dropping the modifier would send Home when the client asked for cmd+Home."""
+        with loaded_relay() as relay:
+            for key in ("cmd+Home", "ctrl+ctrl+Home", "super+End", "ctrl+", "+Home", None, 5):
+                with self.subTest(key=key):
+                    self.assertEqual(relay.key_escape_sequence(key), "")
+
+    def test_a_page_key_goes_out_as_text_not_as_a_key(self):
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({
+                "type": "send_keys", "pane_id": pane_id, "keys": ["PageUp"], "request_id": "req-1",
+            })])
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value=""), \
+                 mock.patch.object(relay, "run_herdr_result", return_value=completed) as run:
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(run.call_args.args, ("pane", "send-text", pane_id, "\x1b[5~"))
+            self.assertEqual(
+                [json.loads(message) for message in ws.sent],
+                [{"type": "command_result", "command": "send_keys", "ok": True, "request_id": "req-1"}],
+            )
+
+    def test_a_mixed_queue_keeps_its_order_across_the_two_channels(self):
+        """The key queue composes arbitrary runs, and [Escape, PageUp, Enter] must arrive so."""
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({
+                "type": "send_keys", "pane_id": pane_id,
+                "keys": ["Escape", "PageUp", "PageDown", "Enter"],
+            })])
+            completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value=""), \
+                 mock.patch.object(relay, "run_herdr_result", return_value=completed) as run:
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(
+                [call.args for call in run.call_args_list],
+                [
+                    ("pane", "send-keys", pane_id, "Escape"),
+                    # One call, because a run of CSI keys concatenates into one text argument.
+                    ("pane", "send-text", pane_id, "\x1b[5~\x1b[6~"),
+                    ("pane", "send-keys", pane_id, "Enter"),
+                ],
+            )
+
+    def test_a_failing_text_call_reports_and_stops(self):
+        """A half-delivered queue must not answer ok, and must not send the rest."""
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({
+                "type": "send_keys", "pane_id": pane_id, "keys": ["PageUp", "Enter"],
+            })])
+            failed = subprocess.CompletedProcess([], 1, stdout="", stderr="nope")
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value=""), \
+                 mock.patch.object(relay, "run_herdr_result", return_value=failed) as run:
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(len(run.call_args_list), 1)
+            self.assertEqual(json.loads(ws.sent[0])["type"], "error")
 
 
 class RelayCommandTests(unittest.TestCase):

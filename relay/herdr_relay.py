@@ -176,6 +176,51 @@ SAFE_SPECIAL_KEYS = {
 } | {f"f{index}" for index in range(1, 13)}
 
 
+# Keys herdr's own validator refuses in EVERY spelling -- live re-checked on herdr 0.8.2, which
+# answers `unsupported key PageUp` to PageUp/PgUp/pageup/PgDn/Page_Up alike, and the same for
+# Home and End with or without a modifier. No respelling reaches them through `pane send-keys`.
+#
+# `pane send-text` is a byte channel and passes ESC through verbatim (probed by running `cat -v`
+# in a throwaway pane, which then showed `^[[5~`), so the relay delivers these as the CSI bytes a
+# terminal would emit for the key. A real TUI reads them AS the key: `less` on a 500-line file
+# paged from row 1 to row 70 on ESC[6~ and back to row 1 on ESC[5~.
+#
+# Modified forms are computed rather than enumerated -- xterm encodes the modifier as
+# 1 + shift(1) + alt(2) + ctrl(4), so ctrl+Home is ESC[1;5H and shift+PageUp is ESC[5;2~.
+#
+# Insert and Delete are refused by herdr too and would be one line each here; they stay out until
+# a client asks for them, so this table only covers keys something actually sends.
+CSI_MODIFIER_BITS = {"shift": 1, "alt": 2, "ctrl": 4}
+CSI_TILDE_KEYS = {"pageup": "5", "pagedown": "6"}
+CSI_LETTER_KEYS = {"home": "H", "end": "F"}
+
+
+def key_escape_sequence(key):
+    """The CSI bytes for a key herdr cannot send, or "" when `pane send-keys` should take it.
+
+    Accepts the same `+`-joined grammar as key_is_allowed, so `PageUp`, `pageup` and `ctrl+Home`
+    all resolve. An unknown or repeated modifier resolves to "" and is then refused by
+    key_is_allowed, rather than silently going out as the unmodified key.
+    """
+    if not isinstance(key, str) or not key:
+        return ""
+    *modifiers, base = key.split("+")
+    base = base.lower()
+    if base not in CSI_TILDE_KEYS and base not in CSI_LETTER_KEYS:
+        return ""
+    modifiers = [modifier.lower() for modifier in modifiers]
+    if len(set(modifiers)) != len(modifiers):
+        return ""
+    if not all(modifier in CSI_MODIFIER_BITS for modifier in modifiers):
+        return ""
+    code = 1 + sum(CSI_MODIFIER_BITS[modifier] for modifier in modifiers)
+    if base in CSI_TILDE_KEYS:
+        number = CSI_TILDE_KEYS[base]
+        return f"\x1b[{number}~" if code == 1 else f"\x1b[{number};{code}~"
+    letter = CSI_LETTER_KEYS[base]
+    return f"\x1b[{letter}" if code == 1 else f"\x1b[1;{code}{letter}"
+
+
 def key_is_allowed(key):
     """True when herdr's key validator would accept `key` AND the relay is willing to send it.
 
@@ -193,6 +238,8 @@ def key_is_allowed(key):
     if not isinstance(key, str) or not key:
         return False
     if key in SAFE_KEYS or key.lower() in SAFE_SPECIAL_KEYS:
+        return True
+    if key_escape_sequence(key):
         return True
     if "+" not in key:
         return False
@@ -1434,14 +1481,33 @@ async def handle_client(ws):
                         continue
                 log.info("Keys from %s (%s): pane=%s keys=%s", ip, device, pane_id, keys)
                 audit("send_keys", ip, device, pane_id, f"keys={keys}")
-                try:
-                    result = run_herdr_result("pane", "send-keys", pane_id, *keys, remote=remote)
-                except Exception as exc:
-                    log.warning("send_keys command failed for pane %s: %s", pane_id, exc)
-                    await ws.send(json.dumps(command_error("send_keys command failed")))
-                    continue
-                if result.returncode != 0:
-                    log.warning("send_keys command failed for pane %s with exit %s", pane_id, result.returncode)
+                # Keys herdr's validator refuses (CSI_TILDE_KEYS / CSI_LETTER_KEYS) travel as raw
+                # CSI bytes through `pane send-text`. Consecutive keys of one kind go out in a
+                # single call, and the runs keep the order the client sent them -- a client that
+                # queues [Escape, PageUp, Enter] gets those three in that order, not regrouped.
+                runs = []
+                for key in keys:
+                    sequence = key_escape_sequence(key)
+                    kind = "send-text" if sequence else "send-keys"
+                    if runs and runs[-1][0] == kind:
+                        runs[-1][1].append(sequence or key)
+                    else:
+                        runs.append((kind, [sequence or key]))
+                failure = ""
+                for kind, payload in runs:
+                    # send-text takes ONE text argument, so a run of CSI keys is concatenated.
+                    args = ["".join(payload)] if kind == "send-text" else payload
+                    try:
+                        result = run_herdr_result("pane", kind, pane_id, *args, remote=remote)
+                    except Exception as exc:
+                        failure = f"raised {exc}"
+                    else:
+                        if result.returncode != 0:
+                            failure = f"exit {result.returncode}"
+                    if failure:
+                        log.warning("send_keys %s failed for pane %s: %s", kind, pane_id, failure)
+                        break
+                if failure:
                     await ws.send(json.dumps(command_error("send_keys command failed")))
                     continue
                 response = {"type": "command_result", "command": "send_keys", "ok": True}
