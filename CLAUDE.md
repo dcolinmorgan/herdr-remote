@@ -106,6 +106,11 @@ Messages are JSON with a `type` field:
 
 **Server → Client:** `agents` (complete state snapshot), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection)
 
+An `agents` entry carries, per pane: `pane_id`, `agent`, `label`, `workspace_label`, `status`,
+`cwd`, `project`, `host`, `remote`, `workspace_id`, `tab_id`, and `title` — herdr's terminal title,
+which is **live activity, not a session name**. A working claude sets it to what it is doing;
+`activity_title` drops the harness's own banner, which is all an idle or done pane leaves there.
+
 **Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `create_tab`, `push_subscribe`/`push_unsubscribe`
 
 ### Relay-side constraints clients must respect

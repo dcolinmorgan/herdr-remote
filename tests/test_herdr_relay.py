@@ -1459,6 +1459,45 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("stale-pane", relay.last_statuses)
 
 
+class RelayTerminalTitleTests(unittest.TestCase):
+    """The title is live activity or it is the harness saying its own name -- never a session."""
+
+    def test_a_working_agents_activity_survives_and_the_banner_does_not(self):
+        with loaded_relay() as relay:
+            # What a working claude puts there.
+            self.assertEqual(relay.activity_title("fix P0, draft the P1 plan", "claude"),
+                             "fix P0, draft the P1 plan")
+            # What an idle or done one leaves behind. Measured on one real host: of nine agent
+            # panes, seven reported no title and the two that did reported exactly this.
+            self.assertEqual(relay.activity_title("Claude Code", "claude"), "")
+            self.assertEqual(relay.activity_title("\u2733 Claude Code", "claude"), "")
+            # Prefix matching, so a new harness needs no entry in a list.
+            self.assertEqual(relay.activity_title("Codex", "codex"), "")
+            self.assertEqual(relay.activity_title("OpenCode", "opencode"), "")
+            self.assertEqual(relay.activity_title(None, "claude"), "")
+            self.assertEqual(relay.activity_title("   ", "claude"), "")
+            # A title that merely mentions the harness is still a title.
+            self.assertEqual(relay.activity_title("porting the claude reader", "claude"),
+                             "porting the claude reader")
+            # No agent name to compare against: nothing is a banner.
+            self.assertEqual(relay.activity_title("Claude Code", ""), "Claude Code")
+
+    def test_the_agents_entry_carries_the_activity_and_drops_the_banner(self):
+        listing = json.dumps({"result": {"panes": [
+            {"pane_id": "w1:p1", "agent": "claude", "agent_status": "working",
+             "cwd": "/w/herdr", "workspace_id": "w1", "tab_id": "w1:t1",
+             "terminal_title_stripped": "fix the poll"},
+            {"pane_id": "w1:p2", "agent": "claude", "agent_status": "done",
+             "cwd": "/w/herdr", "workspace_id": "w1", "tab_id": "w1:t1",
+             "terminal_title_stripped": "Claude Code"},
+        ]}})
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=listing), \
+                 mock.patch.object(relay, "get_workspace_labels", return_value={}):
+                agents = relay.get_agents_from_host()
+            self.assertEqual([a["title"] for a in agents], ["fix the poll", ""])
+
+
 class RelaySubprocessConcurrencyTests(unittest.TestCase):
     def test_calls_to_the_same_remote_are_serialized(self):
         with loaded_relay() as relay:

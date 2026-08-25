@@ -392,6 +392,26 @@ def get_workspace_labels(remote=None):
         return {}
 
 
+def activity_title(title, agent):
+    """The terminal title, but only when it carries something the cwd does not.
+
+    herdr passes the pane's terminal title straight through, and a claude that is working sets it
+    to what it is doing ("fix P0, draft the P1 plan"). Idle and done panes are the problem: of the
+    nine agent panes on the host this was measured on, seven reported no title at all and two
+    reported the plain banner "Claude Code" -- which is the harness's name, already in the `agent`
+    field right beside it, and worth less than the cwd a client would drop to show it. Match the
+    banner by prefix so codex and opencode get the same treatment without a per-harness list, and
+    so a title that merely mentions the harness ("Claude Code: fix the poll") survives.
+    """
+    title = (title or "").strip()
+    if not title:
+        return ""
+    flattened = re.sub(r"[^a-z0-9]", "", title.lower())
+    if agent and flattened.startswith(re.sub(r"[^a-z0-9]", "", agent.lower())):
+        return ""
+    return title
+
+
 def get_agents_from_host(remote=None):
     raw = run_herdr("pane", "list", remote=remote)
     host_label = remote or "local"
@@ -406,6 +426,11 @@ def get_agents_from_host(remote=None):
                 "label": p.get("label", ""),
                 # Names the space, and stands in for panes that have no label.
                 "workspace_label": workspace_labels.get(p.get("workspace_id", ""), ""),
+                # A working claude sets its terminal title to what it is doing, so this is live
+                # activity rather than a stable session name. Idle and done panes report either
+                # nothing or the harness's own banner, which says less than the cwd it would
+                # displace on a client, so activity_title drops those.
+                "title": activity_title(p.get("terminal_title_stripped"), p.get("agent", "")),
                 "status": p.get("agent_status", "unknown"),
                 "cwd": p.get("cwd", ""),
                 "project": os.path.basename(p.get("cwd", "")),
