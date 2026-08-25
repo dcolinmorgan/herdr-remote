@@ -104,7 +104,9 @@ class AnsiTransportTests(unittest.TestCase):
         self.assertIn("Hack", license_file.read_text(encoding="utf-8"))
         self.assertIn("HackNerdFont-Regular.woff2", page)
         self.assertIn("function ansiFragment", page)
-        self.assertIn("format:'ansi'", page)
+        # Whitespace-tolerant: this pins that the mirror asks for colour, not how the request
+        # object happens to be laid out.
+        self.assertRegex(page, r"format:\s*'ansi'")
 
     def test_pane_read_defaults_to_text_and_accepts_explicit_ansi(self):
         """Test that read_pane handler passes --format correctly to run_herdr."""

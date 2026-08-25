@@ -261,20 +261,62 @@ class WebShellPaneSessionTests(unittest.TestCase):
         self.assertNotEqual(
             self.page.eval_on_selector(".history-btn", "e => getComputedStyle(e).display"), "none")
 
-    def test_scrollback_is_offered_here_and_not_on_an_agent_pane(self):
-        """Agent panes are on the alternate screen and always report 0; this one reports 693."""
+    def test_scrollback_is_offered_where_there_is_a_ring_and_not_where_there_is_none(self):
+        """`canLoadMore` asks what a read could return, which is the one thing scrollback says.
+
+        It is NOT a way to tell an agent pane from a terminal -- the fixture's agent reports 0
+        because a pane on the alternate screen can, not because agent panes must. Nor is the answer
+        stable per pane on herdr 0.8.2: one measurement on this host had 9 of 10 agent panes
+        reporting a ring, a later one had all 9 reporting 0."""
         self.page.evaluate("openTerminal('wE:p2')")
         self.assertEqual(self.page.evaluate("paneScrollback()"), 693)
         self.assertTrue(self.page.evaluate("canLoadMore()"))
         self.page.evaluate("openTerminal('wE:pH')")
         self.assertFalse(self.page.evaluate("canLoadMore()"))
 
-    def test_a_ring_is_read_with_recent_and_a_ringless_pane_with_visible(self):
-        """`recent` on a pane with no ring is what makes the relay pay for herdr's harvest."""
-        self.page.evaluate("openTerminal('wE:p2'); window.__sent = []; refreshPane()")
-        self.assertEqual(self.sent()[0]["source"], "recent")
-        self.page.evaluate("openTerminal('wE:p5'); window.__sent = []; refreshPane()")
-        self.assertEqual(self.sent()[0]["source"], "visible")
+    def test_the_follow_read_carries_scrollback_whatever_ring_the_pane_has(self):
+        """Which source is a question about THIS read, not about the pane -- and the answer is
+        always `recent`, because `visible` is the rendered grid and nothing else.
+
+        Priming one `recent` read on open would not do: mirrorPatch reconciles the whole buffer, so
+        the next tick deletes every line the viewport no longer holds. Nor did the per-pane rule
+        this replaces pay for itself -- measured on this host (herdr 0.8.2, all 35 live panes,
+        ansi), every agent pane reports no ring, so `recent` 200 and `visible` are byte-identical
+        there, and where they differ the extra bytes are the scrollback the reader came for."""
+        for pane, ring in (("wE:pH", 1662), ("wE:pH", 0), ("wE:p2", 693), ("wE:p5", 0)):
+            with self.subTest(pane=pane, ring=ring):
+                self.page.evaluate("""([p, r]) => {
+                  paneById(p).scrollback = r;
+                  openTerminal(p); window.__sent = []; refreshPane();
+                }""", [pane, ring])
+                read = self.sent()[0]
+                self.assertEqual(read["source"], "recent")
+                # The window, not the pane's height: one screenful is what hid the history.
+                self.assertEqual(read["lines"], self.page.evaluate("PANE_LINES_BASE"))
+
+    def test_paging_back_asks_for_recent_and_stops_the_tick(self):
+        """History does not change under you, and it is not re-fetched on a timer either.
+
+        The tick used to reuse whatever paneLines had grown to: 125.7KB per pass at the 1000-line
+        ceiling, 42KB/s, for output the reader had already scrolled away from."""
+        self.page.evaluate("openTerminal('wE:p2'); window.__sent = []; loadMore()")
+        read = self.sent()[0]
+        self.assertEqual(read["source"], "recent")
+        self.assertEqual(read["lines"], 600)
+
+        self.page.evaluate("window.__sent = []; mirrorTick()")
+        self.assertEqual(self.sent(), [], "the tick replaced the page the reader had paged back to")
+
+    def test_refresh_is_the_way_back_to_the_live_screen(self):
+        """A bare re-read would fetch the same page of history again -- a button that does nothing.
+        It is also the only way back, since the tick is stopped while a page is held."""
+        self.page.evaluate("openTerminal('wE:p2'); loadMore(); window.__sent = []; followPane()")
+        # Both reads are `recent`; what tells a held page from a live one is the window it asks for.
+        self.assertEqual(self.sent()[0]["lines"], 200)
+        self.assertEqual(self.page.evaluate("paneLines"), 200)
+
+        self.page.evaluate("window.__sent = []; mirrorTick()")
+        self.assertEqual(self.sent()[0]["lines"], 200, "the tick did not resume")
 
     def test_the_process_is_asked_for_once_per_terminal_and_never_for_an_agent(self):
         """One extra CLI call on the relay, which is one SSH round trip for a remote host."""

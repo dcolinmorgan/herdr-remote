@@ -493,7 +493,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
     <span class="title" id="termTitle"></span>
     <button class="search-btn icon-toggle" id="searchBtn" aria-pressed="false" onclick="toggleSearch()" aria-label="Find in output"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></button>
     <button class="history-btn icon-toggle" id="historyBtn" aria-pressed="false" onclick="toggleHistory()" aria-label="Conversation history"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></button>
-    <button class="refresh-btn" onclick="refreshPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
+    <button class="refresh-btn" onclick="followPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
   </div>
   <!-- space > tab > pane, the same three levels herdr itself has, in ONE row that can say two of
        them from inside a session. Both groups are built by renderSiblings as DOM nodes, and each is
@@ -2104,8 +2104,14 @@ function openTerminal(paneId) {
   // -- the history panel belongs to one conversation, and the search holds the OTHER pane's output
   // in `originalContent`. Leaving the search open across a switch (which the sibling chips made a
   // one-tap move) meant the next keystroke restored pane A's output into pane B's session.
-  if (activePane !== paneId) { hideHistory(); hideSearch(); clearPaneMirror(); }
-  activePane = paneId; paneLines = PANE_LINES_BASE; userScrolledUp = false;
+  // The reading state goes with them, for the same reason: a re-entry is a title refresh, and
+  // resetting it on one would drop a reader who had paged back to the live screen the moment
+  // their agent asked a question -- the one moment they are most likely to be reading.
+  if (activePane !== paneId) {
+    hideHistory(); hideSearch(); clearPaneMirror();
+    paneLines = PANE_LINES_BASE; paneFollowing = true; userScrolledUp = false;
+  }
+  activePane = paneId;
   const a = agents.find(x => x.pane_id===paneId);
   const shell = shellPane(paneId);
   // A terminal is named by its id, because its directory usually is not unique on the host. The
@@ -2339,6 +2345,9 @@ function mirrorPatch(el, content) {
 // even sent while a selection is held: it would cost the relay a herdr call -- an SSH round trip
 // for a remote host -- to fetch content this tick has already decided it may not render.
 function mirrorTick() {
+  // History does not change under you. Once the reader has paged back, the live screen is no
+  // longer what is on display, so there is nothing for a tick to keep up to date.
+  if (!paneFollowing) return;
   if (selectionInside(document.getElementById('termContent'))) return;
   refreshPane();
 }
@@ -2358,9 +2367,16 @@ const PANE_LINES_BASE = 200, PANE_LINES_STEP = 400, PANE_LINES_MAX = 1000;
 let paneLines = PANE_LINES_BASE;
 
 // How deep a scrollback read on the open pane could ever go (relay: `scrollback`, from herdr's
-// scroll.max_offset_from_bottom). 0 means the pane runs on the alternate screen -- every agent TUI
-// does -- and herdr retained nothing behind the viewport, so "load older" can never return a line
-// it doesn't already have. undefined means an older relay that doesn't report it: stay permissive.
+// scroll.max_offset_from_bottom). 0 means herdr retained nothing behind the viewport, so "load
+// older" can never return a line it doesn't already have. undefined means an older relay that
+// doesn't report it: stay permissive.
+//
+// This is NOT a way to tell an agent pane from a terminal, and the mirror must not read it as one.
+// It used to: an agent TUI runs on the alternate screen, so every agent pane herdr 0.8.0 reported
+// answered 0, and the read source was picked off that. On 0.8.2 the number is not even stable for
+// one pane: an earlier measurement on this host had 9 of 10 agent panes reporting a ring (151, 434,
+// 594, 938, 1262, 1267, 1400, 1662, 8439), a later one had all 9 reporting 0 -- same host, same
+// herdr, and w5:p1 is in both sets.
 function paneScrollback() {
   const a = paneById(activePane);
   return a ? a.scrollback : undefined;
@@ -2369,17 +2385,44 @@ function canLoadMore() {
   if (paneScrollback() === 0) return false;
   return paneLines < PANE_LINES_MAX;
 }
+// Following the live screen, as opposed to holding a page of scrollback the reader asked for.
+// Only this mode auto-refreshes -- see mirrorTick.
+let paneFollowing = true;
 function refreshPane() {
   if (!ws || ws.readyState !== WebSocket.OPEN || !activePane) return;
-  // `visible` on a pane with no ring: same content, and it can never make the relay pay for
-  // herdr's multi-second scrollback harvest. `recent` only where there is a ring to read.
-  const source = paneScrollback() === 0 ? 'visible' : 'recent';
-  const request = {type:'read_pane',pane_id:activePane,lines:paneLines,format:'ansi',source};
+  // Every read is `recent`, following or not. `visible` is the rendered grid and nothing else, so
+  // following opened the mirror onto one screenful with no history behind it. Priming with a single
+  // `recent` read would not have survived either: mirrorPatch reconciles the WHOLE buffer, so the
+  // next 3s pass deletes every line the viewport no longer holds.
+  //
+  // And the per-pane rule this replaces -- `recent` wherever a ring exists -- was a distinction
+  // without a difference. Measured on this host (herdr 0.8.2, all 35 live panes, ansi, `recent` 200
+  // against `visible` at the pane's own height): all 9 agent panes report no ring, so the two come
+  // back BYTE-IDENTICAL. The gap exists only on shell panes holding a ring (+1.4KB to +52KB), and
+  // that ring is exactly the scrollback the reader opened the pane to see.
+  //
+  // Bounded by construction: a follow read is always PANE_LINES_BASE, because loadMore stops the
+  // tick before paneLines can grow past it.
+  const request = {
+    type: 'read_pane',
+    pane_id: activePane,
+    lines: paneLines,
+    format: 'ansi',
+    source: 'recent',
+  };
   // One extra CLI call on the relay -- one SSH round trip for a remote host -- so it is asked
   // once per terminal, not on the 3s mirror tick. A directory does not identify a shell pane;
   // "zsh" versus "vim" versus an hour-old build does.
   if (shellPane(activePane) && !paneProcess[activePane]) request.process = true;
   ws.send(JSON.stringify(request));
+}
+// Back to the live screen, and the only way back once the reader has paged into scrollback. The
+// refresh button is this rather than a bare re-read, because in held mode a re-read would fetch
+// the same page of history again -- a button that visibly does nothing.
+function followPane() {
+  paneFollowing = true;
+  paneLines = PANE_LINES_BASE;
+  refreshPane();
 }
 function loadMore() {
   if (!canLoadMore()) return;
@@ -2387,6 +2430,11 @@ function loadMore() {
   // is on screen -- so it is the one update mirrorPatch cannot make non-destructively. It waits,
   // like the tick does, rather than collapsing the selection to the top of the output.
   if (selectionInside(document.getElementById('termContent'))) return;
+  // Paging back stops the follow. Two reasons, and either alone is enough: the tick would replace
+  // the page under the reader on its next pass, and until it did it would be re-fetching whatever
+  // paneLines had grown to -- 125.7KB per tick at the 1000-line ceiling, 42KB/s down a tunnel, for
+  // output the reader has already scrolled away from.
+  paneFollowing = false;
   paneLines = Math.min(paneLines + PANE_LINES_STEP, PANE_LINES_MAX);
   refreshPane();
 }

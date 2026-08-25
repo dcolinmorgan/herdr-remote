@@ -197,6 +197,37 @@ buffer (the deepest a herdr read reaches): identical tick **0.1ms** against the 
 14.3ms against 3.9ms; at the default 200 lines, 0.1ms and 3.9ms against 0.9ms. The common tick got
 40× cheaper and the worst one 4× dearer.
 
+**The mirror carries scrollback, and paging back holds it.** Every read is `recent`. It used to be
+decided per pane — `recent` wherever `scrollback` was non-zero, `visible` where it was 0 — on the
+belief that an agent pane never has a ring, because its TUI runs on the alternate screen. That is a
+distinction without a difference: measured on this host (herdr 0.8.2, all 35 live panes, ansi,
+`recent` 200 against `visible` at the pane's own height), **every agent pane reports no ring, so the
+two reads come back byte-identical**. Where they do differ — shell panes holding a ring, +1.4KB to
++52KB — the extra bytes *are* the scrollback the reader opened the pane to see, so `visible` there
+is not a saving but a missing feature.
+
+Nor can the choice be split by read rather than by pane. `visible` returns the rendered grid and
+nothing else, and `mirrorPatch` reconciles the **whole** buffer — so priming one `recent` read on
+open and then following with `visible` would show the history for exactly one tick before the 3s
+pass deleted every line the viewport no longer holds. The follow read is bounded at
+`PANE_LINES_BASE` instead, which costs nothing extra: `loadMore` stops the tick before `paneLines`
+can grow past it.
+
+Two rules fall out of it, and each was its own leak:
+
+- **Only follow mode auto-refreshes.** The tick reused whatever `paneLines` had grown to, so one
+  tap on "load more" put a 600-line read on a timer and the ceiling put a 1000-line one there:
+  **125.7KB per tick, 42KB/s**, re-fetching output the reader had already scrolled away from — and
+  the next tick would have replaced their page anyway. Held mode sends nothing; `followPane` (the
+  refresh button) is the way back, and it is the *only* way back, which is why that button is no
+  longer a bare re-read — in held mode a re-read would just fetch the same page again.
+- **Only a real switch resets the reading state.** `openTerminal` is re-entered on every `blocked`
+  event for the pane already in front of you, and it reset `paneLines` unconditionally. With a
+  follow flag beside it that becomes: the reader is pulled back to the live screen the moment
+  their agent asks a question — the one moment they are most likely to be reading. `paneLines`,
+  `paneFollowing` and `userScrolledUp` now sit inside the same `activePane !== paneId` guard the
+  panels do.
+
 **A real selection still stops the tick outright** (`selectionInside`), because a line the reader is
 selecting inside can still be the line that gets rewritten. It is checked in four places:
 `mirrorTick`, which then does not even *send* the read (a herdr call, an SSH round trip on a remote
@@ -455,10 +486,11 @@ of the **same `pane list`** the poll already runs, so listing them costs nothing
 
 Two things are true of a shell pane and not of an agent pane:
 
-- **It has a real scrollback ring.** Agent panes run on the alternate screen and report
-  `max_offset_from_bottom: 0` without exception; shell panes here report 0 to 693. A 400-line
-  `recent` read on one measured **10ms end to end through the relay**, against the multi-second
-  harvest the same request triggers on an idle agent pane. Scrollback is worth offering here.
+- **It has a real scrollback ring, and reading it is cheap.** Shell panes here report 0 to 9258.
+  A 400-line `recent` read on one measured **10ms end to end through the relay**, against the
+  multi-second harvest the same request triggers on an idle agent pane. Scrollback is worth
+  offering here. It is no longer what *distinguishes* the two kinds — on herdr 0.8.2 most agent
+  panes report a ring too (see the read-semantics section) — but the cost of reading it still is.
 - **Writing to it is a command.** `respond` on a shell pane skips the question detector entirely —
   there is nothing to detect — and sends `pane send-text` followed by `Enter`. No harness stands
   between the text and the shell. That is why the whole feature is behind `HERDR_SHELL_PANES` and
@@ -624,14 +656,19 @@ The rules are all rules about not lying to the operator:
     was read (a remote host, or a file past `HERDR_TRANSCRIPT_MAX_BYTES`) — say so instead of
     implying the conversation starts there.
 
-### herdr read semantics the relay is built on (live-probed, herdr 0.8.0 / protocol 19)
+### herdr read semantics the relay is built on (live-probed on herdr 0.8.0 / protocol 19; re-probed on 0.8.2 where a bullet says so)
 
 - **`pane.read` is clamped at ~1000 lines, silently.** 1000, 1500 and 5000 all return the same 1000
   rows with `truncated` unchanged. There is no offset/paging parameter, so 1000 lines back from the
   bottom is the deepest any single read can reach.
-- **An agent pane has NO scrollback.** Every agent pane reports `scroll.max_offset_from_bottom: 0`
-  (its TUI runs on the alternate screen); shell panes on the primary screen report thousands. A
-  client can read that field instead of probing.
+- **An agent pane may or may not have scrollback, and no client may assume either way.** This
+  said the opposite — every agent pane reports 0, because its TUI runs on the alternate screen —
+  and it was true of herdr 0.8.0. Re-probed on **0.8.2: 9 of the 10 agent panes on this host
+  report a ring** (151, 434, 594, 938, 1262, 1267, 1400, 1662, 8439) and exactly one reports 0.
+  The field is still the right thing to read instead of probing; what it answers is "could a
+  scrollback read return anything here", which is all `canLoadMore` wants. It is **not** a way to
+  tell an agent pane from a terminal, and the web mirror's read source used to be picked off it
+  believing otherwise — see the follow/held rule in the Web App section.
 - **`recent` + `format: text` on an idle agent pane HARVESTS**: herdr walks the agent's own
   mouse-scroll interface, which measured 6.2s for 200 lines and 12.7s for 400 (~31ms/line), only
   works while the agent is idle, isn't deterministic, and visibly scrolls the operator's terminal up
