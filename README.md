@@ -67,6 +67,16 @@ The launcher starts a local-only relay on `127.0.0.1:8375` by default. Set
 `HERDR_REMOTES` for a comma-separated list of SSH targets and `HERDR_BIN` only
 when `herdr` is not available on `PATH`.
 
+For the desktop client -- a tray icon plus a capsule at the top of the screen, with
+toast notifications you can approve or reply to inline -- build
+[`herdi-win`](herdi-win/README.md) with the .NET 8 SDK:
+
+```powershell
+Set-Location herdi-win
+./build.ps1
+./dist/win-x64/Herdi.exe
+```
+
 ### Security
 
 The relay validates WebSocket origins to prevent drive-by attacks from malicious
@@ -172,7 +182,7 @@ uv run relay/herdr_relay.py
 ## Requirements
 
 - macOS 14+ (menu bar app)
-- Windows 10+ (relay/web/TUI/Telegram; no tray app)
+- Windows 10 1809+ (tray app, relay/web/TUI/Telegram)
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/) (relay/TUI/bot)
 - `cloudflared` (for remote access)
 - herdr 0.7+
