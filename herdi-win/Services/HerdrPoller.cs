@@ -235,7 +235,13 @@ public sealed partial class HerdrPoller : IDisposable
     public async Task<(string Prompt, IReadOnlyList<string> Options)> ReadPromptAsync(
         Agent agent, CancellationToken token = default)
     {
-        var content = await ReadPaneAsync(agent, PromptReadLines, token);
+        // `visible`, as the relay does (PROMPT_READ_SOURCE). Asking `recent` for more rows than
+        // the pane shows makes herdr harvest the extra ones by walking the agent's own scroll
+        // interface, which moves the operator's terminal; a read fired by a status change may
+        // never do that. Live-checked on a 48-row idle claude pane: `--lines 200 --source recent`
+        // returned 101 rows of genuine older output (`visible` is exactly its tail), seconds cold
+        // and instant warm. 50 rows clears most viewports -- but that one it does not.
+        var content = await ReadPaneAsync(agent, PromptReadLines, "visible", token);
         var kept = new List<string>();
         foreach (var line in content.Replace("\r\n", "\n").Split('\n'))
         {
@@ -248,12 +254,17 @@ public sealed partial class HerdrPoller : IDisposable
         return (prompt, DetectOptions(prompt));
     }
 
-    /// <summary>Raw pane content, for the `pane_content` equivalent in direct mode.</summary>
-    public async Task<string> ReadPaneAsync(Agent agent, int lines, CancellationToken token = default)
+    /// <summary>
+    /// Raw pane content, for the `pane_content` equivalent in direct mode. `recent` is right for
+    /// a read the user asked for -- reaching past the viewport is the whole point -- but wrong for
+    /// anything automatic, hence the parameter. See ReadPromptAsync.
+    /// </summary>
+    public async Task<string> ReadPaneAsync(
+        Agent agent, int lines, string source = "recent", CancellationToken token = default)
     {
         var result = await _cli.RunAsync(
             HostOf(agent),
-            new[] { "pane", "read", PaneIdOf(agent), "--lines", lines.ToString(), "--source", "recent" },
+            new[] { "pane", "read", PaneIdOf(agent), "--lines", lines.ToString(), "--source", source },
             token);
         return result.Ok ? result.Output : string.Empty;
     }

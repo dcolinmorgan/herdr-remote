@@ -22,6 +22,20 @@ The relay (`relay/herdr_relay.py`) is the central hub: it polls herdr for agent 
 
 The mac and Windows clients can also skip the relay entirely. Their **direct** mode runs the CLI itself — `herdr pane list` locally and `ssh <target> herdr pane list` per configured host — on the same SSH terms as the relay (`ConnectTimeout=5`, `BatchMode=yes`, `HERDR_REMOTE_BIN`). The host list is per client: `herdi_remotes` in `UserDefaults` on macOS, `%LOCALAPPDATA%\herdr-remote\settings.json` on Windows. Nothing in this mode touches the relay, so none of the relay constraints below apply to it.
 
+One relay constraint does reach them, because it is herdr's, not the relay's: **an
+automatic read must pass `--source visible`.** `recent` past the viewport is a
+*harvesting* read — herdr walks the agent's own scroll interface to fetch the rest,
+moving the operator's terminal to do it, and it only works while the agent is idle.
+The relay reads `visible` for exactly this reason (`PROMPT_READ_SOURCE`).
+
+- **Omitting `--format` gets you the harvesting one.** Verified on a 48-row idle claude
+  pane: `--lines 200 --source recent` with no `--format`, and with `--format text`, both
+  return 137 rows of real older output; `--format ansi` returns the 37 on screen, same as
+  `visible`. The direct-mode clients pass no `--format`, so `--source visible` is the only
+  thing keeping them off that path.
+- **The harvest caches.** Cold it is seconds; re-reading the same rows is instant. Timing a
+  second read tells you nothing about what the first one cost.
+
 ## Components
 
 | Path | What | Language |
