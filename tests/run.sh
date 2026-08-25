@@ -71,19 +71,35 @@ assert_eq "$?" "0" "herdr_tui.py parses"
 echo ""
 echo "=== Web app ==="
 echo "9. web app key elements"
+# The markup is index.html; the behaviour is in web/js/*.js. Both greps below have to look at
+# the whole app or they silently pass on a file that no longer holds the thing they check.
 WEB="$DIR/web/index.html"
-grep -q "WebSocket" "$WEB" && grep -q "theme" "$WEB" && grep -q "sendKey" "$WEB"
+WEB_JS="$DIR/web/js"
+WEB_ALL="$WEB $WEB_JS/*.js"
+cat $WEB_ALL > /tmp/herdr-web-all.$$ 2>/dev/null
+grep -q "WebSocket" /tmp/herdr-web-all.$$ && grep -q "theme" /tmp/herdr-web-all.$$ && grep -q "sendKey" /tmp/herdr-web-all.$$
 assert_eq "$?" "0" "has WebSocket, themes, keyboard"
 
 echo "9b. web app has session selector"
 grep -q 'id="sessionSelector"' "$WEB" && \
-grep -q "session_switch" "$WEB"
+grep -q "session_switch" /tmp/herdr-web-all.$$
 assert_eq "$?" "0" "web app has session selector"
 
 echo "9c. web app has no duplicate function declarations"
-DUP_FUNCS=$(grep -oE '^[[:space:]]*function [A-Za-z0-9_]+\(' "$WEB" | grep -oE '[A-Za-z0-9_]+\(' | sort | uniq -d)
+# Across every script, not per file: the scripts share one global scope, so a name defined twice
+# in two different files is exactly the collision this check exists to catch.
+DUP_FUNCS=$(grep -hoE '^[[:space:]]*function [A-Za-z0-9_]+\(' $WEB_ALL | grep -oE '[A-Za-z0-9_]+\(' | sort | uniq -d)
 [ -z "$DUP_FUNCS" ]
 assert_eq "$?" "0" "no duplicate function declarations"
+
+echo "9c2. every script the page loads exists"
+MISSING=""
+for src in $(grep -oE '<script src="[^"]+"' "$WEB" | sed -e 's/.*src="//' -e 's/"//'); do
+  [ -f "$DIR/web/$src" ] || MISSING="$MISSING $src"
+done
+[ -z "$MISSING" ]
+assert_eq "$?" "0" "no script tag points at a missing file"
+rm -f /tmp/herdr-web-all.$$
 
 echo "9d. web app behaviour in a real browser"
 if uv run --with playwright python -c "import playwright" >/dev/null 2>&1; then
@@ -94,7 +110,7 @@ else
 fi
 
 echo "10. web app no hardcoded secrets"
-! grep -q "c4a2385e" "$WEB" && ! grep -q "graffold" "$WEB"
+! grep -rq "c4a2385e" "$DIR/web" && ! grep -rq "graffold" "$DIR/web"
 assert_eq "$?" "0" "no secrets in web app"
 
 # --- macOS app ---

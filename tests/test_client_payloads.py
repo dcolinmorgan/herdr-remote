@@ -1,13 +1,16 @@
 import unittest
 from pathlib import Path
 
+from web_source import web_source
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ClientPayloadTests(unittest.TestCase):
     def test_web_preserves_and_sends_omp_question_state(self):
-        source = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        # The whole app: these payload fields are built in web/js/*.js, not in the markup.
+        source = web_source()
 
         for field in (
             "prompt_id",

@@ -44,7 +44,7 @@ The relay reads `visible` for exactly this reason (`PROMPT_READ_SOURCE`).
 | `relay/transcript.py` | Agent transcript reader behind `get_history` | Python (stdlib only) |
 | `relay/herdr_telegram.py` | Telegram bot client | Python (python-telegram-bot) |
 | `relay/herdr_tui.py` | Terminal TUI client | Python (textual) |
-| `web/index.html` | Mobile/desktop web app (single file) | HTML/CSS/JS |
+| `web/` | Mobile/desktop web app: `index.html` + `app.css` + `js/*.js`, no build step | HTML/CSS/JS |
 | `demo-worker/` | Cloudflare Worker mock relay for demos | JS |
 | `herdi-mac/` | macOS menu bar app | Swift (SPM) |
 | `herdi-ios/` | iOS app with widgets + Live Activities | Swift (XcodeGen) |
@@ -106,7 +106,25 @@ Runtime session overrides (per source) are persisted to `active_sessions.json` i
 
 ## Web App
 
-The web app is a single self-contained HTML file (`web/index.html`) with inline CSS and JS — no build step. It's deployed to Cloudflare Pages. It carries a mobile terminal keyboard, PWA support, and agent-icon detection.
+`web/` is `index.html` (markup) + `app.css` + ten scripts under `web/js/`, and **still has no build
+step** — plain `<script src>` tags, loaded in the order they are listed. It's deployed to Cloudflare
+Pages. It carries a mobile terminal keyboard, PWA support, and agent-icon detection.
+
+Three things about that layout are load-bearing:
+
+- **They are not ES modules, and the order matters.** 77 inline `on*` handlers in the markup and in
+  rendered template strings call these functions by name, so everything has to stay on the global
+  scope; `type="module"` would put each file in its own and break all 77 at once. The scripts share
+  one scope exactly as the single `<script>` block did, which is why `tests/run.sh` step 9c looks for
+  duplicate `function` names across *all* of them rather than per file.
+- **The paths are relative** (`js/state.js`, not `/js/state.js`). The browser tests open the app
+  from a `file://` URI, where an absolute path is the filesystem root.
+- **The relay serves `web/` as a directory** (`web_asset`), not from a list of filenames — see
+  below. Adding a file needs no relay change.
+
+`web/js/` in load order: `state` (globals, settings, theme, socket) → `markdown` → `diff` →
+`triage` → `spaces` (grouping and naming lookups) → `cards` (what a row is called and how it
+renders) → `mirror` (the terminal reconciler) → `nav` → `palette` → `push`.
 
 **The palette is Claude Code's own ground, by way of collie** (`collie/web/src/index.css`): a neutral
 grey ramp on `#0a0a0a`, with the four status hues tuned against each ground rather than one set
@@ -633,6 +651,26 @@ The rules are all rules about not lying to the operator:
   it is an `int` in python and would sort a pane unread for good.
 - **Both fields absent reads as "nothing known".** A relay older than this ships neither and a client
   must treat that as "no unseen section", not as "everything is unread".
+
+### Static assets: the relay serves `web/` as a directory
+
+`web_asset()` resolves a request path to a file under `web/` by **extension**, replacing a
+hand-maintained `path -> (filename, mime)` table. The table was a standing bug rather than a list:
+a file committed to `web/` is public on Cloudflare Pages immediately, but over the relay it 404s
+until someone remembers two more lines in two different places — so a missing asset only ever
+appeared for the people on a tunnel.
+
+- **Cache-Control is split by extension, deliberately.** `.woff2/.png/.svg/.txt` get a year
+  immutable; `.css/.js` get `no-cache`, because they change under a fixed name on every deploy and
+  a year of immutable would pin returning browsers to whatever JavaScript they saw first.
+- **`.html` is absent from the table on purpose.** `index.html` is served further up, behind
+  `HERDR_RELAY_TOKEN` when one is set. Static assets are exempt from that token — a browser fetches
+  the stylesheet and the scripts before it can authenticate — so putting `.html` here would turn
+  that exemption into a way past the token.
+- **It cannot be talked out of `web/`.** Every path segment must be a plain name (rejecting `""`,
+  `.`, `..` and anything holding a separator — the server has already percent-decoded, so `%2e%2e`
+  is covered), and the resolved path is re-checked to be inside `web/`, which is what stops a
+  symlink pointing out of the tree. `tests/test_web_assets.py` covers both halves.
 
 ### Relay-side constraints clients must respect
 

@@ -1856,19 +1856,74 @@ async def event_push():
             await broadcast(message)
 
 
+WEB_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web"))
+
+# What the relay serves out of web/, keyed by extension: (content type, Cache-Control).
+#
+# The split is the interesting half. A font or a raster never changes without changing its name,
+# so a year of immutable caching is free. The stylesheet and the scripts DO change under a fixed
+# name on every deploy, and the previous table gave the one file it held -- a font -- that same
+# year. Handing it to app.css would have pinned every returning browser to whatever JavaScript it
+# saw first, with no way to invalidate short of renaming the files.
+#
+# `.html` is deliberately absent: index.html is served further up, behind the token when one is
+# configured, and adding it here would quietly turn the auth exemption below into a way past it.
+WEB_ASSET_TYPES = {
+    ".css": ("text/css; charset=utf-8", "no-cache"),
+    ".js": ("text/javascript; charset=utf-8", "no-cache"),
+    ".svg": ("image/svg+xml", "public, max-age=31536000, immutable"),
+    ".png": ("image/png", "public, max-age=31536000, immutable"),
+    ".woff2": ("font/woff2", "public, max-age=31536000, immutable"),
+    ".txt": ("text/plain; charset=utf-8", "public, max-age=31536000, immutable"),
+}
+
+
+def web_asset(request_path):
+    """(absolute path, content type, cache policy) for a static file under web/, or None.
+
+    Replaces a hand-maintained `path -> (filename, mime)` table, which was a standing bug rather
+    than a list: every file committed to web/ is public on Cloudflare Pages immediately, but over
+    the relay it 404s until someone remembers two more lines in two different places -- so a
+    missing asset only ever showed up for the people on a tunnel, which is the half nobody tests.
+    Splitting the app into modules would have made that table grow a line per file.
+
+    Cannot be talked out of web/. Every segment has to be a plain name, which rejects "", ".",
+    ".." and anything carrying a separator -- and the server has already percent-decoded, so that
+    covers the %2e%2e spellings too. The resolved path is then checked to still be inside web/,
+    which is what catches a symlink pointing out of the tree.
+    """
+    if not isinstance(request_path, str) or not request_path.startswith("/"):
+        return None
+    segments = request_path[1:].split("/")
+    separators = {os.sep, os.altsep} - {None}
+    for segment in segments:
+        if segment in ("", ".", "..") or any(sep in segment for sep in separators):
+            return None
+    entry = WEB_ASSET_TYPES.get(os.path.splitext(segments[-1])[1].lower())
+    if entry is None:
+        return None
+    resolved = os.path.realpath(os.path.join(WEB_DIR, *segments))
+    if resolved != WEB_DIR and not resolved.startswith(WEB_DIR + os.sep):
+        return None
+    if not os.path.isfile(resolved):
+        return None
+    content_type, cache_control = entry
+    return resolved, content_type, cache_control
+
+
 async def process_request(connection, request):
     """Handle HTTP POST on the same port as WebSocket."""
     from websockets.http11 import Response
     from websockets.datastructures import Headers
 
-    public_paths = {
-        "/sw.js", "/logo.svg", "/api/vapid-public-key",
-        "/HackNerdFont-Regular.woff2", "/HackNerdFont-LICENSE.txt",
-    }
+    public_paths = {"/sw.js", "/api/vapid-public-key"}
     request_path = (request.path or "/").split("?", 1)[0]
 
-    # Token auth (if configured)
-    if AUTH_TOKEN and request_path not in public_paths:
+    # Token auth (if configured). Static assets under web/ are exempt because a browser fetches
+    # the stylesheet, the scripts and the fonts before anything has authenticated, and the
+    # service worker reads its notification icon with no session at all. index.html is NOT one of
+    # them -- see web_asset -- so the app itself stays behind the token exactly as before.
+    if AUTH_TOKEN and request_path not in public_paths and web_asset(request_path) is None:
         token = None
         for key, value in request.headers.raw_items():
             if key.lower() == "authorization":
@@ -1974,23 +2029,16 @@ async def process_request(connection, request):
             headers = Headers([("Content-Type", "image/svg+xml")])
             return Response(200, "OK", headers, body)
 
-    static_files = {
-        "/HackNerdFont-Regular.woff2": ("HackNerdFont-Regular.woff2", "font/woff2"),
-        "/HackNerdFont-LICENSE.txt": ("HackNerdFont-LICENSE.txt", "text/plain; charset=utf-8"),
-    }
-    if path in static_files:
-        filename, content_type = static_files[path]
-        asset_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "web", filename
-        )
-        if os.path.isfile(asset_path):
-            with open(asset_path, "rb") as f:
-                body = f.read()
-            headers = Headers([
-                ("Content-Type", content_type),
-                ("Cache-Control", "public, max-age=31536000, immutable"),
-            ])
-            return Response(200, "OK", headers, body)
+    asset = web_asset(path)
+    if asset:
+        asset_path, content_type, cache_control = asset
+        with open(asset_path, "rb") as f:
+            body = f.read()
+        headers = Headers([
+            ("Content-Type", content_type),
+            ("Cache-Control", cache_control),
+        ])
+        return Response(200, "OK", headers, body)
 
     # Fallback for unmatched paths
     headers = Headers([("Access-Control-Allow-Origin", "*")])
