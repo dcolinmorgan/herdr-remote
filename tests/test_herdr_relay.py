@@ -65,7 +65,7 @@ def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_o
         if relay_token is not None:
             environment["HERDR_RELAY_TOKEN"] = relay_token
         if trusted_origins is not None:
-            environment["HERDR_RELAY_TRUSTED_ORIGINS"] = trusted_origins
+            environment["HERDR_TRUSTED_ORIGINS"] = trusted_origins
 
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.dict(
             sys.modules, _websockets_stubs(), clear=False
@@ -74,7 +74,7 @@ def loaded_relay(*, herdr_bin=None, relay_host=None, relay_token=None, trusted_o
                 ("HERDR_BIN", herdr_bin),
                 ("HERDR_RELAY_HOST", relay_host),
                 ("HERDR_RELAY_TOKEN", relay_token),
-                ("HERDR_RELAY_TRUSTED_ORIGINS", trusted_origins),
+                ("HERDR_TRUSTED_ORIGINS", trusted_origins),
             ):
                 if value is None:
                     os.environ.pop(name, None)
