@@ -39,7 +39,7 @@ document.addEventListener('DOMContentLoaded', () => bind());
 *:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
 body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; }
 
-.header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
+.header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); position: relative; }
 .header h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
 .header button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 8px; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: color 0.15s, background 0.15s; }
 .header button:hover { color: var(--text); background: var(--border); }
@@ -80,6 +80,23 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .chip:active { transform: scale(0.95); }
 .chip-add { border: 2px dashed var(--border); background: transparent; color: var(--muted); font-size: 1rem; padding: 4px 12px; }
 .chip-add:hover { border-color: var(--blue); color: var(--blue); }
+
+/* Session picker. The wrapper is the positioning context so the menu hangs
+   under the button rather than the header's left edge. */
+.session-picker { position: relative; display: inline-flex; align-items: center; }
+/* Pill styling borrowed from .chip so it reads as a control at rest; the id
+   beats .header button's 44px icon-button sizing. */
+#sessionSelector { min-width: 0; min-height: 0; padding: 5px 12px; border-radius: 9999px; background: var(--border); color: var(--muted); font-size: 0.8rem; font-weight: 500; white-space: nowrap; }
+#sessionSelector:hover { color: var(--text); }
+#sessionSelector:active { transform: scale(0.95); }
+/* 60 sits above .terminal-view (50), which starts below the header and so must
+   not cover a menu hanging off it. Deliberately below #cmdPalette (100) and
+   #contextMenu (200) — those are modals that should cover a dropdown. */
+#sessionMenu { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 60; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-width: 160px; font-size: 0.8rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+#sessionMenu [role="option"] { padding: 6px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+#sessionMenu [role="option"]:hover { background: var(--border); }
+/* Fixed width so names align whether or not the row is ticked. */
+.session-mark { display: inline-block; width: 1.1em; }
 .agent .info { flex: 1; }
 .agent .project { font-size: 0.9rem; font-weight: 500; }
 .agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
@@ -176,6 +193,11 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   <span class="dot" id="statusDot"></span>
   <h1>herdr</h1>
   <span id="connLabel" style="font-size:0.65rem;font-weight:500"></span>
+  <span class="session-picker" id="sessionPicker">
+    <button id="sessionSelector" onclick="toggleSessionMenu()" aria-haspopup="listbox"
+            aria-expanded="false" aria-label="Switch herdr session"></button>
+    <div id="sessionMenu" role="listbox" aria-label="herdr sessions"></div>
+  </span>
   <span id="agentCount" style="font-size:0.7rem;color:var(--muted);margin-left:auto"></span>
   <button onclick="toggleTimeline()" aria-label="Timeline"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
   <button onclick="toggleSettings()" aria-label="Settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button>
@@ -573,7 +595,21 @@ function ansiFragment(input) {
 }
 
 function handleMessage(msg) {
+  if (msg.type === 'sessions') {
+    sessionState = msg;
+    renderSessionSelector();
+    return;
+  }
+  if (msg.type === 'error') {
+    // A rejected session_switch must not leave the UI stuck on
+    // "switching…" forever. Minimum handling only: no toast UI, since
+    // nothing else in this file renders errors.
+    switchingSession = false;
+    render();
+    return;
+  }
   if (msg.type === 'agents') {
+    switchingSession = false;
     // Track timeline on status changes
     for (const a of msg.agents) {
       const prev = prevStatuses[a.pane_id];
@@ -722,9 +758,26 @@ function renderAgentList(list) {
   if (working.length) html += section('Working', 'var(--green)', working);
   if (done.length) html += section('Done', 'var(--muted)', done);
   if (idle.length) html += section('Idle', 'var(--muted)', idle);
-  if (!list.length) html = '<div class="empty">Waiting for agents…</div>';
+  if (!list.length) html = emptyStateHtml();
   document.getElementById('agents').innerHTML = html;
   bindLongPressHandlers();
+}
+
+function emptyStateHtml() {
+  if (switchingSession) return '<div class="empty">switching…</div>';
+  // Only meaningful with exactly one source: with remotes configured,
+  // "local" being idle says nothing about why the list is empty overall.
+  const sources = sessionState?.sources || [];
+  if (sources.length === 1) {
+    const local = sources[0];
+    const active = local.active || 'default';
+    const entry = local.sessions.find(s => s.name === active);
+    // Same wording herdr-remote-session prints, so CLI and UI agree.
+    if (entry && !entry.running) {
+      return `<div class="empty">session '${active}' is not running</div>`;
+    }
+  }
+  return '<div class="empty">Waiting for agents…</div>';
 }
 
 function bindLongPressHandlers() {
@@ -743,6 +796,97 @@ function bindLongPressHandlers() {
 }
 
 function selectWorkspace(id) { activeWorkspace = id; activeTab = null; render(); }
+
+let sessionState = null;
+
+function renderSessionSelector() {
+  const btn = document.getElementById('sessionSelector');
+  const menu = document.getElementById('sessionMenu');
+  const picker = document.getElementById('sessionPicker');
+  const sources = sessionState?.sources || [];
+  const total = sources.reduce((n, s) => n + s.sessions.length, 0);
+  // Nothing to switch between: stay out of the way. Hide the wrapper, not just
+  // the button, or the header's flex gap leaves a stray space behind.
+  if (total < 2) { picker.style.display = 'none'; menu.style.display = 'none'; return; }
+  picker.style.display = '';
+
+  const multiSource = sources.length > 1;
+  if (multiSource) {
+    // The trigger used to show local's session unconditionally, so with
+    // remotes configured switching a remote looked like it did nothing.
+    // Stay neutral instead of naming one specific source's session.
+    btn.textContent = 'sessions ▾';
+  } else {
+    const local = sources[0];
+    const active = local.active || 'default';
+    const entry = local.sessions.find(s => s.name === active);
+    // Fall back to the raw active value when nothing matches, so a
+    // mismatch (e.g. herdr's default session not literally named
+    // "default") degrades to a correct-but-unticked label rather than a
+    // confidently wrong one.
+    btn.textContent = (entry ? entry.name : local.active) + ' ▾';
+  }
+
+  const rowTargets = [];
+  menu.innerHTML = sources.map(src => {
+    const header = multiSource
+      ? `<div class="chip-label" style="padding:4px 8px">${escapeHtml(src.host)}</div>`
+      : '';
+    const rows = src.sessions.map(s => {
+      const active = (src.active || 'default') === s.name;
+      const dim = s.running ? '' : 'opacity:0.55;';
+      rowTargets.push({ host: src.host, session: s.name });
+      // The tick lives in a fixed-width span so ticked and unticked names
+      // start at the same x. A bare space would collapse in HTML.
+      return `<div role="option" aria-selected="${active}" tabindex="0" style="${dim}"`
+           + `><span class="session-mark">${active ? '✓' : ''}</span>`
+           + `${escapeHtml(s.name)}${s.running ? '' : ' ·'}</div>`;
+    }).join('');
+    return header + rows;
+  }).join('');
+
+  // Host/session go on via the dataset property setter, not string
+  // interpolation, so a name or host containing quotes or markup can't
+  // break out of an attribute or inject JS. Wired after innerHTML is set,
+  // since the rows above carry no onclick/onkeydown of their own.
+  menu.querySelectorAll('[role="option"]').forEach((row, i) => {
+    row.dataset.host = rowTargets[i].host;
+    row.dataset.session = rowTargets[i].session;
+    const activate = () => switchHerdrSession(row.dataset.host, row.dataset.session);
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); }
+    });
+  });
+}
+
+function toggleSessionMenu() {
+  const menu = document.getElementById('sessionMenu');
+  // Read the computed style, not the inline one: the menu starts hidden via
+  // the stylesheet, so menu.style.display is '' on the first click and an
+  // inline-only check would silently "close" an already-closed menu.
+  const show = getComputedStyle(menu).display === 'none';
+  menu.style.display = show ? 'block' : 'none';
+  document.getElementById('sessionSelector').setAttribute('aria-expanded', String(show));
+}
+
+let switchingSession = false;
+
+function switchHerdrSession(host, session) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  document.getElementById('sessionMenu').style.display = 'none';
+  document.getElementById('sessionSelector').setAttribute('aria-expanded', 'false');
+  // A switch clears relay state and re-polls; a bare empty list would read as
+  // breakage. Routed through the existing render path, not by poking the DOM —
+  // there is no #agentList element. Mutate local state only after we know
+  // the send will happen, so a dead socket can't leave the UI stuck showing
+  // "switching…" forever.
+  switchingSession = true;
+  agents = [];
+  render();
+  ws.send(JSON.stringify({ type: 'session_switch', host, session }));
+}
+
 function backToWorkspaces() { activeWorkspace = null; activeTab = null; render(); }
 function selectTab(id) { activeTab = id; render(); }
 
