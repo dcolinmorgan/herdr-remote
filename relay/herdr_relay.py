@@ -301,17 +301,35 @@ def _mutate_herdr(*args, remote=None):
         return False
 
 
+def get_workspace_labels(remote=None):
+    """Map workspace_id to the workspace name the user chose in herdr."""
+    raw = run_herdr("workspace", "list", remote=remote)
+    try:
+        data = json.loads(raw)
+        workspaces = data.get("result", {}).get("workspaces", [])
+        return {
+            w["workspace_id"]: w.get("label", "")
+            for w in workspaces
+            if w.get("workspace_id") and w.get("label")
+        }
+    except (json.JSONDecodeError, KeyError):
+        return {}
+
+
 def get_agents_from_host(remote=None):
     raw = run_herdr("pane", "list", remote=remote)
     host_label = remote or "local"
     try:
         data = json.loads(raw)
         panes = data.get("result", {}).get("panes", [])
+        workspace_labels = get_workspace_labels(remote=remote) if panes else {}
         return [
             {
                 "pane_id": p["pane_id"],
                 "agent": p.get("agent", ""),
                 "label": p.get("label", ""),
+                # Names the space, and stands in for panes that have no label.
+                "workspace_label": workspace_labels.get(p.get("workspace_id", ""), ""),
                 "status": p.get("agent_status", "unknown"),
                 "cwd": p.get("cwd", ""),
                 "project": os.path.basename(p.get("cwd", "")),
