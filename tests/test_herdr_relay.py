@@ -1387,6 +1387,31 @@ class RelayKeyGrammarTests(unittest.TestCase):
                     run.assert_not_called()
                     self.assertEqual(json.loads(ws.sent[0])["type"], "error")
 
+    def test_a_refused_key_is_named_and_logged(self):
+        """The refusal returns above the log line, so it used to leave no trace at all.
+
+        That is precisely the case worth diagnosing -- a client newer than the relay it talks to --
+        so both the message and the log say which key, and only which key.
+        """
+        pane_id = "w0:p1"
+        with loaded_relay() as relay:
+            relay.known_panes.add(pane_id)
+            ws = _FakeWebSocket([json.dumps({
+                "type": "send_keys", "pane_id": pane_id, "keys": ["Enter", "Insert"],
+            })])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value=""), \
+                 mock.patch.object(relay, "run_herdr_result") as run, \
+                 mock.patch.object(relay.log, "warning") as warned:
+                asyncio.run(relay.handle_client(ws))
+            run.assert_not_called()
+            message = json.loads(ws.sent[0])["message"]
+            self.assertIn("Insert", message)
+            self.assertNotIn("Enter", message, "only the refused key belongs in the message")
+            self.assertTrue(
+                any("Insert" in str(call) for call in warned.call_args_list),
+                "the refused key must reach the log")
+
 
 class RelayCommandTests(unittest.TestCase):
     def test_command_connection_skips_snapshot_and_correlates_ack(self):

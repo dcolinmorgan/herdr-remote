@@ -1410,8 +1410,21 @@ async def handle_client(ws):
                     await ws.send(json.dumps(command_error("unknown pane_id")))
                     continue
                 keys = msg.get("keys", [])
-                if not isinstance(keys, list) or not keys or not all(key_is_allowed(k) for k in keys):
+                if not isinstance(keys, list) or not keys:
+                    log.warning("send_keys from %s (%s) has no key list: %.120r", ip, device, keys)
                     await ws.send(json.dumps(command_error("keys contain disallowed values")))
+                    continue
+                refused = [key for key in keys if not key_is_allowed(key)]
+                if refused:
+                    # Logged because the refusal is otherwise INVISIBLE: this branch returns above
+                    # the `log.info` below, so a client sending a key this relay does not know
+                    # left no trace at all -- which is exactly the case that needs diagnosing,
+                    # since it is what a client newer than its relay looks like.
+                    log.warning("send_keys from %s (%s) refused for pane %s: %.120r",
+                                ip, device, pane_id, refused)
+                    detail = ", ".join(str(key)[:24] for key in refused[:4])
+                    await ws.send(json.dumps(
+                        command_error(f"keys contain disallowed values: {detail}")))
                     continue
                 remote = pane_remote_map.get(pane_id)
                 content = read_pane(pane_id, remote=remote)
