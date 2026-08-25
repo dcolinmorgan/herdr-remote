@@ -288,9 +288,10 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("Protocol.AgentPrompt(agent.Id, trimmed)", connection)
 
         # Both sides submit with `herdr agent prompt`, the verb the relay's agent_prompt
-        # handler runs — not by typing into the pane and hoping Enter takes.
+        # handler runs — not by typing into the pane and hoping Enter takes. The relay reaches
+        # it through a worker thread, so the subprocess never stalls the event loop.
         relay = (ROOT / "relay" / "herdr_relay.py").read_text(encoding="utf-8")
-        self.assertIn('run_herdr("agent", "prompt"', relay)
+        self.assertIn('run_herdr, "agent", "prompt"', relay)
         poller = (ROOT / "herdi-win" / "Services" / "HerdrPoller.cs").read_text(
             encoding="utf-8"
         )

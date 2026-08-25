@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -1801,6 +1802,42 @@ class RelaySubprocessConcurrencyTests(unittest.TestCase):
                     self.assertEqual(blocked.result(timeout=2), "ok")
                     self.assertEqual(other.result(timeout=2), "ok")
                     self.assertEqual(local.result(timeout=2), "ok")
+
+    def test_a_slow_herdr_call_does_not_stall_the_event_loop(self):
+        """The whole point of the worker threads: one slow call must not freeze the relay.
+
+        Awaited inline, a poll tick holds the loop for as long as its herdr call takes -- locally
+        a few ms, but an SSH read can run to the 15s timeout, and for that whole time no other
+        client is served and no broadcast goes out.
+        """
+        with loaded_relay() as relay:
+            def slow_subprocess_run(command, **kwargs):
+                time.sleep(0.3)
+                return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+            async def scenario():
+                ticks = 0
+
+                async def ticker():
+                    nonlocal ticks
+                    while True:
+                        await asyncio.sleep(0.005)
+                        ticks += 1
+
+                beat = asyncio.create_task(ticker())
+                await asyncio.sleep(0)  # let the ticker reach its first await
+                await relay._poll_once()
+                beat.cancel()
+                return ticks
+
+            with mock.patch.object(relay.subprocess, "run", side_effect=slow_subprocess_run):
+                ticks = asyncio.run(scenario())
+
+            # 0.3s of subprocess against a 5ms tick. Inline it is exactly 0; off the loop it is
+            # tens. Ten is far below the ~60 a healthy loop manages and far above a blocked one.
+            self.assertGreater(
+                ticks, 10, "the event loop was blocked for the length of the herdr call"
+            )
 
 
 if __name__ == "__main__":

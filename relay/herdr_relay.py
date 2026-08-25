@@ -401,26 +401,20 @@ def _save_active_sessions():
         json.dump(payload, f)
 
 
-async def send_web_push(title: str, body: str, url: str = "/", clear: bool = False):
-    """Send push notification to all registered subscriptions.
-    
-    Uses collapse topic + TTL so offline devices get only the latest.
-    If clear=True, sends a clear instruction instead of showing a notification.
+def _deliver_push(payload, headers):
+    """POST one payload to every subscription. BLOCKING -- pywebpush is requests underneath.
+
+    Works off a snapshot of push_subscriptions and drops dead ones BY VALUE: this runs on a
+    worker thread now, so a push_subscribe arriving mid-flight would invalidate any index
+    computed before it and pop somebody else's subscription.
     """
-    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
-        return
     try:
-        from pywebpush import webpush, WebPushException
+        from pywebpush import webpush
     except ImportError:
         log.warning("pywebpush not installed, skipping push")
         return
-    if clear:
-        payload = json.dumps({"type": "clear", "tag": "herdr-blocked"})
-    else:
-        payload = json.dumps({"title": title, "body": body, "url": url})
-    headers = {"Topic": "herdr-herd", "TTL": "21600"}  # 6h TTL, collapse key
     dead = []
-    for i, sub in enumerate(push_subscriptions):
+    for sub in list(push_subscriptions):
         try:
             webpush(
                 subscription_info=sub,
@@ -430,19 +424,50 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
                 headers=headers,
             )
         except Exception as e:
-            log.warning("Push failed for sub %d: %s", i, e)
+            log.warning("Push failed for %.60s: %s", (sub or {}).get("endpoint", "?"), e)
+            # 404/410 is the push service saying this subscription is retired, not a transient
+            # failure -- anything else keeps its subscription for the next notification.
             if "410" in str(e) or "404" in str(e):
-                dead.append(i)
+                dead.append(sub)
+    for sub in dead:
+        try:
+            push_subscriptions.remove(sub)
+        except ValueError:
+            pass
     if dead:
-        for i in reversed(dead):
-            push_subscriptions.pop(i)
         _save_push_subs()
+
+
+async def send_web_push(title: str, body: str, url: str = "/", clear: bool = False):
+    """Send push notification to all registered subscriptions.
+
+    Uses collapse topic + TTL so offline devices get only the latest.
+    If clear=True, sends a clear instruction instead of showing a notification.
+    """
+    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
+        return
+    if clear:
+        payload = json.dumps({"type": "clear", "tag": "herdr-blocked"})
+    else:
+        payload = json.dumps({"title": title, "body": body, "url": url})
+    headers = {"Topic": "herdr-herd", "TTL": "21600"}  # 6h TTL, collapse key
+    await asyncio.to_thread(_deliver_push, payload, headers)
 
 _load_push_subs()
 _load_active_sessions()
 
 
 def _invoke_herdr(*args, remote=None):
+    """Run one herdr command, locally or over SSH. BLOCKING -- never call this from the loop.
+
+    Every herdr call is a subprocess. Locally that is a few ms, but a read reaching past the
+    viewport costs seconds and an SSH call can run to the timeout below, and for that whole time
+    an inline caller serves no other client, runs no poll tick and sends no broadcast. Everything
+    reachable from async code goes through asyncio.to_thread.
+
+    Only the SSH branch touches shared state (_remote_locks, behind _remote_locks_guard), so the
+    worker threads need no further synchronising.
+    """
     session = active_session_for(remote)
     if remote:
         cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote]
@@ -707,12 +732,10 @@ def sessions_message():
 
 async def broadcast_sessions():
     gen = POLL_GENERATION
-    msg = sessions_message()
-    # This guard cannot fire today: sessions_message -> get_sessions ->
-    # run_herdr -> subprocess.run is entirely synchronous, so nothing can
-    # bump POLL_GENERATION between the two lines above. It stays correct
-    # and becomes load-bearing the moment that chain gains an await (e.g.
-    # a future to_thread fix for the blocking subprocess call).
+    msg = await asyncio.to_thread(sessions_message)
+    # This guard is load-bearing now that the line above yields: sessions_message runs one
+    # `herdr session list` per source on a worker thread, so a session_switch CAN land while
+    # this message is being built, and the message it would carry is then already wrong.
     #
     # It does NOT cover the real staleness window: broadcast() below awaits
     # ws.send() once per client, so a switch landing mid fan-out can still
@@ -992,14 +1015,14 @@ async def broadcast(msg):
     clients.difference_update(dead)
 
 async def send_current_snapshot(ws):
-    await ws.send(json.dumps(sessions_message()))
-    agents = get_all_agents()
+    await ws.send(json.dumps(await asyncio.to_thread(sessions_message)))
+    agents = await asyncio.to_thread(get_all_agents)
     update_pane_maps(agents)
     await ws.send(json.dumps({"type": "agents", "agents": agents}))
     for agent in agents:
         if agent["status"] != "blocked":
             continue
-        content = read_pane(agent["pane_id"], remote=agent.get("remote"))
+        content = await asyncio.to_thread(read_pane, agent["pane_id"], remote=agent.get("remote"))
         await ws.send(json.dumps(blocked_message(
             agent["pane_id"],
             agent["agent"],
@@ -1024,7 +1047,7 @@ async def poll_loop():
 
 async def _poll_once():
         gen = POLL_GENERATION
-        agents = get_all_agents()
+        agents = await asyncio.to_thread(get_all_agents)
         update_pane_maps(agents)
         # Always broadcast (even empty list) so clients stay in sync
         await broadcast({"type": "agents", "agents": agents})
@@ -1033,7 +1056,7 @@ async def _poll_once():
         for a in agents:
             pid, status = a["pane_id"], a["status"]
             if status == "blocked":
-                content = read_pane(pid, remote=a.get("remote"))
+                content = await asyncio.to_thread(read_pane, pid, remote=a.get("remote"))
                 message = blocked_message(
                     pid,
                     a["agent"],
@@ -1085,7 +1108,7 @@ async def event_push():
         event_remote = pane_remote_map.get(pane_id)
 
         if pane_id and event.get("type") == "agent_event":
-            agents = get_all_agents()
+            agents = await asyncio.to_thread(get_all_agents)
             if status == "blocked" and not any(
                 agent["pane_id"] == pane_id for agent in agents
             ):
@@ -1109,7 +1132,7 @@ async def event_push():
         if status == "blocked" and pane_id:
             remote = pane_remote_map.get(pane_id)
             if remote or host == "local":
-                content = read_pane(pane_id, remote=remote)
+                content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
             else:
                 content = event.get("prompt", "Agent is blocked")
             message = blocked_message(
@@ -1323,10 +1346,12 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "invalid question option"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                if not prompt_matches(pane_id, msg.get("prompt_id", ""), remote=remote):
+                if not await asyncio.to_thread(
+                    prompt_matches, pane_id, msg.get("prompt_id", ""), remote=remote
+                ):
                     await ws.send(json.dumps({"type": "error", "message": "question changed; refresh and try again"}))
                     continue
-                if not toggle_question_option(pane_id, option, remote=remote):
+                if not await asyncio.to_thread(toggle_question_option, pane_id, option, remote=remote):
                     await ws.send(json.dumps({"type": "error", "message": "question option toggle failed"}))
             elif msg_type == "question_submit":
                 pane_id = msg["pane_id"]
@@ -1334,10 +1359,12 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                if not prompt_matches(pane_id, msg.get("prompt_id", ""), remote=remote):
+                if not await asyncio.to_thread(
+                    prompt_matches, pane_id, msg.get("prompt_id", ""), remote=remote
+                ):
                     await ws.send(json.dumps({"type": "error", "message": "question changed; refresh and try again"}))
                     continue
-                if not submit_multi_question(pane_id, remote=remote):
+                if not await asyncio.to_thread(submit_multi_question, pane_id, remote=remote):
                     await ws.send(json.dumps({"type": "error", "message": "question submission failed"}))
             elif msg_type == "respond":
                 pane_id = msg["pane_id"]
@@ -1357,20 +1384,26 @@ async def handle_client(ws):
                     await ws.send(json.dumps(command_error("response empty or too long")))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                content = read_pane(pane_id, remote=remote)
+                content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
                     await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
                     continue
-                question = detect_question(content) if pane_is_omp(pane_id, remote=remote) else None
+                question = (
+                    detect_question(content)
+                    if await asyncio.to_thread(pane_is_omp, pane_id, remote=remote)
+                    else None
+                )
                 log.info("Response from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("respond", ip, device, pane_id, f"text={text!r}")
                 if question:
-                    delivered = respond_to_question(pane_id, text, question, remote=remote)
+                    delivered = await asyncio.to_thread(
+                        respond_to_question, pane_id, text, question, remote=remote
+                    )
                 elif custom_editor_active(content) or text.lower() in SAFE_RESPONSES:
-                    delivered = _mutate_herdr(
-                        "pane", "send-text", pane_id, text, remote=remote
-                    ) and _mutate_herdr(
-                        "pane", "send-keys", pane_id, "Enter", remote=remote
+                    delivered = await asyncio.to_thread(
+                        _mutate_herdr, "pane", "send-text", pane_id, text, remote=remote
+                    ) and await asyncio.to_thread(
+                        _mutate_herdr, "pane", "send-keys", pane_id, "Enter", remote=remote
                     )
                 else:
                     await ws.send(json.dumps({
@@ -1423,7 +1456,8 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "invalid pane read format"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                content = run_herdr(
+                content = await asyncio.to_thread(
+                    run_herdr,
                     "pane", "read", pane_id, "--lines", str(lines), "--source", "recent",
                     "--format", read_format, remote=remote
                 )
@@ -1435,7 +1469,9 @@ async def handle_client(ws):
                     continue
                 remote = pane_remote_map.get(pane_id)
                 # Try to read conversation history from agent's session log
-                history = run_herdr("agent", "history", pane_id, "--format", "json", remote=remote)
+                history = await asyncio.to_thread(
+                    run_herdr, "agent", "history", pane_id, "--format", "json", remote=remote
+                )
                 messages = []
                 try:
                     data = json.loads(history) if history else {}
@@ -1474,7 +1510,7 @@ async def handle_client(ws):
                         command_error(f"keys contain disallowed values: {detail}")))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                content = read_pane(pane_id, remote=remote)
+                content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 if detect_approval_options(content) and any(key.isdigit() for key in keys):
                     if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
                         await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
@@ -1498,7 +1534,9 @@ async def handle_client(ws):
                     # send-text takes ONE text argument, so a run of CSI keys is concatenated.
                     args = ["".join(payload)] if kind == "send-text" else payload
                     try:
-                        result = run_herdr_result("pane", kind, pane_id, *args, remote=remote)
+                        result = await asyncio.to_thread(
+                            run_herdr_result, "pane", kind, pane_id, *args, remote=remote
+                        )
                     except Exception as exc:
                         failure = f"raised {exc}"
                     else:
@@ -1526,7 +1564,7 @@ async def handle_client(ws):
                 remote = pane_remote_map.get(pane_id)
                 log.info("Text from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("send_text", ip, device, pane_id, f"text={text!r}")
-                run_herdr("pane", "send-text", pane_id, text, remote=remote)
+                await asyncio.to_thread(run_herdr, "pane", "send-text", pane_id, text, remote=remote)
             elif msg_type == "agent_prompt":
                 # Use 'herdr agent prompt' for proper submission (works with Codex, Claude, etc.)
                 pane_id = msg["pane_id"]
@@ -1540,14 +1578,16 @@ async def handle_client(ws):
                 remote = pane_remote_map.get(pane_id)
                 log.info("Agent prompt from %s (%s): pane=%s text=%r", ip, device, pane_id, text[:100])
                 audit("agent_prompt", ip, device, pane_id, f"text={text[:100]!r}")
-                run_herdr("agent", "prompt", pane_id, text, remote=remote)
+                await asyncio.to_thread(run_herdr, "agent", "prompt", pane_id, text, remote=remote)
                 await ws.send(json.dumps({"type": "command_result", "command": "agent_prompt", "ok": True}))
             elif msg_type == "create_tab":
                 workspace_id = msg.get("workspace_id", "")
                 if workspace_id:
                     log.info("Create tab from %s (%s): workspace=%s", ip, device, workspace_id)
                     audit("create_tab", ip, device, "", f"workspace={workspace_id}")
-                    run_herdr("tab", "create", "--workspace", workspace_id, "--focus")
+                    await asyncio.to_thread(
+                        run_herdr, "tab", "create", "--workspace", workspace_id, "--focus"
+                    )
                     await ws.send(json.dumps({"type": "tab_created", "ok": True}))
                 else:
                     await ws.send(json.dumps({"type": "error", "message": "workspace_id required"}))
@@ -1651,7 +1691,12 @@ async def main():
         if zc is not None:
             try:
                 if info is not None:
-                    zc.unregister_service(info)
+                    # unregister_service submits a coroutine to zeroconf's own loop and waits on
+                    # .result(). Called from this loop it deadlocks against itself until zeroconf
+                    # gives up at _LOADED_SYSTEM_TIMEOUT -- measured 10.4s of a shutdown that
+                    # should be instant, on every restart. register_service was already on its own
+                    # thread; the teardown beside it never was.
+                    await asyncio.to_thread(zc.unregister_service, info)
             finally:
                 zc.close()
 
