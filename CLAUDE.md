@@ -106,7 +106,51 @@ Runtime session overrides (per source) are persisted to `active_sessions.json` i
 
 ## Web App
 
-The web app is a single self-contained HTML file (`web/index.html`) with inline CSS and JS — no build step. It's deployed to Cloudflare Pages. It includes 11 color themes, a mobile terminal keyboard, PWA support, and agent-icon detection.
+The web app is a single self-contained HTML file (`web/index.html`) with inline CSS and JS — no build step. It's deployed to Cloudflare Pages. It carries a mobile terminal keyboard, PWA support, and agent-icon detection.
+
+**The palette is Claude Code's own ground, by way of collie** (`collie/web/src/index.css`): a neutral
+grey ramp on `#0a0a0a`, with the four status hues tuned against each ground rather than one set
+reused for both. The values are collie's oklch rasterized, because the `theme-color` metas, the web
+manifest and `ANSI_COLORS` are all hex and a token that disagreed with a meta shows as a seam under
+the URL bar. It is written **once**, as a block of `light-dark()` pairs resolved by the root's own
+`color-scheme`; the other shape — a light palette plus a dark `@media` copy — has to restate every
+value, and then a third time for an explicit pin. That is what makes the Settings switch two lines
+of CSS (`:root[data-theme="light"|"dark"] { color-scheme: … }`), and it puts native UI — scrollbars,
+form controls, the caret, the iOS keyboard — on the right side of the theme for free. The cost is a
+floor of Chrome 123 / Safari 17.5, next to the `color-mix()` already load-bearing throughout the
+file.
+
+- **Auto is the *absence* of a pin**, so it works with JavaScript disabled entirely. What JS owns is
+  the part CSS cannot do: taking a **stale** pin back off — Dark → Auto leaving `data-theme` stamped
+  is the bug the two-way write exists to stop — and the two `theme-color` metas, which carry `media`
+  attributes and therefore follow the OS rather than the pin, so a pinned reader is given the pinned
+  colour in *both*. The choice is a **bare string** in `localStorage.herdr_theme`, written by
+  `setTheme` and read by a script in `<head>` before first paint; `JSON.stringify` there would store
+  `"dark"` *with* the quotes and the anti-flash would silently never fire again. Three exclusive
+  choices are a `radiogroup`, not three `aria-pressed` toggles announcing three independent
+  switches, and the selected one fills with the inverted neutral the session view's toggles already
+  use — blue would read as the *selection* colour the chips own.
+- **`--on-accent` is the text ON a saturated fill.** A saturated token is dark in the light theme
+  and light in the dark one, so no single literal serves both: the `color: #fff` these controls
+  carried measured **2.6:1** against the dark theme's blue. The pair measures ≥6.6:1 on all four
+  hues in both themes.
+- **The mirror is dark under both themes** and carries its own `color-scheme: dark`. `ANSI_COLORS`
+  is VS Code's Dark+ set — the same 16 collie ships — authored for a dark ground, and it sits beside
+  truecolor an agent emits that no palette can re-theme. That `color-scheme` also puts the tokens
+  used *inside* the pane (the search highlight) on their dark halves, and stops a light theme from
+  handing dark output a light scrollbar.
+- **The UI is monospace**, because the app is a window onto a terminal and a proportional shell
+  around a monospace pane read as two programs sharing a screen. `--font-mono` is the system stack;
+  the bundled **Hack Nerd Font is deliberately not in it** — 982KB, and today nothing fetches it
+  until a session opens, since a `display: none` element loads no font. It stays first in
+  `--font-term`, where its Nerd Font glyphs are the reason it is shipped at all. Every measured
+  layout assertion in `tests/test_web_*.py` — the key labels that must not clip at 320px, the herd
+  row that gives up the project before the tab, the chrome budgets — passes unchanged under it.
+
+`tests/test_web_theme.py` measures all of it in a browser: the two grounds, a pin beating the OS in
+both directions, the stale pin coming off, the pre-paint stamp surviving a reload, the metas, the
+contrast on each saturated fill, and "monospace" as two equal-length strings of different glyphs
+measuring the same width.
 
 The history panel renders a conversation, not a log: a person's turn is a tinted bubble, the
 agent's is full-width markdown, a tool call is one compact row, and a file edit opens into its
