@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import importlib.util
 import json
@@ -617,13 +618,11 @@ class RelaySessionSwitchTests(unittest.TestCase):
             saved = {}
             relay.known_panes.add("w1:p1")
 
-            with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "default", "running": True},
-                        {"name": "personal", "running": True}]), \
-                 mock.patch.object(relay, "_save_active_sessions",
+            with mock.patch.object(relay, "_save_active_sessions",
                                    side_effect=lambda: saved.update(relay.ACTIVE_SESSIONS)), \
                  mock.patch.object(relay, "audit"):
-                ok, err, changed = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch(
+                    "local", "default", names={"default", "personal"})
 
             self.assertTrue(ok)
             self.assertEqual(err, "")
@@ -634,11 +633,10 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
     def test_apply_session_switch_accepts_null_for_default_session(self):
         with loaded_relay() as relay:
-            with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "personal", "running": True}]), \
-                 mock.patch.object(relay, "_save_active_sessions"), \
+            with mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit"):
-                ok, err, changed = relay.apply_session_switch("local", None)
+                # None never touches the allowlist -- it means "follow herdr's own default".
+                ok, err, changed = relay.apply_session_switch("local", None, names={"personal"})
 
             self.assertTrue(ok)
             self.assertTrue(changed)
@@ -653,20 +651,20 @@ class RelaySessionSwitchTests(unittest.TestCase):
         with loaded_relay() as relay:
             relay.known_panes.add("w1:p1")
             before = dict(relay.ACTIVE_SESSIONS)
-            with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "personal", "running": True}]), \
-                 mock.patch.object(relay, "audit"):
-                ok, err, changed = relay.apply_session_switch("local", "../../etc/passwd")
+            with mock.patch.object(relay, "audit"):
+                names = {"personal"}
+                ok, err, changed = relay.apply_session_switch(
+                    "local", "../../etc/passwd", names=names)
                 self.assertFalse(ok)
                 self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
-                ok, err, changed = relay.apply_session_switch("local", "personal2")
+                ok, err, changed = relay.apply_session_switch("local", "personal2", names=names)
                 self.assertFalse(ok)
                 self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
-                ok, err, changed = relay.apply_session_switch("local", "Personal")
+                ok, err, changed = relay.apply_session_switch("local", "Personal", names=names)
                 self.assertFalse(ok)
                 self.assertFalse(changed)
                 self.assertIn("unknown session", err)
@@ -679,15 +677,15 @@ class RelaySessionSwitchTests(unittest.TestCase):
         # is unhashable there and must be rejected, not raise.
         with loaded_relay() as relay:
             before = dict(relay.ACTIVE_SESSIONS)
-            with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "personal", "running": True}]), \
-                 mock.patch.object(relay, "audit"):
-                ok, err, changed = relay.apply_session_switch("local", ["personal"])
+            with mock.patch.object(relay, "audit"):
+                names = {"personal"}
+                ok, err, changed = relay.apply_session_switch("local", ["personal"], names=names)
                 self.assertFalse(ok)
                 self.assertFalse(changed)
                 self.assertIn("unknown session", err)
 
-                ok, err, changed = relay.apply_session_switch("local", {"name": "personal"})
+                ok, err, changed = relay.apply_session_switch(
+                    "local", {"name": "personal"}, names=names)
                 self.assertFalse(ok)
                 self.assertFalse(changed)
                 self.assertIn("unknown session", err)
@@ -700,7 +698,8 @@ class RelaySessionSwitchTests(unittest.TestCase):
             relay.known_panes.add("w1:p1")
             before = dict(relay.ACTIVE_SESSIONS)
             with mock.patch.object(relay, "audit"):
-                ok, err, changed = relay.apply_session_switch("user@nope", "personal")
+                ok, err, changed = relay.apply_session_switch(
+                    "user@nope", "personal", names=None)
 
             self.assertFalse(ok)
             self.assertFalse(changed)
@@ -710,23 +709,26 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
     def test_apply_session_switch_allows_stopped_session(self):
         with loaded_relay() as relay:
+            # A stopped session is still selectable, and that property now lives in
+            # session_switch_names -- it takes every entry's name, running or not.
             with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "default", "running": False}]), \
-                 mock.patch.object(relay, "_save_active_sessions"), \
+                        {"name": "default", "running": False}]):
+                names = relay.session_switch_names("local")
+            self.assertEqual(names, {"default"})
+
+            with mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit"):
-                ok, err, changed = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch("local", "default", names=names)
 
             self.assertTrue(ok)
             self.assertTrue(changed)
 
     def test_apply_session_switch_attributes_audit_to_caller(self):
         with loaded_relay() as relay:
-            with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "default", "running": True}]), \
-                 mock.patch.object(relay, "_save_active_sessions"), \
+            with mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit") as audit_mock:
                 ok, err, changed = relay.apply_session_switch(
-                    "local", "default", ip="10.0.0.5", device="phone")
+                    "local", "default", ip="10.0.0.5", device="phone", names={"default"})
 
             self.assertTrue(ok)
             self.assertTrue(changed)
@@ -741,12 +743,11 @@ class RelaySessionSwitchTests(unittest.TestCase):
         # reset exists to prevent.
         with loaded_relay() as relay:
             relay.known_panes.add("w1:p1")
-            with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "default", "running": True}]), \
-                 mock.patch.object(relay, "_save_active_sessions",
+            with mock.patch.object(relay, "_save_active_sessions",
                                    side_effect=OSError("disk full")), \
                  mock.patch.object(relay, "audit") as audit_mock:
-                ok, err, changed = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch(
+                    "local", "default", names={"default"})
 
             self.assertTrue(ok)
             self.assertEqual(err, "")
@@ -757,21 +758,59 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
     def test_apply_session_switch_is_noop_when_already_active(self):
         with loaded_relay() as relay:
-            with mock.patch.object(relay, "get_sessions", return_value=[
-                        {"name": "default", "running": True}]), \
-                 mock.patch.object(relay, "_save_active_sessions"), \
+            with mock.patch.object(relay, "_save_active_sessions"), \
                  mock.patch.object(relay, "audit"):
-                ok, err, changed = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch(
+                    "local", "default", names={"default"})
                 self.assertTrue(ok)
                 self.assertTrue(changed)   # the real switch
 
                 relay.known_panes.add("w1:p1")
-                ok, err, changed = relay.apply_session_switch("local", "default")
+                ok, err, changed = relay.apply_session_switch(
+                    "local", "default", names={"default"})
 
             self.assertTrue(ok)
             self.assertEqual(err, "")
             self.assertFalse(changed)   # the no-op re-selection
             self.assertIn("w1:p1", relay.known_panes)
+
+    def test_session_switch_names_reports_an_unknown_host_as_none(self):
+        """None, not an empty set: the handler passes it straight through, and an empty set
+        would be indistinguishable from a host with no sessions on it."""
+        with loaded_relay() as relay:
+            relay.REMOTES.clear()
+            with mock.patch.object(relay, "get_sessions") as sessions:
+                self.assertIsNone(relay.session_switch_names("user@nope"))
+            sessions.assert_not_called()
+
+    def test_apply_session_switch_will_not_run_without_an_allowlist(self):
+        """`names` is keyword-only with no default so this function cannot reach a blocking
+        call. A caller that forgets it must fail loudly, not fall back to reading the list."""
+        with loaded_relay() as relay:
+            with self.assertRaises(TypeError):
+                relay.apply_session_switch("local", "default")
+
+    def test_an_empty_allowlist_rejects_every_named_session(self):
+        """Fail closed: a source whose session list could not be read must not become a source
+        where any name is accepted -- the value ends up interpolated into an ssh argv."""
+        with loaded_relay() as relay:
+            before = dict(relay.ACTIVE_SESSIONS)
+            with mock.patch.object(relay, "audit"):
+                for names in (set(), None):
+                    with self.subTest(names=names):
+                        ok, err, changed = relay.apply_session_switch(
+                            "local", "default", names=names)
+                        self.assertFalse(ok)
+                        self.assertFalse(changed)
+                        self.assertIn("unknown session", err)
+            self.assertEqual(relay.ACTIVE_SESSIONS, before)
+
+            # ...but following herdr's own default still works, since that names nothing.
+            with mock.patch.object(relay, "_save_active_sessions"), \
+                 mock.patch.object(relay, "audit"):
+                ok, err, changed = relay.apply_session_switch("local", None, names=None)
+            self.assertTrue(ok)
+            self.assertTrue(changed)
 
     def test_sessions_message_shape(self):
         with loaded_relay() as relay:
@@ -842,8 +881,8 @@ class RelaySessionSwitchTests(unittest.TestCase):
             )
             order = []
 
-            def fake_apply(host, session, ip, device):
-                order.append(("apply", host, session, ip, device))
+            def fake_apply(host, session, ip, device, *, names):
+                order.append(("apply", host, session, ip, device, names))
                 return True, "", True
 
             async def fake_broadcast_sessions():
@@ -857,12 +896,14 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
             ws.send = record_send
 
-            with mock.patch.object(relay, "apply_session_switch", side_effect=fake_apply) as apply_mock, \
+            with mock.patch.object(relay, "session_switch_names", return_value={"personal"}), \
+                 mock.patch.object(relay, "apply_session_switch", side_effect=fake_apply) as apply_mock, \
                  mock.patch.object(relay, "broadcast_sessions", side_effect=fake_broadcast_sessions), \
                  mock.patch.object(relay, "_poll_once", side_effect=fake_poll_once):
                 asyncio.run(relay.handle_client(ws))
 
-            apply_mock.assert_called_once_with("user@host", "personal", "127.0.0.1", "script")
+            apply_mock.assert_called_once_with(
+                "user@host", "personal", "127.0.0.1", "script", names={"personal"})
             self.assertEqual(
                 [step[0] for step in order],
                 ["apply", "broadcast_sessions", "send", "poll_once"],
@@ -890,14 +931,16 @@ class RelaySessionSwitchTests(unittest.TestCase):
                 headers={"X-Herdr-Remote-Command": "1"},
             )
 
-            with mock.patch.object(
+            with mock.patch.object(relay, "session_switch_names", return_value=None), \
+                 mock.patch.object(
                         relay, "apply_session_switch",
                         return_value=(False, "unknown host: bogus", False)) as apply_mock, \
                  mock.patch.object(relay, "broadcast_sessions", new=mock.AsyncMock()) as broadcast_mock, \
                  mock.patch.object(relay, "_poll_once", new=mock.AsyncMock()) as poll_mock:
                 asyncio.run(relay.handle_client(ws))
 
-            apply_mock.assert_called_once_with("bogus", "default", "127.0.0.1", "script")
+            apply_mock.assert_called_once_with(
+                "bogus", "default", "127.0.0.1", "script", names=None)
             self.assertEqual(
                 json.loads(ws.sent[-1]),
                 {
@@ -927,14 +970,16 @@ class RelaySessionSwitchTests(unittest.TestCase):
                 headers={"X-Herdr-Remote-Command": "1"},
             )
 
-            with mock.patch.object(
+            with mock.patch.object(relay, "session_switch_names", return_value={"default"}), \
+                 mock.patch.object(
                         relay, "apply_session_switch",
                         return_value=(True, "", False)) as apply_mock, \
                  mock.patch.object(relay, "broadcast_sessions", new=mock.AsyncMock()) as broadcast_mock, \
                  mock.patch.object(relay, "_poll_once", new=mock.AsyncMock()) as poll_mock:
                 asyncio.run(relay.handle_client(ws))
 
-            apply_mock.assert_called_once_with("local", "default", "127.0.0.1", "script")
+            apply_mock.assert_called_once_with(
+                "local", "default", "127.0.0.1", "script", names={"default"})
             broadcast_mock.assert_not_awaited()
             poll_mock.assert_not_awaited()
             self.assertEqual(
@@ -1838,6 +1883,80 @@ class RelaySubprocessConcurrencyTests(unittest.TestCase):
             self.assertGreater(
                 ticks, 10, "the event loop was blocked for the length of the herdr call"
             )
+
+    def test_no_blocking_call_is_awaited_inline_from_async_code(self):
+        """Structural guard for the above, because the behavioural test only covers one path.
+
+        Builds the call graph over the relay's own sync functions, seeds it with the primitives
+        that actually block, then fails on any of them called straight from an `async def` body
+        rather than through asyncio.to_thread. A new handler that forgets the wrapper is a silent
+        regression -- everything still works, the relay just stops answering anyone else while it
+        runs -- so it has to be caught here rather than in review.
+        """
+        seeds = {"subprocess.run", "subprocess.check_output", "time.sleep",
+                 "zc.unregister_service"}
+        tree = ast.parse(RELAY_PATH.read_text(encoding="utf-8"), str(RELAY_PATH))
+
+        def called_names(node, unwrap_to_thread=False):
+            """Call names directly in `node`, not descending into nested defs.
+
+            With unwrap_to_thread, an asyncio.to_thread(fn, ...) contributes nothing for `fn`
+            itself -- that is the whole point of the wrapper -- but its remaining arguments are
+            still walked, so `to_thread(f, read_pane(x))` is not let through.
+            """
+            found, stack = [], list(ast.iter_child_nodes(node))
+            while stack:
+                current = stack.pop()
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if isinstance(current, ast.Call):
+                    name = _dotted(current.func)
+                    if unwrap_to_thread and name == "asyncio.to_thread":
+                        stack.extend(current.args[1:] + current.keywords)
+                        continue
+                    if name:
+                        found.append((name, current.lineno))
+                stack.extend(ast.iter_child_nodes(current))
+            return found
+
+        sync = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        asynchronous = {n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)}
+
+        blocking = {name for name, node in sync.items()
+                    if any(call in seeds for call, _ in called_names(node))}
+        while True:
+            grown = {name for name, node in sync.items()
+                     if name not in blocking
+                     and any(call in blocking for call, _ in called_names(node))}
+            if not grown:
+                break
+            blocking |= grown
+
+        # If this set ever empties the test has stopped testing anything -- a rename upstream
+        # would silently make every assertion below vacuous.
+        self.assertIn("run_herdr", blocking)
+        self.assertIn("read_pane", blocking)
+        self.assertIn("get_all_agents", blocking)
+
+        offenders = [
+            f"{RELAY_PATH.name}:{line} {call}() inside async def {holder}()"
+            for holder, node in asynchronous.items()
+            for call, line in called_names(node, unwrap_to_thread=True)
+            if call in blocking or call in seeds
+        ]
+        self.assertEqual(offenders, [], "wrap these in asyncio.to_thread:\n  " + "\n  ".join(offenders))
+
+
+def _dotted(node):
+    """`a.b.c` for an attribute/name chain, else None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
 
 
 if __name__ == "__main__":

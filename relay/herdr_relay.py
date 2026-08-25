@@ -670,22 +670,44 @@ def _source_key(host):
     raise KeyError(host)
 
 
-def apply_session_switch(host, session, ip="", device=""):
+def session_switch_names(host):
+    """Session names a switch to `host` may name, or None when the host is unknown.
+
+    BLOCKING -- one `herdr session list`, which is an ssh round trip for a remote. Split out of
+    apply_session_switch so a caller on the event loop can read this on a worker thread and still
+    run the mutation itself: reset_pane_state drains an asyncio.Queue and bumps POLL_GENERATION,
+    neither of which is safe off the loop thread.
+    """
+    try:
+        source = _source_key(host)
+    except KeyError:
+        return None
+    return {entry["name"] for entry in get_sessions(remote=source)}
+
+
+def apply_session_switch(host, session, ip="", device="", *, names):
     """Point one source at a session. Returns (ok, error_message, changed).
+
+    `names` is the allowlist a named session is checked against -- read it with
+    session_switch_names, off the loop. It is keyword-only and has no default on purpose: this
+    function must NOT be able to reach a blocking call, and a caller that omits the allowlist
+    should fail loudly rather than fall back to reading it here. A falsy `names` therefore
+    rejects every named session; only `session=None` (follow herdr's own default) still passes.
 
     `changed` is False on the no-op path (already-active selection) and on
     any rejection, True only when ACTIVE_SESSIONS was actually mutated.
     Callers must skip the broadcast + re-poll when it's False -- that's the
     expensive part the no-op short-circuit below exists to avoid, and it is
     defeated if the caller runs it anyway.
+
+    Must run on the event-loop thread: reset_pane_state below is not thread-safe.
     """
     try:
         source = _source_key(host)
     except KeyError:
         return False, f"unknown host: {host}", False
 
-    # Re-selecting the already-active session is a no-op: skip the blocking
-    # `herdr session list` call and, crucially, the pane-state reset below.
+    # Re-selecting the already-active session is a no-op: skip the pane-state reset below.
     # `source in ACTIVE_SESSIONS` (not `.get()`) matters here -- a key that
     # has never been set is not the same thing as an explicit None value.
     if source in ACTIVE_SESSIONS and ACTIVE_SESSIONS[source] == session:
@@ -696,8 +718,7 @@ def apply_session_switch(host, session, ip="", device=""):
             # session lands in a set-membership check next; a list/dict is
             # unhashable there and would raise instead of being rejected.
             return False, f"unknown session: {session}", False
-        names = {s["name"] for s in get_sessions(remote=source)}
-        if session not in names:
+        if session not in (names or frozenset()):
             return False, f"unknown session: {session}", False
 
     ACTIVE_SESSIONS[source] = session
@@ -1419,7 +1440,13 @@ async def handle_client(ws):
                 await ws.send(json.dumps(response))
             elif msg_type == "session_switch":
                 request_id = msg.get("request_id")
-                ok, err, changed = apply_session_switch(msg.get("host"), msg.get("session"), ip, device)
+                # The allowlist read is one `herdr session list` per call -- an ssh round trip
+                # for a remote -- so it goes to a worker thread. The mutation stays here: it
+                # drains an asyncio.Queue and bumps POLL_GENERATION, neither safe off the loop.
+                names = await asyncio.to_thread(session_switch_names, msg.get("host"))
+                ok, err, changed = apply_session_switch(
+                    msg.get("host"), msg.get("session"), ip, device, names=names
+                )
                 if not ok:
                     response = {"type": "error", "message": err}
                     if request_id:
