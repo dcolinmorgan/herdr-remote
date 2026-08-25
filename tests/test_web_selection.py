@@ -229,6 +229,112 @@ class WebMirrorSelectionTests(unittest.TestCase, _Selecting):
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
 @unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebPaneSwitchTests(unittest.TestCase, _Selecting):
+    """What is on screen while the read for the pane you just picked is still on the wire.
+
+    The mirror is the output of the pane you LEFT, and a tap on a sibling chip moves the title, the
+    filled chip and nothing else -- so for a local host that is milliseconds of stale content and for
+    a remote one an SSH round trip of it, with nothing on the screen saying so. The reported lag is
+    exactly that: the labels switched and the content did not.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = _shared["browser"].new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    def setUp(self):
+        self.page.evaluate("""s => {
+          activeWorkspace = null; activeTab = null;
+          activePane = null;
+          handleMessage(s);
+          window.__sent = [];
+          ws = {readyState: 1, send: p => window.__sent.push(JSON.parse(p))};
+          openTerminal('wB:pH');
+          clearInterval(refreshInterval);
+          handleMessage({type: 'pane_content', pane_id: 'wB:pH',
+                         content: 'the output of the pane you left\\nsecond line'});
+          window.__sent = [];
+        }""", SNAPSHOT)
+
+    def tearDown(self):
+        self.release()
+
+    def mirror(self):
+        return self.page.eval_on_selector("#termContent", "e => e.textContent")
+
+    def reads(self):
+        return [m for m in self.page.evaluate("window.__sent") if m["type"] == "read_pane"]
+
+    def test_a_switch_drops_the_other_panes_output_instead_of_leaving_it_up(self):
+        """The whole of the fix. Until the read lands there is nothing true to show, so it says so
+        rather than showing something false."""
+        self.assertIn("the pane you left", self.mirror())
+        self.page.evaluate("openTerminal('wB:pQ')")
+        self.assertNotIn("the pane you left", self.mirror())
+        self.assertEqual(self.mirror(), "Loading\u2026")
+        self.assertEqual([r["pane_id"] for r in self.reads()], ["wB:pQ"])
+
+    def test_the_new_panes_first_read_fills_it(self):
+        """And the emptying is not a state anything has to be dug out of: the read openTerminal
+        already sends is what ends it."""
+        self.page.evaluate("openTerminal('wB:pQ')")
+        self.page.evaluate("""() => handleMessage(
+          {type: 'pane_content', pane_id: 'wB:pQ', content: 'the new pane'})""")
+        self.assertEqual(self.mirror(), "the new pane")
+
+    def test_the_other_panes_read_still_in_flight_never_lands(self):
+        """It was requested for a pane that is no longer open, and it would arrive AFTER the switch
+        -- under the new pane's title, which is the same lie in the other direction."""
+        self.page.evaluate("openTerminal('wB:pQ')")
+        self.page.evaluate("""() => handleMessage(
+          {type: 'pane_content', pane_id: 'wB:pH', content: 'late answer for the old pane'})""")
+        self.assertNotIn("late answer", self.mirror())
+
+    def test_a_selection_left_in_the_old_output_does_not_block_the_new_pane(self):
+        """selectionInside guards the mirror and cannot tell a stale range from a live one, so a
+        drag in the pane you left would have refused the new pane's first read -- and the emptied
+        mirror would have stayed empty until the reader thought to tap somewhere."""
+        self.select("#termContent", "the output of the pane you left")
+        self.page.evaluate("openTerminal('wB:pQ')")
+        self.assertEqual(self.selected(), "")
+        self.page.evaluate("""() => handleMessage(
+          {type: 'pane_content', pane_id: 'wB:pQ', content: 'the new pane'})""")
+        self.assertEqual(self.mirror(), "the new pane")
+
+    def test_a_selection_anywhere_else_on_the_page_survives_the_switch(self):
+        """Only the output being thrown away is this function's business. Not the session title,
+        which openTerminal rewrites on its own and which therefore cannot hold a range across a
+        switch either way -- the app header can, and is the one the reader would have copied from."""
+        self.select(".header h1", "herdr")
+        self.page.evaluate("openTerminal('wB:pQ')")
+        self.assertEqual(self.selected(), "herdr")
+
+    def test_reopening_the_pane_already_open_does_not_blank_it(self):
+        """openTerminal is re-entered on every `blocked` event for the pane in front of you. Clearing
+        there would blink the output away every time an agent asked a question."""
+        self.page.evaluate("openTerminal('wB:pH')")
+        self.assertIn("the pane you left", self.mirror())
+
+    def test_the_switch_does_not_leave_the_mirror_reconciling_against_another_pane(self):
+        """mirrorPatch's memory of what is on screen is a property of the element, and the element
+        outlives the pane. Left in place, a new pane whose first read happens to match the old
+        content would be answered with "nothing changed" against a buffer that says Loading."""
+        self.page.evaluate("openTerminal('wB:pQ')")
+        self.assertIsNone(self.page.evaluate(
+            "() => document.getElementById('termContent').__mirror ?? null"))
+        self.page.evaluate("""() => handleMessage(
+          {type: 'pane_content', pane_id: 'wB:pQ',
+           content: 'the output of the pane you left\\nsecond line'})""")
+        self.assertIn("the pane you left", self.mirror())
+
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
 class WebHerdSelectionTests(unittest.TestCase, _Selecting):
     """The same rule on the list, which is rewritten wholesale every 2s by the relay's own poll."""
 

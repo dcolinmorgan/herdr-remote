@@ -23,6 +23,12 @@ document.addEventListener('DOMContentLoaded', () => bind());
 </style>
 <style>
 :root {
+  color-scheme: light dark;
+  /* The app header's height, and the ONE place it is written down. `.terminal-view` is fixed and
+     has to start below it; that top was a hardcoded 49px against a header measuring 69px, so the
+     session view covered the bottom 20px of the header and clipped its two buttons. A height
+     rather than padding, because a header sized by its tallest child is a height nobody can state. */
+  --header-h: 44px;
   --bg: #e1e2e7; --surface: #d8d9e0; --border: #b6bbd1; --text: #1f2f66; --muted: #68709a;
   --green: #587539; --red: #f52a65; --blue: #2e7de9; --orange: #8c6c3e;
   --term-bg: #1a1b26; --term-text: #c0caf5;
@@ -39,9 +45,12 @@ document.addEventListener('DOMContentLoaded', () => bind());
 *:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
 body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; }
 
-.header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); position: relative; }
+.header { height: calc(var(--header-h) + env(safe-area-inset-top, 0px)); padding: env(safe-area-inset-top, 0px) 14px 0; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; position: relative; }
 .header h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
-.header button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 8px; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: color 0.15s, background 0.15s; }
+/* 44px square was the whole of the header's height and then some. The hit target keeps its width
+   -- a thumb misses sideways on this row, where the two buttons sit next to each other, far more
+   than it misses vertically -- and gives up the height the header itself has to fit in. */
+.header button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; min-width: 40px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: color 0.15s, background 0.15s; }
 .header button:hover { color: var(--text); background: var(--border); }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .dot.pulse { animation: pulse 2s infinite; }
@@ -136,12 +145,17 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Terminal view */
-.terminal-view { display: none; flex-direction: column; position: fixed; inset: 0; top: 49px; background: var(--bg); z-index: 50; }
+.terminal-view { display: none; flex-direction: column; position: fixed; inset: 0; top: calc(var(--header-h) + env(safe-area-inset-top, 0px)); left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); background: var(--bg); z-index: 50; }
 .terminal-view.active { display: flex; }
-.term-header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.term-header .back { background: none; border: none; color: var(--blue); font-size: 1.4rem; cursor: pointer; padding: 4px 8px; }
-.term-header .title { flex: 1; font-size: 0.8rem; font-weight: 500; }
-.term-header .refresh-btn { background: none; border: none; color: var(--muted); font-size: 1.1rem; cursor: pointer; }
+/* Every child pinned to 28px, the same rule the history bar runs on and for the same reason: a
+   flex row is as tall as its tallest child, and this one was 55px because `back` carried a 1.4rem
+   font-size around a 20px icon -- text metrics for a button with no text in it. 55px -> 39px. */
+.term-header { padding: 5px 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.term-header > * { height: 28px; flex-shrink: 0; display: flex; align-items: center; }
+.term-header .back { background: none; border: none; color: var(--blue); cursor: pointer; padding: 0 6px; justify-content: center; }
+/* display:block, after the rule above, so the ellipsis works -- a flex child clips without one. */
+.term-header .title { display: block; flex: 1 1 auto; min-width: 0; font-size: 0.8rem; font-weight: 500; line-height: 28px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-header .refresh-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 2px; justify-content: center; }
 /* Search and History open a panel; Refresh is a one-shot. Only the two toggles carry a pressed
    state, and they carry it as a filled chip rather than a colour shift -- an icon that only
    changes hue reads as "hovered", not as "this panel is open", and on a phone there is no hover
@@ -154,14 +168,26 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
    the operator has on screen beside this one, anything else in the workspace is a tab away. In
    normal flow rather than absolute, so the history and search panels cover it the way they cover
    the output. Measured on a real host: at most three tabmates and at most five panes in a
-   workspace, so a strip is the whole control -- no menu, no scroll on a phone -- and it is absent
-   for three of ten agent panes and for every pane when HERDR_SHELL_PANES is off. */
-.term-siblings { display: flex; align-items: center; gap: 6px; overflow-x: auto; padding: 5px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-.term-siblings::-webkit-scrollbar { display: none; }
-/* A tab is squarer than a pane, which is what tells the two rows apart now that neither carries a
+   workspace, so chips are the whole control -- no menu -- and the row is absent for three of ten
+   agent panes and for every pane when HERDR_SHELL_PANES is off. */
+/* ONE row for both levels. They were two rows of 33px, 66px of a 390x844 screen, and 4 of the 10
+   agent panes on the measured host paid for both -- for a row that is at most three chips and a row
+   that is at most five. The scroll, the padding and the border live on the outer row now; the two
+   groups inside it are plain flex boxes that keep their own ids, their own aria-labels and their
+   own "hidden when it holds no choice" rule. overscroll-behavior for the reason .term-content has
+   it: at either end of a horizontal drag the chain reaches the document and hands the browser its
+   back gesture, which unloads the app. */
+.term-sibs { display: flex; align-items: center; gap: 8px; overflow-x: auto; overscroll-behavior: contain; padding: 5px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.term-sibs::-webkit-scrollbar { display: none; }
+.term-siblings { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* The only thing separating the two levels now that they share a row -- 1px against the 40px a
+   written label cost, and shape still says the rest: a tab chip is squarer and carries no id tag. */
+.sib-sep { width: 1px; height: 15px; background: var(--border); flex-shrink: 0; }
+/* A tab is squarer than a pane, which -- with the 1px rule between the groups and the id tag a tab
+   has not got -- is what tells the two levels apart now that they share a row and neither carries a
    written label. Measured at 390x844: a `Tabs` / `Panes` label cost 40px of the row including its
    gap, and 4 of the 5 rows that scrolled on the real host overflowed by LESS than that -- 3px, 13px,
-   17px, 41px. The name is on the strip's aria-label, where it costs nothing and is still announced. */
+   17px, 41px. The name is on each group's aria-label, where it costs nothing and is still announced. */
 .term-sib.sib-tab { border-radius: 6px; }
 /* An explicit height rather than padding: a chip naming a pane by its activity title carries CJK,
    whose glyphs are taller than latin at the same font-size, and the row grew 2px whenever one
@@ -185,9 +211,10 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
    shells sitting in `herdr`, three claudes in one tab -- and this is the only part that separates
    them. Small and muted, because it is a handle rather than a name. */
 .term-siblings .sib-tag { color: var(--muted); font-size: 0.6rem; font-variant-numeric: tabular-nums; }
-/* top is set from the header's real height when the panel opens (positionHistoryPanel); 45px is
-   the phone-sized fallback for a first paint before JS runs. */
-.term-history { position: absolute; top: 45px; left: 0; right: 0; bottom: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
+/* top is set from the header's real height when the panel opens (positionHistoryPanel); 39px is
+   the phone-sized fallback for a first paint before JS runs -- the header's own 28px child plus
+   its 5px of padding and its border. */
+.term-history { position: absolute; top: 39px; left: 0; right: 0; bottom: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
 /* ONE row. The panel used to stack a title bar over a filter bar -- measured 80px of a 390x844
    screen, 9.5%, spent before a single turn had rendered -- and the filter, which is only wanted
    while you are looking for something, paid for its input box permanently. The Find chip now opens
@@ -392,7 +419,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   .agents { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 }
 @media (max-width: 380px) {
-  .header { padding: 10px 12px; }
+  .header { padding: env(safe-area-inset-top, 0px) 10px 0; }
   .header h1 { font-size: 0.9rem; }
   .agents { padding: 8px; }
   .agent { padding: 12px; }
@@ -468,14 +495,18 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
     <button class="history-btn icon-toggle" id="historyBtn" aria-pressed="false" onclick="toggleHistory()" aria-label="Conversation history"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></button>
     <button class="refresh-btn" onclick="refreshPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
   </div>
-  <!-- space > tab > pane, the same three levels herdr itself has, as the two rows that can say
-       something from inside a session. Both are built by renderSiblings as DOM nodes, and each is
-       hidden outright when it holds no choice: the tabs row unless the space has two REACHABLE tabs
-       (6 of 10 agent panes on the measured host sit in a single-tab space), the panes row unless the
-       tab holds a second pane (10 of 10 do there, so that row is the one that always shows).
+  <!-- space > tab > pane, the same three levels herdr itself has, in ONE row that can say two of
+       them from inside a session. Both groups are built by renderSiblings as DOM nodes, and each is
+       hidden on its own when it holds no choice: the tabs unless the space has two REACHABLE tabs
+       (6 of 10 agent panes on the measured host sit in a single-tab space), the panes unless the
+       tab holds a second pane (10 of 10 do there, so that group is the one that always shows).
+       When neither has anything to say the row itself goes, border and all.
        The space above them is the one level left to the herd list, which is a tap on Back. -->
-  <div class="term-siblings" id="termTabs" aria-label="Tabs in this space" style="display:none"></div>
-  <div class="term-siblings" id="termSiblings" aria-label="Panes in this tab" style="display:none"></div>
+  <div class="term-sibs" id="termSibs" style="display:none">
+    <div class="term-siblings" id="termTabs" aria-label="Tabs in this space" style="display:none"></div>
+    <span class="sib-sep" id="termSibSep" style="display:none"></span>
+    <div class="term-siblings" id="termSiblings" aria-label="Panes in this tab" style="display:none"></div>
+  </div>
   <div class="term-history" id="termHistory" style="display:none">
     <div class="hist-bar">
       <!-- The title and the filter share this slot: exactly one of them is in the flow at a time,
@@ -1885,8 +1916,30 @@ function renderSiblings() {
   // No workspace id means this relay reports no hierarchy at all, and every pane would look like a
   // sibling of every other one. Nothing is better than a wrong neighbourhood.
   const wsKey = me && me.workspace_id ? agentWorkspaceKey(me) : null;
-  renderTabStrip(me, wsKey);
-  renderPaneStrip(me, wsKey);
+  const tabs = renderTabStrip(me, wsKey);
+  const panes = renderPaneStrip(me, wsKey);
+  // The separator is the boundary between the two levels, so it exists only when both are there --
+  // a rule that hangs off what the two strips actually rendered rather than off a second count.
+  const sep = document.getElementById('termSibSep');
+  if (sep) sep.style.display = tabs && panes ? 'block' : 'none';
+  const row = document.getElementById('termSibs');
+  if (row) row.style.display = tabs || panes ? 'flex' : 'none';
+  scrollSibsToOpenPane();
+}
+
+// One row holds both levels now, so it overflows sooner -- and the chip that must not be off screen
+// is the one saying where you are. Computed rather than scrollIntoView(), which on a fixed-position
+// ancestor also scrolls the document and takes the header with it.
+function scrollSibsToOpenPane() {
+  const row = document.getElementById('termSibs');
+  // The PANE chip, not whichever marked chip comes first: the tab you are in is the leftmost thing
+  // in the row and is never the one off screen, so matching it would report the job already done.
+  const cur = row && (row.querySelector('#termSiblings [aria-current="true"]')
+                      || row.querySelector('[aria-current="true"]'));
+  if (!cur || row.style.display === 'none') return;
+  const chip = cur.getBoundingClientRect(), box = row.getBoundingClientRect();
+  if (chip.left < box.left) row.scrollLeft -= box.left - chip.left + 8;
+  else if (chip.right > box.right) row.scrollLeft += chip.right - box.right + 8;
 }
 
 // Every pane in one space. By pane_id, not by array: the two lists are disjoint in a snapshot, but
@@ -1925,9 +1978,10 @@ function tabLandingPane(list) {
   return [...list].sort((a, b) => rank(a) - rank(b) || a.pane_id.localeCompare(b.pane_id))[0];
 }
 
+// Returns whether it drew anything, which is what tells the shared row whether it has to exist.
 function renderTabStrip(me, wsKey) {
   const strip = document.getElementById('termTabs');
-  if (!strip) return;
+  if (!strip) return false;
   strip.replaceChildren();
   const byTab = panesByTab(wsKey);
   // A tab with no pane we can name is not a place we can go -- there is no CLI for switching the
@@ -1935,11 +1989,12 @@ function renderTabStrip(me, wsKey) {
   // what keeps the row honest with HERDR_SHELL_PANES off: it becomes the tabs holding agents.
   const rows = tabRows(wsKey).filter(t => (byTab.get(t.key) || []).length);
   // One tab is not a choice, and 6 of the 10 agent panes measured live in a single-tab space --
-  // they would each have paid a 27px row to be told the name of the only tab there is.
-  if (rows.length < 2) { strip.style.display = 'none'; return; }
+  // they would each have paid a chip to be told the name of the only tab there is.
+  if (rows.length < 2) { strip.style.display = 'none'; return false; }
   const mine = me && me.tab_id ? agentTabKey(me) : null;
   strip.append(...rows.map(t => tabChip(t, byTab.get(t.key), t.key === mine)));
   strip.style.display = 'flex';
+  return true;
 }
 
 function tabChip(row, list, current) {
@@ -1967,7 +2022,7 @@ function tabChip(row, list, current) {
 
 function renderPaneStrip(me, wsKey) {
   const strip = document.getElementById('termSiblings');
-  if (!strip) return;
+  if (!strip) return false;
   strip.replaceChildren();
   // No tab id on the open pane means this relay reports no tabs at all; fall back to the whole
   // space, which is the set this row used to show and still the only one available.
@@ -1975,9 +2030,10 @@ function renderPaneStrip(me, wsKey) {
                                : panesInSpace(wsKey);
   // Nothing to switch to means nothing to anchor either, so the row costs nothing -- 3 of the 10
   // agent panes measured have no pane beside them.
-  if (list.length < 2) { strip.style.display = 'none'; return; }
+  if (list.length < 2) { strip.style.display = 'none'; return false; }
   strip.append(...list.map(p => siblingChip(p, p.pane_id === activePane)));
   strip.style.display = 'flex';
+  return true;
 }
 
 /** What a chip is called.
@@ -2023,12 +2079,32 @@ function siblingChip(p, current) {
   return chip;
 }
 
+// A switch is not a refresh. The read for the pane you just picked is a relay round trip away --
+// milliseconds on this host, an SSH hop and up to seconds on a remote one -- and until it lands the
+// mirror on screen is the output of the pane you LEFT, under the new pane's title and beside its
+// filled chip. That is the reported lag: the labels moved and the content did not, with nothing
+// saying it was stale. So a switch empties the mirror and says so, and the first read fills it.
+function clearPaneMirror() {
+  const el = document.getElementById('termContent');
+  if (!el) return;
+  // A range left inside the old output would make the `pane_content` handler refuse to render the
+  // new pane's first read -- selectionInside guards the mirror and cannot tell a stale range from a
+  // live one -- and a caret would survive into a buffer it never pointed at. Both are anchored in
+  // text that is about to stop existing, so both go. Only ever OUR text: a selection anywhere else
+  // on the page is the reader's and is none of this function's business.
+  const sel = window.getSelection && window.getSelection();
+  if (sel && sel.rangeCount && el.contains(sel.anchorNode)) sel.removeAllRanges();
+  el.__mirror = null;   // mirrorPatch reconciles against this, and it now describes another pane
+  el.replaceChildren(document.createTextNode('Loading…'));
+  el.scrollTop = 0;
+}
+
 function openTerminal(paneId) {
   // Re-entered on every blocked event for the pane already open, so only a real switch closes these
   // -- the history panel belongs to one conversation, and the search holds the OTHER pane's output
   // in `originalContent`. Leaving the search open across a switch (which the sibling chips made a
   // one-tap move) meant the next keystroke restored pane A's output into pane B's session.
-  if (activePane !== paneId) { hideHistory(); hideSearch(); }
+  if (activePane !== paneId) { hideHistory(); hideSearch(); clearPaneMirror(); }
   activePane = paneId; paneLines = PANE_LINES_BASE; userScrolledUp = false;
   const a = agents.find(x => x.pane_id===paneId);
   const shell = shellPane(paneId);
@@ -2045,6 +2121,11 @@ function openTerminal(paneId) {
   document.getElementById('agentListView').style.display = 'none';
   if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
+  // AFTER the view is displayed: renderSiblings ran while it was still display:none, where every
+  // rect is zero and no chip can be found to be off screen. A rebuilt strip loses its scroll
+  // position anyway (replaceChildren empties it, and an empty box has nothing to scroll), so this
+  // is a restore rather than a jump -- it does not fight a reader who scrolled the row by hand.
+  scrollSibsToOpenPane();
   navPush('terminal', hideTerminal);
   const qa = document.getElementById('quickActions');
   const ak = document.getElementById('actionKeys');

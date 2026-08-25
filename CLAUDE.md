@@ -211,6 +211,18 @@ output is shorter than the box. Measured: one wheel right took the read from 200
 the next to 1000, each answer a wholesale different content, and `loadMore` reaches `refreshPane`
 directly so the tick's own guard never saw it.
 
+**A switch empties the mirror** (`clearPaneMirror`), because until the new pane's read lands there
+is nothing true to put there. The read is a relay round trip — milliseconds locally, an SSH hop and
+up to seconds on a remote host — and for that whole window the buffer on screen was the output of
+the pane you *left*, sitting under the new pane's title and beside its filled chip, with nothing
+saying it was stale. Three things go with it, and each is its own bug otherwise: `__mirror`, the
+element property `mirrorPatch` reconciles against, which now describes another pane; any **range
+inside that output**, because `selectionInside` guards the mirror and cannot tell a stale drag from
+a live one — it would have refused the new pane's first read and left the mirror empty until the
+reader tapped somewhere; and the scroll. Only on a **real switch**: `openTerminal` is re-entered on
+every `blocked` event for the pane already in front of you, and blanking there would blink the
+output away every time an agent asked a question.
+
 `tests/test_web_selection.py` measures all of it, the collapse table included.
 
 The history panel asks for tool turns **by default** (`history_.tools` starts `true`). The relay's
@@ -313,20 +325,42 @@ vanishing.
   the tab's **position** in its space while the number is a separate counter; comparing the two
   called that a rename and rendered a heading reading `2` beside one reading `Tab 1`.
 
-**The session view carries herdr's own two levels below the space** (`renderSiblings` →
+**The session view carries herdr's own two levels below the space, in one row** (`renderSiblings` →
 `renderTabStrip` / `renderPaneStrip`, ported from Collie's `TabStrip` + `PaneStrip`): the tabs of
-this space, then the panes of this tab. The space above them is the level left to the herd list,
-which is a tap on Back. Both rows are DOM nodes, both are rebuilt from every `agents` snapshot — so
-a terminal appearing beside the open pane shows up without a reopen — and each is **hidden outright
-when it holds no choice**: the tabs row unless the space has two *reachable* tabs (6 of the 10 agent
-panes measured sit in a single-tab space), the panes row unless the tab holds a second pane (10 of
-10 do, so that is the row which always shows). Together **66px, 7.8% of a 390×844 screen**; 33px for
-the six panes that only get the lower row; nothing at all when `HERDR_SHELL_PANES` is off and each
-tab holds one agent, which is the same "renders exactly as before" guarantee the list has. Both sit
-in **normal flow** under the header, which is why the absolutely-positioned history panel covers
-them exactly as it already covered the output and `positionHistoryPanel` is untouched. The search
-bar is in that same flow *after* them, so opening search pushes the output down rather than hiding
-them.
+this space, then a 1px rule, then the panes of this tab. The space above them is the level left to
+the herd list, which is a tap on Back. Both groups are DOM nodes, both are rebuilt from every
+`agents` snapshot — so a terminal appearing beside the open pane shows up without a reopen — and
+each is **hidden on its own when it holds no choice**: the tabs unless the space has two *reachable*
+tabs (6 of the 10 agent panes measured sit in a single-tab space), the panes unless the tab holds a
+second pane (10 of 10 do, so that is the group which always shows). When neither has anything to say
+the row goes, border and all — nothing at all when `HERDR_SHELL_PANES` is off and each tab holds one
+agent, which is the same "renders exactly as before" guarantee the list has.
+
+They were **two rows of 33px**, and 4 of the 10 agent panes measured paid for both — for a row that
+is at most three chips beside a row that is at most five. Sharing one row is **33px back, 3.9% of a
+390×844 screen**, and it costs a horizontal scroll the two separate rows did not need: the outer row
+takes the overflow, the padding, the border and `overscroll-behavior` (`.term-content`'s reason — at
+either end of a sideways drag the chain reaches the document and the browser reads it as the gesture
+that unloads the app), while the two groups inside it are plain flex boxes keeping their own ids and
+their own `aria-label`s. **A rebuilt strip loses its scroll position** — `replaceChildren` empties
+it, and an empty box has nothing to scroll — so `scrollSibsToOpenPane` puts the *pane* chip back on
+screen afterwards, never the tab chip, which is leftmost and never the one that went missing. It
+runs **after** the view is displayed: `renderSiblings` fires while the view is still `display:none`,
+where every rect is zero and no chip can be found to be off screen. The row sits in **normal flow**
+under the header, which is why the absolutely-positioned history panel covers it exactly as it
+already covered the output and `positionHistoryPanel` is untouched. The search bar is in that same
+flow *after* it, so opening search pushes the output down rather than hiding it.
+
+**The chrome above the output is measured, and it was 20% of the phone.** 69px of app header, of
+which the session view covered the bottom 20 — its `top` was a hardcoded `49px` against a header
+sized by a 44px button, so both header buttons were clipped through the whole of a session — then
+55px of session header, itself 55 because `back` carried a `1.4rem` font-size around a 20px icon,
+text metrics for a button with no text in it. Then the two sibling rows. **170px, 20.1%, before a
+single line of a pane had rendered.** It is **116px, 13.7%** now: the app header is a *height*
+(`--header-h`, the one place the number is written, and what `.terminal-view`'s `top` is computed
+from, so the two cannot drift again), the session header pins every child to 28px the way the
+history bar does, and the two levels share a row. `tests/test_web_spaces.py` measures all three
+against the screen rather than reading the CSS.
 
 What that replaced was one flat row of the *other* panes in the workspace, tagged `Tab` and `Space`,
 each chip named `label || pane_id`. Three things were wrong with it, and each is now a rule:
@@ -351,11 +385,13 @@ each chip named `label || pane_id`. Three things were wrong with it, and each is
   re-entering `openTerminal` and closing the panel you have open.
 
 A chip carries the same dot its card does, from the same `bucketOf`/`worstTriage` the herd uses, so
-the rows need no legend and the two places cannot disagree about a pane. **Neither row is labelled
+the row needs no legend and the two places cannot disagree about a pane. **Neither group is labelled
 in words**: measured at 390×844, a `Tabs` / `Panes` label cost 40px of the row including its gap,
 and 4 of the 5 rows that scrolled on the real host overflowed by *less* than that (3px, 13px, 17px,
-41px) — so the label is on the strip's `aria-label`, where it is still announced and costs nothing,
-and the distinction is carried by shape (a tab chip is squarer) and by the id tag a tab has not got.
+41px) — so the label is on each group's `aria-label`, where it is still announced and costs nothing,
+and the distinction is carried by shape (a tab chip is squarer), by the id tag a tab has not got,
+and — now that they share a row — by the 1px rule between them, which is drawn only when there is
+something on both sides of it.
 A chip's own height is **fixed at 22px rather than padded**, because a name taken from an activity
 title carries CJK, whose glyphs are taller than latin at the same size, and the row grew 2px whenever
 one appeared; the name is capped at `min(32vw, 260px)` with the whole of it in the tooltip, since one

@@ -5,7 +5,8 @@ everything else -- with the space and the tab riding on the row rather than beco
 it. Picking a space groups its panes by tab, agents and terminals together, because that is the one
 view where "what is in this tab" is the question. The session view then carries herdr's own two
 levels below the space: the tabs of this space, then the panes of this tab, so an agent, a tab or a
-terminal is reachable by name without backing out to the list.
+terminal is reachable by name without backing out to the list -- both in one row, because the
+output underneath them is what the screen is for.
 
 All of it is a claim about what a thumb finds on the screen, so it is asserted against the rendered
 DOM and, where it is geometry, against measured boxes rather than the CSS.
@@ -830,19 +831,113 @@ class WebSessionNavTests(unittest.TestCase):
         self.assertEqual([c[1] for c in self.panes() if c[0] == "chip"],
                          ["wA:p2", "wA:p3", "wA:pH"])
 
-    def test_the_two_rows_cost_a_bounded_slice_of_a_phone_screen(self):
-        """They sit above the output, and the output is the point. Measured at 390x844, with both
-        rows showing -- which is 4 of the 10 agent panes on the measured host; the other 6 pay for
-        one."""
+    # ------------------------------------------------- one row, and what is above it
+
+    def chrome(self):
+        """Every pixel between the top of the screen and the first line of output."""
+        return self.page.evaluate("""() => {
+          const h = s => { const e = document.querySelector(s); return e ? e.offsetHeight : 0; };
+          const top = s => Math.round(document.querySelector(s).getBoundingClientRect().top);
+          return {header: h('.header'), termHeader: h('.term-header'), sibs: h('#termSibs'),
+                  viewTop: top('.terminal-view'), contentTop: top('#termContent'),
+                  screen: window.innerHeight};
+        }""")
+
+    def test_the_session_view_starts_exactly_where_the_app_header_ends(self):
+        """The header is `--header-h` tall and the fixed session view starts at `--header-h`, which
+        is one number written once. It used to be two: a hardcoded top of 49px against a header that
+        measured 69px, so the view covered the bottom 20px of the header and clipped both of its
+        buttons through the whole of a session."""
         self.page.evaluate("openTerminal('wA:pH')")
-        tabs, panes, screen = self.page.evaluate("""() => [
-          document.getElementById('termTabs').offsetHeight,
-          document.getElementById('termSiblings').offsetHeight,
-          window.innerHeight]""")
-        self.assertGreater(tabs, 0)
-        self.assertGreater(panes, 0)
-        self.assertLess((tabs + panes) / screen, 0.08,
-                        f"the two rows grew to {tabs + panes}px of {screen}px")
+        c = self.chrome()
+        self.assertEqual(c["viewTop"], c["header"],
+                         f"the session view starts at {c['viewTop']}px under a {c['header']}px header")
+
+    def test_the_chrome_above_the_output_is_a_measured_eighth_of_the_phone(self):
+        """The output is the point of this screen, and everything above it is rent. Measured at
+        390x844 with both levels showing: 69px of app header (of which 20 were behind the session
+        view), 55px of session header and 66px of two sibling rows -- 170px, 20.1%, before a single
+        line of a pane had rendered. It is 44 + 39 + 33 = 116px now, 13.7%, and the ceiling is set
+        just above that."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        c = self.chrome()
+        self.assertLess(c["contentTop"] / c["screen"], 0.15,
+                        f"the chrome grew to {c['contentTop']}px of {c['screen']}px: {c}")
+        self.assertLess(c["header"], 50)
+        self.assertLess(c["termHeader"], 45)
+
+    def test_the_session_header_is_one_row_of_children_pinned_to_one_height(self):
+        """A flex row is as tall as its tallest child. This one was 55px because `back` carried a
+        1.4rem font-size around a 20px icon -- text metrics for a button with no text in it -- so
+        every child is pinned instead, the same rule the history bar runs on."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        heights = self.page.evaluate("""() => [...document.querySelectorAll('.term-header > *')]
+          .filter(e => e.offsetParent).map(e => e.offsetHeight)""")
+        self.assertGreater(len(heights), 3, "the header lost its controls")
+        self.assertEqual(set(heights), {28}, f"the header's children measure {heights}")
+
+    def test_both_levels_share_one_row(self):
+        """They were two rows of 33px, and 4 of the 10 agent panes on the measured host paid for
+        both -- for a row that is at most three chips and a row that is at most five."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        row = self.page.evaluate("""() => {
+          const t = document.getElementById('termTabs').getBoundingClientRect();
+          const p = document.getElementById('termSiblings').getBoundingClientRect();
+          const r = document.getElementById('termSibs').getBoundingClientRect();
+          return {tabsTop: Math.round(t.top), panesTop: Math.round(p.top),
+                  tabsLeft: Math.round(t.left), panesLeft: Math.round(p.left),
+                  row: Math.round(r.height)};
+        }""")
+        self.assertEqual(row["tabsTop"], row["panesTop"], "the two levels are still stacked")
+        self.assertLess(row["tabsLeft"], row["panesLeft"], "the tabs are not to the left of the panes")
+        self.assertLess(row["row"], 40, f"the shared row is {row['row']}px")
+
+    def test_the_separator_stands_between_the_levels_only_when_both_are_there(self):
+        """1px is what tells the two levels apart now that they share a row, and a separator with
+        one side missing is a mark against nothing. wB has a single tab, so it draws panes only."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        self.assertTrue(self.visible("#termSibSep"))
+        self.page.evaluate("openTerminal('wB:pH')")
+        self.assertFalse(self.visible("#termTabs"))
+        self.assertTrue(self.visible("#termSiblings"))
+        self.assertFalse(self.visible("#termSibSep"), "a separator with nothing on one side of it")
+
+    def test_the_row_itself_goes_when_neither_level_has_a_choice_to_offer(self):
+        """Border and all: wD holds one pane in one tab, so both groups are empty and the row would
+        otherwise cost the output 33px to say nothing at all."""
+        self.page.evaluate("openTerminal('wD:pH')")
+        self.assertFalse(self.visible("#termSibs"))
+        self.assertEqual(self.page.evaluate("() => document.getElementById('termSibs').offsetHeight"), 0)
+
+    def test_the_open_pane_is_scrolled_onto_the_screen_in_a_row_that_overflows(self):
+        """One row holds both levels, so it overflows sooner -- and the chip that must not be off
+        screen is the one saying where you are. It sits after every tab chip and after every earlier
+        pane, which is exactly where a row scrolled to 0 cannot show it."""
+        self.page.evaluate("""() => {
+          shellPanes.push(...['p4', 'p5', 'p6', 'p7'].map(id => ({
+            pane_id: 'wA:' + id, label: 'a-longer-shell-name-' + id, cwd: '/x', project: 'api',
+            host: 'local', workspace_id: 'wA', tab_id: 'wA:t1'})));
+          activePane = null;
+          openTerminal('wA:pH');
+        }""")
+        seen = self.page.evaluate("""() => {
+          const row = document.getElementById('termSibs');
+          const chip = row.querySelector('#termSiblings [aria-current="true"]');
+          const c = chip.getBoundingClientRect(), b = row.getBoundingClientRect();
+          return {overflows: row.scrollWidth > row.clientWidth + 1,
+                  inside: c.left >= b.left - 1 && c.right <= b.right + 1};
+        }""")
+        self.assertTrue(seen["overflows"], "the row did not overflow, so nothing was proved")
+        self.assertTrue(seen["inside"], "the chip you are standing in is off screen")
+
+    def test_the_shared_row_contains_its_overscroll(self):
+        """The same rule .term-content carries: at either end of a horizontal drag the chain reaches
+        the document, and the browser reads it as the gesture that unloads the app."""
+        self.page.evaluate("openTerminal('wA:pH')")
+        self.assertEqual(
+            self.page.evaluate(
+                "() => getComputedStyle(document.getElementById('termSibs')).overscrollBehaviorX"),
+            "contain")
 
     def test_the_history_panel_still_covers_everything_under_the_header(self):
         """Both rows are in normal flow, so a panel opened over the output covers them too -- the
