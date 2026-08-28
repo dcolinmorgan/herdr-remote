@@ -102,7 +102,9 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
 
 /* Terminal view */
-.terminal-view { display: none; flex-direction: column; position: fixed; inset: 0; top: 49px; background: var(--bg); z-index: 50; }
+/* Full-screen on phones: the term-header carries its own back button, so
+   covering the app header buys ~69px of output instead of guessing its height. */
+.terminal-view { display: none; flex-direction: column; position: fixed; inset: 0; background: var(--bg); z-index: 50; }
 .terminal-view.active { display: flex; }
 .term-header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .term-header .back { background: none; border: none; color: var(--blue); font-size: 1.4rem; cursor: pointer; padding: 4px 8px; }
@@ -111,7 +113,9 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-header .search-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
 .term-header .search-btn:hover, .term-header .refresh-btn:hover, .term-header .history-btn:hover { color: var(--text); }
 .term-header .history-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
-.term-history { position: absolute; top: 45px; left: 0; right: 0; bottom: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
+/* Covers the term-header too — the panel has its own title bar and close
+   button, so there is no header height to line up with. */
+.term-history { position: absolute; inset: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
 .term-history .msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .term-history .msg-role { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
 .term-history .msg-user { color: var(--blue); }
@@ -134,7 +138,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .session-item.active { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, var(--bg)); }
 .session-name { font-weight: 500; flex: 1; }
 .session-url { font-size: 0.7rem; color: var(--muted); font-family: monospace; }
-.term-content { flex: 1; min-width: 0; overflow: auto; padding: 10px 12px; background: var(--term-bg); font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', 'SFMono-Regular', Consolas, monospace; font-size: clamp(0.68rem, 2.7vw, 0.8rem); line-height: 1.35; white-space: pre; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.term-content { flex: 1; min-width: 0; overflow: auto; padding: 10px 12px; background: var(--term-bg); font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', 'SFMono-Regular', Consolas, monospace; font-size: clamp(0.68rem, 2.7vw, 0.8rem); line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .quick-actions { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
 .quick-actions button { padding: 10px 14px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
 .btn-yes { background: var(--green); color: #fff; } .btn-trust { background: var(--blue); color: #fff; } .btn-no { background: var(--red); color: #fff; }
@@ -162,13 +166,18 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 
 /* Desktop */
 @media (min-width: 768px) {
-  body { max-width: 960px; margin: 0 auto; padding: 0 16px; }
-  .terminal-view { position: static; display: none; }
-  .terminal-view.active { display: flex; height: calc(100dvh - 49px); }
+  /* Bound the shell so .view / .terminal-view scroll internally instead of
+     growing the page — what their flex:1 + overflow-y:auto already assumed. */
+  body { max-width: 960px; margin: 0 auto; padding: 0 16px; height: 100dvh; }
+  /* relative, not static: .term-history anchors to this. flex instead of a
+     calc() against a hardcoded header height. */
+  .terminal-view { position: relative; display: none; }
+  .terminal-view.active { display: flex; flex: 1; min-height: 0; }
   .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
   .section-header { grid-column: 1 / -1; }
   .chip-strip { grid-column: 1 / -1; }
-  .term-content { min-height: 400px; }
+  /* Wide enough for 80 columns — keep ASCII tables and box drawing aligned. */
+  .term-content { min-height: 400px; white-space: pre; overflow-wrap: normal; }
 }
 @media (min-width: 1200px) {
   body { max-width: 1100px; }
