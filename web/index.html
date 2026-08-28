@@ -37,7 +37,11 @@ document.addEventListener('DOMContentLoaded', () => bind());
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 *:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
-body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; }
+/* The page itself never pans sideways. overflow-x on <body> alone does not
+   stop it: the viewport scroller is <html>, and overscroll-behavior keeps a
+   swipe inside .chip-strip or .term-content from rubber-banding the document. */
+html { overflow-x: hidden; overscroll-behavior: none; }
+body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; overscroll-behavior: none; }
 
 .header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); position: relative; }
 .header h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
@@ -55,8 +59,11 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .settings h2 { font-size: 0.9rem; margin-bottom: 12px; }
 .setting-group { background: var(--surface); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
 .setting-group label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 6px; }
-.setting-group input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
-.setting-group select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+/* 16px is a floor on every focusable field, not a design choice: iOS Safari
+   zooms the page whenever a focused control is smaller, and the zoom then
+   pans the fixed panes out from under the viewport. Do not lower these. */
+.setting-group input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 16px; }
+.setting-group select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 16px; }
 .setting-group .hint { font-size: 0.65rem; color: var(--muted); margin-top: 4px; }
 .setting-group button { margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--green); color: #000; font-weight: 600; font-size: 13px; cursor: pointer; }
 
@@ -122,7 +129,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .term-history .msg-assistant { color: var(--green); }
 .term-history .msg-text { white-space: pre-wrap; word-break: break-word; }
 .term-search { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
-.term-search input { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
+.term-search input { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 16px; }
 .term-search input:focus { outline: none; border-color: var(--blue); }
 .term-search span { font-size: 0.7rem; color: var(--muted); min-width: 40px; text-align: center; }
 .term-search button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
@@ -143,7 +150,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 .quick-actions button { padding: 10px 14px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
 .btn-yes { background: var(--green); color: #fff; } .btn-trust { background: var(--blue); color: #fff; } .btn-no { background: var(--red); color: #fff; }
 .term-input { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; gap: 6px; background: var(--surface); flex-shrink: 0; }
-.term-input input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', Consolas, monospace; min-width: 0; }
+.term-input input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 16px; font-family: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', Consolas, monospace; min-width: 0; }
 .term-input button:last-child { padding: 10px 14px; border-radius: 6px; border: none; background: var(--blue); color: #fff; font-weight: 700; font-size: 16px; flex-shrink: 0; }
 .term-keys { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 8px); }
 .nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
@@ -362,7 +369,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
       <span style="font-size:0.8rem;font-weight:600;flex:1">Commands</span>
       <button onclick="closePalette()" aria-label="Close" style="background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer">✕</button>
     </div>
-    <input id="cmdSearch" type="text" placeholder="Search commands…" autocomplete="off" autocorrect="off" style="margin:8px 12px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:14px" oninput="filterCommands()" />
+    <input id="cmdSearch" type="text" placeholder="Search commands…" autocomplete="off" autocorrect="off" style="margin:8px 12px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:16px" oninput="filterCommands()" />
     <div id="cmdList" style="overflow-y:auto;padding:4px 12px;"></div>
   </div>
 </div>
