@@ -34,10 +34,10 @@ class TerminalLayoutTests(unittest.TestCase):
     def test_terminal_height_is_not_calculated_from_a_hardcoded_header_height(self):
         self.assertNotRegex(self.page, r"calc\(\s*100dvh\s*-\s*\d+px\s*\)")
 
-    def test_output_wraps_on_phones_and_stays_pre_on_desktop(self):
+    def test_output_wraps_on_phones_and_stays_pre_once_80_columns_fit(self):
         self.assertIn("white-space: pre-wrap", css_rule(self.page, ".term-content"))
-        desktop = self.page.split("@media (min-width: 768px)", 1)[1]
-        self.assertIn("white-space: pre;", css_rule(desktop, ".term-content"))
+        wide = self.page.split("@media (min-width: 640px)", 1)[1]
+        self.assertIn("white-space: pre;", css_rule(wide, ".term-content"))
 
 
 if __name__ == "__main__":

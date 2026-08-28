@@ -164,6 +164,15 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
 
 .empty { text-align: center; color: var(--muted); padding: 60px 20px; font-size: 0.85rem; }
 
+/* Terminal output stops wrapping once ~80 columns fit, which happens well
+   before the desktop layout breakpoint: the clamp() above pins the font at
+   12.8px past 474px, so 80 columns need ~641px of content box. Tablets in
+   portrait (iPad mini is 744px) therefore keep alignment and scroll, while
+   phones and iPad Split View (~507px) still wrap. */
+@media (min-width: 640px) {
+  .term-content { white-space: pre; overflow-wrap: normal; }
+}
+
 /* Desktop */
 @media (min-width: 768px) {
   /* Bound the shell so .view / .terminal-view scroll internally instead of
@@ -176,8 +185,7 @@ body { font-family: -apple-system, system-ui, -webkit-system-font, sans-serif; b
   .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
   .section-header { grid-column: 1 / -1; }
   .chip-strip { grid-column: 1 / -1; }
-  /* Wide enough for 80 columns — keep ASCII tables and box drawing aligned. */
-  .term-content { min-height: 400px; white-space: pre; overflow-wrap: normal; }
+  .term-content { min-height: 400px; }
 }
 @media (min-width: 1200px) {
   body { max-width: 1100px; }
