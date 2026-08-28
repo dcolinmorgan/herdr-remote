@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -20,6 +21,17 @@ class ClientPayloadTests(unittest.TestCase):
         self.assertIn("type:'question_toggle'", source)
         self.assertIn("type:'question_submit'", source)
         self.assertIn("prompt_id:a.prompt_id", source)
+
+    def test_web_sends_prompt_id_with_every_respond(self):
+        """The relay drops a respond whose prompt_id does not match the pane
+        (herdr_relay.py, "prompt changed; refresh and try again"), so a respond
+        without one can never be delivered."""
+        source = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+
+        sends = re.findall(r"type:'respond'[^}]*}", source)
+        self.assertTrue(sends, "no respond payload found; the send site moved")
+        for payload in sends:
+            self.assertIn("prompt_id", payload)
 
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (

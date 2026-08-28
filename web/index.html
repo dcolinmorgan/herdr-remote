@@ -1385,7 +1385,17 @@ function pressCtrl(label) {
 
 function toggleArrows(){}
 function hideArrows(){}
-function respond(t){if(!ws||!activePane)return;if(window.cue)cue('success');ws.send(JSON.stringify({type:'respond',pane_id:activePane,text:t}));document.getElementById('quickActions').innerHTML='';setTimeout(refreshPane,500);}
+function respond(t){
+  if(!ws||!activePane)return;
+  if(window.cue)cue('success');
+  // The relay drops a respond whose prompt_id does not match what the pane is
+  // showing, so send the one that arrived with the blocked message -- same as
+  // sendText() below and as the Telegram and TUI clients.
+  const agent=agents.find(a=>a.pane_id===activePane);
+  ws.send(JSON.stringify({type:'respond',pane_id:activePane,prompt_id:agent?.prompt_id,text:t}));
+  document.getElementById('quickActions').innerHTML='';
+  setTimeout(refreshPane,500);
+}
 document.getElementById('termInput').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendText();}});
 document.getElementById('termContent').addEventListener('scroll', function() {
   const el = this;
