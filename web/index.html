@@ -605,6 +605,17 @@ function handleMessage(msg) {
     // "switching…" forever. Minimum handling only: no toast UI, since
     // nothing else in this file renders errors.
     switchingSession = false;
+    // respond delivers allowlisted answers, plus free text on a pane whose
+    // question the relay can drive itself. Where it can drive neither, type
+    // into the pane instead: send_text has no allowlist of its own, so the
+    // only thing given up is the staleness check respond just performed.
+    // No Enter afterwards -- a blocked pane may be a multi-select, where
+    // Enter toggles the row under the cursor instead of submitting.
+    if (pendingFreeText && msg.message === 'free-text response requires a detected question') {
+      ws.send(JSON.stringify({type:'send_text', pane_id:pendingFreeText.pane_id, text:pendingFreeText.text}));
+      setTimeout(refreshPane, 500);
+    }
+    pendingFreeText = null;
     render();
     return;
   }
@@ -1229,11 +1240,16 @@ function setupLongPress(el, type, id, name) {
   el.addEventListener('contextmenu', (e) => showContextMenu(e, type, id, name));
 }
 
+// Text sent through respond, kept until the relay accepts or rejects it so a
+// rejection can be retried on the channel that can carry it. See handleMessage.
+let pendingFreeText = null;
+
 function sendText() {
   const i=document.getElementById('termInput');
   if(!i.value||!ws||!activePane)return;
   const agent=agents.find(a=>a.pane_id===activePane);
   if(agent&&agent.status==='blocked') {
+    pendingFreeText={pane_id:activePane,text:i.value};
     ws.send(JSON.stringify({type:'respond',pane_id:activePane,prompt_id:agent.prompt_id,text:i.value}));
   } else {
     ws.send(JSON.stringify({type:'send_text',pane_id:activePane,text:i.value}));
@@ -1388,6 +1404,7 @@ function hideArrows(){}
 function respond(t){
   if(!ws||!activePane)return;
   if(window.cue)cue('success');
+  pendingFreeText=null;   // an option button is not the typed text
   // The relay drops a respond whose prompt_id does not match what the pane is
   // showing, so send the one that arrived with the blocked message -- same as
   // sendText() below and as the Telegram and TUI clients.

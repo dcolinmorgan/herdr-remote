@@ -33,6 +33,18 @@ class ClientPayloadTests(unittest.TestCase):
         for payload in sends:
             self.assertIn("prompt_id", payload)
 
+    def test_web_free_text_retry_keys_on_the_error_the_relay_emits(self):
+        """respond carries allowlisted answers, plus free text on a question the
+        relay can drive itself. A blocked pane is often neither, so typed text
+        falls back to send_text -- keyed on the relay's rejection, verbatim. If
+        either side reworded it the retry would die silently."""
+        message = "free-text response requires a detected question"
+        relay = (ROOT / "relay" / "herdr_relay.py").read_text(encoding="utf-8")
+        web = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn(message, relay, "relay no longer emits this; the retry is dead")
+        self.assertIn(message, web, "web no longer matches it; typed text is dropped")
+
     def test_swift_models_decode_omp_question_state(self):
         for relative_path in (
             "herdi-ios/Sources/Models/Agent.swift",
