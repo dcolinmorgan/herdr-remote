@@ -1558,5 +1558,107 @@ class RelaySubprocessConcurrencyTests(unittest.TestCase):
                     self.assertEqual(local.result(timeout=2), "ok")
 
 
+class RelaySessionTranscriptTests(unittest.TestCase):
+    @staticmethod
+    def _write_log(root, slug, name, rows):
+        session_dir = os.path.join(root, slug)
+        os.makedirs(session_dir, exist_ok=True)
+        path = os.path.join(session_dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        return path
+
+    def test_project_slug_replaces_every_non_alphanumeric_character(self):
+        with loaded_relay() as relay:
+            # Underscores and dots are folded too, not just separators -- a
+            # slug built by replacing '/' alone misses these projects entirely.
+            self.assertEqual(
+                relay.claude_project_slug("/home/user/report_draft__final_"),
+                "-home-user-report-draft--final-",
+            )
+            self.assertEqual(
+                relay.claude_project_slug("/home/user/app.v2"), "-home-user-app-v2"
+            )
+
+    def test_transcript_keeps_prose_and_drops_tool_traffic(self):
+        with loaded_relay() as relay, tempfile.TemporaryDirectory() as root:
+            relay.CLAUDE_SESSION_ROOT = root
+            self._write_log(root, "-home-user-project","a.jsonl", [
+                {"type": "user", "message": {"content": "ship the fix"}},
+                {"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": "Done."},
+                    {"type": "tool_use", "name": "Bash", "input": {}},
+                ]}},
+                {"type": "user", "message": {"content": [
+                    {"type": "tool_result", "content": "exit 0"},
+                ]}},
+                {"type": "attachment", "message": {"content": "not conversation"}},
+                {"type": "assistant", "message": {"content": "   "}},
+            ])
+
+            self.assertEqual(
+                relay.read_session_transcript("/home/user/project"),
+                [
+                    {"role": "user", "content": "ship the fix"},
+                    {"role": "assistant", "content": "Done."},
+                ],
+            )
+            # A pane whose project was never opened in Claude Code is normal,
+            # not an error.
+            self.assertEqual(relay.read_session_transcript("/no/such/project"), [])
+            self.assertEqual(relay.read_session_transcript(""), [])
+
+    def test_transcript_prefers_newest_session_and_survives_a_torn_line(self):
+        with loaded_relay() as relay, tempfile.TemporaryDirectory() as root:
+            relay.CLAUDE_SESSION_ROOT = root
+            older = self._write_log(root, "-home-user-project","older.jsonl", [
+                {"type": "user", "message": {"content": "old session"}},
+            ])
+            newer = self._write_log(root, "-home-user-project","newer.jsonl", [
+                {"type": "user", "message": {"content": "new session"}},
+            ])
+            os.utime(older, (1, 1))
+            os.utime(newer, (2, 2))
+            # Claude Code appends live, so the tail can be half-written.
+            with open(newer, "a", encoding="utf-8") as handle:
+                handle.write("{not json\n")
+                handle.write(json.dumps(
+                    {"type": "assistant", "message": {"content": "still here"}}
+                ) + "\n")
+
+            self.assertEqual(
+                [m["content"] for m in relay.read_session_transcript("/home/user/project")],
+                ["new session", "still here"],
+            )
+
+    def test_get_history_serves_the_log_only_for_local_claude_panes(self):
+        with loaded_relay() as relay, tempfile.TemporaryDirectory() as root:
+            relay.CLAUDE_SESSION_ROOT = root
+            self._write_log(root, "-home-user-project","a.jsonl", [
+                {"type": "assistant", "message": {"content": "from the log"}},
+            ])
+
+            cases = [
+                ("local-claude", "claude", None, [{"role": "assistant", "content": "from the log"}]),
+                ("remote-claude", "claude", "build-box", []),
+                ("local-other", "omp", None, []),
+            ]
+            for pane_id, agent, remote, expected in cases:
+                with self.subTest(pane_id=pane_id):
+                    relay.known_panes.add(pane_id)
+                    relay.agent_cache[pane_id] = {"agent": agent, "cwd": "/home/user/project"}
+                    relay.pane_remote_map[pane_id] = remote
+                    ws = _FakeWebSocket([json.dumps({"type": "get_history", "pane_id": pane_id})])
+
+                    with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()):
+                        asyncio.run(relay.handle_client(ws))
+
+                    self.assertEqual(
+                        json.loads(ws.sent[-1]),
+                        {"type": "history", "pane_id": pane_id, "messages": expected},
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

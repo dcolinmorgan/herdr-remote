@@ -4,7 +4,7 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, hashlib, json, logging, os, re, shutil, signal, socket, subprocess, threading, time
+import asyncio, collections, hashlib, json, logging, os, re, shutil, signal, socket, subprocess, threading, time
 
 try:
     from websockets.asyncio.server import serve
@@ -592,6 +592,80 @@ async def broadcast_sessions():
     if gen != POLL_GENERATION:
         return          # a switch landed while building this; the message is stale
     await broadcast(msg)
+
+
+CLAUDE_SESSION_ROOT = os.path.join(
+    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects"
+)
+
+
+def claude_project_slug(cwd):
+    """Claude Code's directory name for a working directory.
+
+    Every non-alphanumeric character becomes '-'. Claude Code additionally
+    truncates names past 200 characters and appends a hash of the full path;
+    those projects simply read as "no history" here rather than mis-resolving
+    to another project's log.
+    https://code.claude.com/docs/en/sessions#where-transcripts-are-stored
+    """
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+
+
+def read_session_transcript(cwd, limit=40):
+    """Recent conversation turns from Claude Code's session log for `cwd`.
+
+    Claude Code writes one JSONL per session to
+    <session root>/<project slug>/<session-id>.jsonl. Returns
+    [{"role", "content"}] oldest first, or [] when there is no readable log.
+    """
+    if not cwd:
+        return []
+    session_dir = os.path.join(CLAUDE_SESSION_ROOT, claude_project_slug(cwd))
+    try:
+        logs = [
+            os.path.join(session_dir, name)
+            for name in os.listdir(session_dir)
+            if name.endswith(".jsonl")
+        ]
+        # ponytail: newest file wins. Two panes sharing a cwd therefore share a
+        # transcript; key off a session id here if herdr ever exposes one.
+        newest = max(logs, key=os.path.getmtime)
+    except (OSError, ValueError):
+        return []
+
+    try:
+        with open(newest, encoding="utf-8", errors="replace") as handle:
+            # Transcripts reach tens of MB; only the tail is ever displayed, so
+            # stream the file and keep a bounded window instead of reading it.
+            tail = collections.deque(handle, maxlen=400)
+    except OSError:
+        return []
+
+    messages = []
+    for line in tail:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        role = row.get("type")
+        if role not in ("user", "assistant"):
+            continue
+        content = (row.get("message") or {}).get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            # Prose only: tool_use and tool_result blocks are not conversation.
+            text = "\n".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            continue
+        text = text.strip()
+        if text:
+            messages.append({"role": role, "content": text})
+    return messages[-limit:]
 
 
 def read_pane(pane_id, remote=None):
@@ -1302,15 +1376,13 @@ async def handle_client(ws):
                 if pane_id not in known_panes:
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
-                remote = pane_remote_map.get(pane_id)
-                # Try to read conversation history from agent's session log
-                history = run_herdr("agent", "history", pane_id, "--format", "json", remote=remote)
+                agent = agent_cache.get(pane_id) or {}
                 messages = []
-                try:
-                    data = json.loads(history) if history else {}
-                    messages = data.get("messages", data.get("history", []))
-                except Exception:
-                    pass
+                # ponytail: local Claude panes only. A remote pane's transcript
+                # lives on the remote host, and other agents do not write this
+                # format; both fall through to the client's empty state.
+                if not pane_remote_map.get(pane_id) and agent.get("agent") == "claude":
+                    messages = read_session_transcript(agent.get("cwd", ""))
                 await ws.send(json.dumps({"type": "history", "pane_id": pane_id, "messages": messages}))
             elif msg_type == "send_keys":
                 pane_id = msg["pane_id"]
