@@ -550,9 +550,22 @@ live activity, not a session name: a working claude sets it to what it is doing,
 The durable title comes back from `get_history`), `status`, `cwd`, `project`, `host`, `remote`,
 `workspace_id`, `tab_id`, `focused` (the one pane per host herdr itself has in front),
 `scrollback` + `viewport_rows` (from herdr's `scroll`), `has_session` (this pane names an agent
-transcript), and `last_active_at` / `last_seen_at` (epoch **milliseconds**, because every client
-that will compare them is JavaScript). The session ref itself stays server-side in
-`pane_session_map`.
+transcript), `order` (see below), and `last_active_at` / `last_seen_at` (epoch **milliseconds**,
+because every client that will compare them is JavaScript). The session ref itself stays
+server-side in `pane_session_map`.
+
+**`order` is the pane's index in its host's own `pane list`, and it is the only thing that says
+where a pane sits on the operator's screen.** herdr answers `pane list` in the order the panes are
+laid out — verified against `pane layout` on every tab of this host, the same split-tree walk, top
+left first — and nothing else in the record implies it. The ids will not do: `pane swap` and
+`pane move` rearrange panes, and the suffix is a creation counter in a base wider than ten, so
+`w6:t1` reads pH, p15, p12 at the desk and sorts to p12, p15, pH. Splitting one `pane list` into
+`agents` + `panes` also throws away the interleaving, which is how a terminal split between two
+agents ends up drawn last. Per host, since a client only ever orders panes within one tab of one
+machine. A relay older than this sends none, and a client must then keep the arrays as they
+arrived rather than invent an order — the web app sorts missing last, stably, which is the same
+thing. An `agent_update` carries no `order` (it is a merge, and the snapshot beside it has one),
+and an agent a `blocked` push appends before its first snapshot has none for one poll.
 
 The same `agents` message carries `spaces` — `{workspaces: [...], tabs: [...]}` from
 `herdr workspace list` and `herdr tab list`. `pane list` gives every pane a `workspace_id` and a
@@ -568,9 +581,11 @@ The same message carries **`panes`** — the panes with no agent in them, which 
 entries because six clients render that array and every one of them assumes its entries are
 agents; a shell pane would show up in all of them as a card with an empty harness name. Each entry
 is `pane_id`, `label`, `cwd`, `project`, `host`, `remote`, `workspace_id`, `tab_id`, `focused`,
-`scrollback`, `viewport_rows` — no `status` (herdr reports `agent_status: "unknown"` for all of
-them), no `title` (there is no such field on a non-agent pane) and no `has_session`. They come out
-of the **same `pane list`** the poll already runs, so listing them costs nothing.
+`scrollback`, `viewport_rows`, `order` — no `status` (herdr reports `agent_status: "unknown"` for
+all of them), no `title` (there is no such field on a non-agent pane) and no `has_session`. They
+come out of the **same `pane list`** the poll already runs, so listing them costs nothing — which
+is also why their `order` is comparable with an agent entry's: the two arrays are one list, indexed
+before it was split.
 
 Two things are true of a shell pane and not of an agent pane:
 
