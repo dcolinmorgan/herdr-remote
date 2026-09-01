@@ -102,17 +102,16 @@ document.addEventListener('DOMContentLoaded', () => bind());
     <button class="history-btn icon-toggle" id="historyBtn" aria-pressed="false" onclick="toggleHistory()" aria-label="Conversation history"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></button>
     <button class="refresh-btn" onclick="followPane()" aria-label="Refresh pane"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
   </div>
-  <!-- space > tab > pane, the same three levels herdr itself has, in ONE row that can say two of
-       them from inside a session. Both groups are built by renderSiblings as DOM nodes, and each is
-       hidden on its own when it holds no choice: the tabs unless the space has two REACHABLE tabs
-       (6 of 10 agent panes on the measured host sit in a single-tab space), the panes unless the
-       tab holds a second pane (10 of 10 do there, so that group is the one that always shows).
-       When neither has anything to say the row itself goes, border and all.
+  <!-- space > tab > pane, the same three levels herdr itself has. ONE row says the lower two, read
+       left to right the way a multiplexer's status line is: every pane in this space, in herdr's
+       order, grouped by tab, each group led by its tab's name -- and the name STICKS to the left
+       edge while its own panes scroll past, so the tab you are standing in can never be scrolled
+       away or stood in for by a sibling. Built by renderSiblings as DOM nodes. The names are absent
+       in a single-tab space (6 of 10 agent panes on the measured host sit in one), and the row
+       itself goes, border and all, when the space holds one pane and there is nothing to switch to.
        The space above them is the one level left to the herd list, which is a tap on Back. -->
   <div class="term-sibs" id="termSibs" style="display:none">
-    <div class="term-siblings" id="termTabs" aria-label="Tabs in this space" style="display:none"></div>
-    <span class="sib-sep" id="termSibSep" style="display:none"></span>
-    <div class="term-siblings" id="termSiblings" aria-label="Panes in this tab" style="display:none"></div>
+    <div class="term-siblings" id="termSiblings" aria-label="Panes in this space, by tab"></div>
   </div>
   <div class="term-history" id="termHistory" style="display:none">
     <div class="hist-bar">

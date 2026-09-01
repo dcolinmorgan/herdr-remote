@@ -381,8 +381,12 @@ about what a colour means.
   each section keeps the order the relay already sent and `Ready` is simply empty. No feature
   detection, no branch — which is what keeps an older relay, and `demo-worker`, working untouched.
 
-**Picking a space groups its panes by tab** (`groupPanesByTab`) — agents *and* bare shells, because
-that is the one view where "what is in this tab" is the question being asked. **Empty tabs render**
+**Picking a space groups its panes by tab** (`groupPanesByTab`) — agents *and* bare shells, in
+herdr's own order inside each tab, because that is the one view where "what is in this tab" is the
+question being asked and a tab is a thing with a shape. It goes through `panesInSpace` for that
+order (see the session view below); merging the relay's two arrays here, which is what it did, put
+every agent ahead of every terminal, so a terminal split *between* two agents was drawn last.
+**Empty tabs render**
 (`(empty tab)`): a freshly created tab holds a shell the relay may not have listed yet, and hiding
 the tab would leave nowhere to go and start an agent in it. A pane whose tab `tab list` has not
 caught up with — the poll race right after a create — lands in a trailing `…` group rather than
@@ -397,9 +401,8 @@ the write (`chipStripScroll` / `restoreChipStripScroll`), keyed by **what the st
 the space view draws two, and picking a space is exactly the moment you have just scrolled the
 Spaces row. The value is assigned rather than clamped by hand, so a strip that lost chips since the
 last snapshot lands at its own new end. It is the same bug the sibling row has, and
-`tests/test_web_spaces.py`'s `WebStripScrollTests` measures all three rows together — five of its
-six tests fail on the code this replaced, and the sixth is the guard that stops the fix from
-switching the sibling row's anchor off altogether.
+`tests/test_web_spaces.py`'s `WebStripScrollTests` measures all three rows together, with the guard
+that stops the fix from switching the sibling row's anchor off altogether beside them.
 
 **What a row is called is two questions, so two functions and an explicit scope** (`paneParts` /
 `paneTitleInTab`), not one function guessing from whatever heading happens to be above it:
@@ -432,43 +435,88 @@ switching the sibling row's anchor off altogether.
   the tab's **position** in its space while the number is a separate counter; comparing the two
   called that a rename and rendered a heading reading `2` beside one reading `Tab 1`.
 
-**The session view carries herdr's own two levels below the space, in one row** (`renderSiblings` →
-`renderTabStrip` / `renderPaneStrip`, ported from Collie's `TabStrip` + `PaneStrip`): the tabs of
-this space, then a 1px rule, then the panes of this tab. The space above them is the level left to
-the herd list, which is a tap on Back. Both groups are DOM nodes, both are rebuilt from every
-`agents` snapshot — so a terminal appearing beside the open pane shows up without a reopen — and
-each is **hidden on its own when it holds no choice**: the tabs unless the space has two *reachable*
-tabs (6 of the 10 agent panes measured sit in a single-tab space), the panes unless the tab holds a
-second pane (10 of 10 do, so that is the group which always shows). When neither has anything to say
-the row goes, border and all — nothing at all when `HERDR_SHELL_PANES` is off and each tab holds one
-agent, which is the same "renders exactly as before" guarantee the list has.
+**The session view says the two levels below the space in ONE list** (`renderSiblings` →
+`renderSibStrip` / `sibGroup`, where Collie's `TabStrip` + `PaneStrip` used to be ported side by
+side): every pane in this space, in herdr's order, grouped by tab, each group led by its tab's name
+and separated from the next by a 1px rule — read left to right the way a multiplexer's own status
+line is. The space above them is the level left to the herd list, which is a tap on Back. The row is
+DOM nodes, rebuilt from every `agents` snapshot — so a terminal appearing beside the open pane shows
+up without a reopen. The **names are absent in a single-tab space** (6 of the 10 agent panes measured
+sit in one, and each would have paid a chip to be told the name of the only tab there is), and the
+**row itself goes, border and all, when the space holds one pane** — there is nothing to switch to,
+and it would cost the output 33px to say so. A tab whose panes this client cannot name draws no
+group, which is also what keeps the row honest with `HERDR_SHELL_PANES` off, where it becomes the
+tabs that hold agents.
 
-They were **two rows of 33px**, and 4 of the 10 agent panes measured paid for both — for a row that
-is at most three chips beside a row that is at most five. Sharing one row is **33px back, 3.9% of a
-390×844 screen**, and it costs a horizontal scroll the two separate rows did not need: the outer row
-takes the overflow, the padding, the border and `overscroll-behavior` (`.term-content`'s reason — at
-either end of a sideways drag the chain reaches the document and the browser reads it as the gesture
-that unloads the app), while the two groups inside it are plain flex boxes keeping their own ids and
-their own `aria-label`s. **A sideways scroll is the reader's, and it survives a rebuild they did not
-ask for.** The row is rebuilt from every `agents` snapshot — that is how a terminal appearing beside
-the open pane shows up without a reopen — and a rebuild costs it its position: `replaceChildren`
-empties both groups, the row's `scrollWidth` collapses with them, and the browser answers by clamping
-`scrollLeft` to 0. `scrollSibsToOpenPane` then pulled the open chip back into view from there, so a
-reader scrolling the row to read the name of a pane at the far end was snapped back to their own pane
-**every two seconds**. `renderSiblings` therefore carries the offset across the rebuild, and the
-auto-scroll is **anchored**: `sibsAnchoredTo` fires it once per pane, dropped only where "new" is
-meant — `openTerminal`'s real-switch branch (which covers entering a session from the list, where
+**Every pane in the space is one tap, and no chip is rationed.** What this replaced went through
+three shapes. Two rows of 33px, and 4 of the 10 agent panes measured paid for both — for a row that
+is at most three chips beside a row that is at most five. Then one row of **two scrollers**, which
+bought back 33px (3.9% of a 390×844 screen) and turned it into a **width fight**: 2 tabs measure
+135px of a 370px row and 3 measure 253px, **68%**, against a pane chip that can be 178px on its own
+(a 32vw activity title plus the dot, the id tag and the padding), so a multi-tab space had to ration
+the tabs to 45% and still starved the level the reader came for. One list ends the fight — the widest
+chip can have the whole row — and it also ends the *two taps* it took to reach a pane in another tab
+(a tab chip, then whatever pane `tabLandingPane` decided to land you on). The tab's name is still
+tappable, and still lands on the neediest pane in it, because "take me to what needs me over there"
+is a different question from "take me to that pane".
+
+**The tab's name is `position: sticky` inside its own group, which is what makes one scroller safe.**
+In a shared scroller the pane chips come *after* the tab chips, so the scroll that reveals the open
+pane drove the tab level off the left edge: measured at 390px, opening a pane of `ble-dev` in a 3-tab
+space left `ble-verify` standing alone there — a *sibling* tab dressed as the breadcrumb of the one
+you were in — and in a 2-tab space it left the tail of a pane id and no tab level at all. A name that
+sticks **inside its own group** cannot be the wrong one: a sticky element is held by its containing
+block, so each name is pinned only while its own panes are on screen and the next group pushes it out
+rather than stacking on top of it. Swept across the whole scroll range in a browser, the name at the
+left edge always belongs to the group that owns that edge. Two consequences are load-bearing:
+- **The pinned name is painted over the chips scrolling beneath it,** so it needs an opaque
+  background — and the rule has to be `.term-sib.sib-tab`, because `.term-sib`'s own
+  `background: none` matches at the same specificity and comes later in the file. A see-through
+  pinned chip renders as two names on top of each other. `aria-current`'s fill still wins over both.
+- **The reveal must not place the open pane under it.** `scrollSibsToOpenPane` therefore measures
+  from the **group** box, which never sticks (a stuck name's rect is where it is *painted*, not where
+  it sits in the row), and either fits the name in the flow beside the pane — the common case, since
+  a name leads its own tab's panes rather than following every tab in the space — or places the pane
+  to the right of the name's own width. Measured over all 42 panes on this host: the open pane is
+  fully on screen and its own tab's name is visible in every one.
+
+**Colour is deliberately not the channel for "which tab".** The dot is the triage bucket (red →
+orange → green → grey) and a filled chip is the selection, everywhere on this page; a third scale
+keyed to the tab would collide with both. The name says it, the 1px rule says where a group ends, and
+the squarer corner says a name is not a pane chip — none of which costs a hue or a written heading (a
+`Tabs` / `Panes` heading measured 40px of the row, more than 4 of the 5 rows that scrolled on the
+real host overflowed by).
+
+**A sideways scroll is the reader's, and it survives a rebuild they did not ask for.** The row is
+rebuilt from every `agents` snapshot, and a rebuild costs it its position: `replaceChildren` empties
+it, its `scrollWidth` collapses, and the browser answers by clamping `scrollLeft` to 0. The
+auto-scroll then pulled the open chip back into view from there, so a reader scrolling to read the
+name of a pane at the far end was snapped back to their own pane **every two seconds**.
+`renderSiblings` therefore carries the offset across the rebuild, and the auto-scroll is
+**anchored**: `sibsAnchoredTo` fires it once per pane, dropped only where "new" is meant —
+`openTerminal`'s real-switch branch (which covers entering a session from the list, where
 `activePane` is null) and the row disappearing. A **re-entry clears nothing**, so the `blocked` event
 that re-enters `openTerminal` for the pane already in front of you cannot drag the row back at the
-one moment you are most likely to be reading it. It is the *pane* chip that is anchored, never the
-tab chip, which is leftmost and never the one that went missing; and the placing call runs **after**
-the view is displayed, because `renderSiblings` fires while the view is still `display:none`, where
-every rect is zero, no chip can be found to be off screen and `scrollLeft` cannot be written either
-— which is why a row with no box is left unanchored rather than counted as placed. The row sits in
-**normal flow**
+one moment you are most likely to be reading it. The reveal looks for **`[data-sib-id]`**, not for a
+bare `aria-current`: the tab's name carries that attribute too and is pinned to the left edge, so
+matching it would report every row as already placed. The placing call runs **after** the view is
+displayed, because `renderSiblings` fires while the view is still `display:none`, where every rect is
+zero, no chip can be found to be off screen and `scrollLeft` cannot be written either — which is why
+a row with no box is left unanchored rather than counted as placed. The row sits in **normal flow**
 under the header, which is why the absolutely-positioned history panel covers it exactly as it
 already covered the output and `positionHistoryPanel` is untouched. The search bar is in that same
 flow *after* it, so opening search pushes the output down rather than hiding it.
+
+**The row is in herdr's own order, which is `order` and nothing else** (`paneOrder` →
+`panesInSpace`, which `groupPanesByTab` goes through too, so the space view and the session row
+cannot disagree about two panes of one tab). The relay passes through each pane's index in
+`pane list`, which is the order the panes are laid out on the operator's screen — see the protocol
+section for why neither array position nor the pane id can stand in for it. Sorting the ids, which
+is what this did, put the live `w6:t1` in exactly the wrong order: pH, p15, p12 at the desk against
+p12, p15, pH on the phone. A missing `order` sorts **last, stably**, so an older relay and
+`demo-worker` keep the arrays as they arrived and the one pane that can lack it on a current relay —
+an agent a `blocked` push appended — is back in place on the next snapshot. `tabLandingPane` breaks
+its ties the same way, so a tap on a tab's name lands on the chip a reader would have picked.
 
 **The chrome above the output is measured, and it was 20% of the phone.** 69px of app header, of
 which the session view covered the bottom 20 — its `top` was a hardcoded `49px` against a header
@@ -478,11 +526,12 @@ text metrics for a button with no text in it. Then the two sibling rows. **170px
 single line of a pane had rendered.** It is **116px, 13.7%** now: the app header is a *height*
 (`--header-h`, the one place the number is written, and what `.terminal-view`'s `top` is computed
 from, so the two cannot drift again), the session header pins every child to 28px the way the
-history bar does, and the two levels share a row. `tests/test_web_spaces.py` measures all three
-against the screen rather than reading the CSS.
+history bar does, and the two levels share one row and one list. `tests/test_web_spaces.py` measures
+all three against the screen rather than reading the CSS.
 
-What that replaced was one flat row of the *other* panes in the workspace, tagged `Tab` and `Space`,
-each chip named `label || pane_id`. Three things were wrong with it, and each is now a rule:
+The row this all grew out of was also flat, and that is the shape it has come back to -- but it
+listed the *other* panes in the workspace tagged `Tab` and `Space`, each chip named
+`label || pane_id`. Three things were wrong with it, and each is now a rule:
 
 - **A pane is named by what it can still say for itself** (`paneChipName`, Collie's
   `paneDisplayName`): the operator's label, then — for an agent — the activity `title` it is
