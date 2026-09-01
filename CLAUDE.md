@@ -97,6 +97,7 @@ cd herdi-win && ./build.ps1
 | `HERDR_SHELL_PANES` | Set to `1` to list, read and **write** the panes with no agent in them (default off — writing to one is arbitrary command execution; see SECURITY.md) |
 | `HERDR_TRANSCRIPT` | Set to `0` to refuse every `get_history` with `unavailable: "disabled"` |
 | `HERDR_CLAUDE_ROOTS` | Comma-separated roots to search for claude transcripts (default `~/.claude/projects`) |
+| `HERDR_PI_ROOTS` | Comma-separated roots holding pi session logs; a pane's path ref must sit inside one (default `~/.pi/agent/sessions`) |
 | `HERDR_REMOTE_CLAUDE_ROOTS` | Same, as remote shell words (default `$HOME/.claude/projects`) |
 | `HERDR_TRANSCRIPT_MAX_BYTES` / `HERDR_TRANSCRIPT_TAIL_BYTES` | Read only the last N bytes of a transcript past this size (default 64MB / 8MB) |
 | `HERDR_TRANSCRIPT_REMOTE_TAIL_BYTES` | Bytes of a remote transcript to fetch per read (default 4MB) |

@@ -622,5 +622,92 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("$HOME/.claude/projects", script)
 
 
+def pi_message(role, content, mid="m1", **extra):
+    return {"type": "message", "id": mid, "timestamp": "2026-08-21T00:00:00.000Z",
+            "message": {"role": role, "content": content}, **extra}
+
+
+class PiTests(unittest.TestCase):
+    """pi hands over an absolute path (kind 'path'), and its blocks are toolCall/toolResult."""
+
+    def parse_pi(self, rows):
+        return transcript.parse_pi(json.dumps(r) for r in rows)
+
+    def test_user_and_assistant_text_become_turns(self):
+        turns, _ = self.parse_pi([
+            pi_message("user", [{"type": "text", "text": "do the thing"}], mid="m1"),
+            pi_message("assistant", [{"type": "text", "text": "done"}], mid="m2"),
+        ])
+        self.assertEqual([(t["role"], t["text"]) for t in turns],
+                         [("user", "do the thing"), ("assistant", "done")])
+
+    def test_thinking_blocks_are_dropped(self):
+        turns, _ = self.parse_pi([
+            pi_message("assistant", [
+                {"type": "thinking", "thinking": "secret plan"},
+                {"type": "text", "text": "visible"},
+            ]),
+        ])
+        self.assertEqual([t["text"] for t in turns], ["visible"])
+
+    def test_toolcall_arguments_are_a_json_string(self):
+        turns, _ = self.parse_pi([
+            pi_message("assistant", [
+                {"type": "toolCall", "id": "tc1", "name": "bash",
+                 "arguments": json.dumps({"command": "ls -la"})},
+            ]),
+        ])
+        tool = turns[0]
+        self.assertEqual(tool["role"], "tool")
+        self.assertEqual(tool["tool"], "bash")
+        self.assertIn("ls -la", tool["text"])
+
+    def test_toolresult_folds_onto_its_call(self):
+        turns, _ = self.parse_pi([
+            pi_message("assistant", [
+                {"type": "toolCall", "id": "tc1", "name": "bash",
+                 "arguments": json.dumps({"command": "echo hi"})},
+            ], mid="m1"),
+            pi_message("toolResult", [{"type": "text", "text": "hi"}], mid="m2", toolCallId="tc1"),
+        ])
+        self.assertEqual(len(turns), 1)
+        self.assertIn("\u2192 hi", turns[0]["text"])
+
+    def test_duplicate_ids_are_deduped(self):
+        turns, _ = self.parse_pi([
+            pi_message("user", [{"type": "text", "text": "once"}], mid="dup"),
+            pi_message("user", [{"type": "text", "text": "once"}], mid="dup"),
+        ])
+        self.assertEqual(len(turns), 1)
+
+    def test_history_reads_a_pi_path_inside_a_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "sess.jsonl"
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(pi_message("user", [{"type": "text", "text": "hello"}])) + "\n")
+            mod = load_transcript({"HERDR_PI_ROOTS": root})
+            body = mod.history({"agent": "pi", "kind": "path", "value": str(path)}, agent="pi")
+            self.assertIsNone(body["unavailable"])
+            self.assertEqual(body["messages"][0]["text"], "hello")
+            self.assertEqual(body["agent"], "pi")
+
+    def test_history_refuses_a_path_outside_every_root(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
+            path = Path(elsewhere) / "sess.jsonl"
+            path.write_text(json.dumps(pi_message("user", [{"type": "text", "text": "x"}])) + "\n")
+            mod = load_transcript({"HERDR_PI_ROOTS": root})
+            body = mod.history({"agent": "pi", "kind": "path", "value": str(path)}, agent="pi")
+            self.assertEqual(body["unavailable"], "no-log")
+
+    def test_pi_with_an_id_kind_is_no_session(self):
+        body = transcript.history({"agent": "pi", "kind": "id", "value": SESSION}, agent="pi")
+        self.assertEqual(body["unavailable"], "no-session")
+
+    def test_claude_with_a_path_kind_is_no_session(self):
+        body = transcript.history({"agent": "claude", "kind": "path", "value": "/tmp/x.jsonl"},
+                                  agent="claude")
+        self.assertEqual(body["unavailable"], "no-session")
+
+
 if __name__ == "__main__":
     unittest.main()

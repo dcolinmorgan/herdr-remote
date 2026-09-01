@@ -8,8 +8,9 @@ does reach older rows -- a `recent` + text read, which walks the agent's own mou
 terminal. The agent writes its own transcript anyway, with real message boundaries and timestamps,
 so that is what we read.
 
-Currently only Claude's JSONL is understood. Adding a harness means adding a locate+parse pair and
-one line in HARNESSES -- nothing else in here or in the relay is claude-specific.
+Claude and pi JSONL are both understood. Adding another harness means adding a locate+parse pair
+and one line in HARNESSES (plus PATH_HARNESSES if it hands over a file path rather than a uuid) --
+nothing else in here or in the relay is harness-specific.
 """
 import difflib
 import glob
@@ -65,6 +66,9 @@ def _roots_env(name, default):
 
 ENABLED = os.environ.get("HERDR_TRANSCRIPT", "1").strip().lower() not in {"0", "false", "no", "off"}
 LOCAL_ROOTS = _roots_env("HERDR_CLAUDE_ROOTS", [os.path.expanduser("~/.claude/projects")])
+# pi writes one JSONL per session under here; its session ref hands over the absolute path
+# (kind "path"), so these roots are a containment check rather than a search space.
+PI_ROOTS = _roots_env("HERDR_PI_ROOTS", [os.path.expanduser("~/.pi/agent/sessions")])
 # Remote roots stay unexpanded: they are shell words for the remote host, whose $HOME is not ours.
 REMOTE_ROOTS = _roots_env("HERDR_REMOTE_CLAUDE_ROOTS", ["$HOME/.claude/projects"])
 MAX_BYTES = _int_env("HERDR_TRANSCRIPT_MAX_BYTES", 64 * 1024 * 1024)
@@ -422,6 +426,133 @@ def parse_claude(lines):
     return turns, title
 
 
+# ---------------------------------------------------------------------------- pi parser
+#
+# pi's JSONL is an event stream: one row per `type`, and a conversation turn is a
+# `type:"message"` row carrying a nested `message` with `role` and a content block list.
+# Block kinds differ from claude's: `text`, `thinking`, `toolCall` (name+arguments, arguments a
+# JSON string), and `toolResult` arrives as its own `role:"toolResult"` message rather than
+# folded into a user row. Everything else (session, model_change, custom) is not a turn.
+
+def _pi_content_blocks(row):
+    message = row.get("message")
+    if not isinstance(message, dict):
+        return None, []
+    content = message.get("content")
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return message.get("role"), []
+    return message.get("role"), content
+
+
+def _pi_tool_args(block):
+    """pi stores toolCall arguments as a JSON string; hand back a dict for _tool_target."""
+    args = block.get("arguments")
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            return parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            return {}
+    return {}
+
+
+def parse_pi(lines):
+    """(turns, title) from pi's JSONL. Oldest first, same turn shape as parse_claude."""
+    turns = []
+    tool_turns = {}
+    seen_rows = set()
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue  # torn last line while the file is being appended to
+        if not isinstance(row, dict) or row.get("type") != "message":
+            continue
+        row_id = row.get("id")
+        if isinstance(row_id, str) and row_id:
+            if row_id in seen_rows:
+                continue
+            seen_rows.add(row_id)
+        # pi rows key their id under "id"; _turn reads "uuid". Alias it so turn ids stay usable
+        # as pagination cursors, exactly like claude's uuid.
+        if "uuid" not in row and isinstance(row_id, str):
+            row["uuid"] = row_id
+        role, content = _pi_content_blocks(row)
+        if role == "user":
+            spoken = [b.get("text") for b in content
+                      if isinstance(b, dict) and b.get("type") == "text"
+                      and isinstance(b.get("text"), str) and b.get("text").strip()]
+            if spoken:
+                turns.append(_turn(row, "user", "\n".join(spoken), 0))
+        elif role == "assistant":
+            for index, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("type")
+                if kind == "text":
+                    text = block.get("text")
+                    if isinstance(text, str) and text.strip():
+                        turns.append(_turn(row, "assistant", text, index))
+                elif kind == "toolCall":
+                    args = _pi_tool_args(block)
+                    name = block.get("name")
+                    name = name if isinstance(name, str) and name else "tool"
+                    detail = _tool_target(args)
+                    summary = f"{name}({detail})" if detail else name
+                    turn = _turn(row, "tool", summary, index, limit=TOOL_TEXT_LIMIT)
+                    turn["tool"] = name
+                    if detail:
+                        turn["target"] = detail[:TOOL_TEXT_LIMIT]
+                    diff = _tool_diff(name, args)
+                    if diff:
+                        turn["diff"], turn["added"], turn["removed"], clipped = diff
+                        if clipped:
+                            turn["diff_clipped"] = True
+                    turns.append(turn)
+                    tool_id = block.get("id")
+                    if isinstance(tool_id, str) and tool_id:
+                        tool_turns[tool_id] = turn
+                # thinking: dropped, same as claude -- bulk of the bytes, not the conversation.
+        elif role == "toolResult":
+            # pi emits the result as its own message; fold it onto the toolCall it answers.
+            tool_id = (row.get("message") or {}).get("toolCallId") or row.get("toolCallId")
+            turn = tool_turns.get(tool_id)
+            if turn is not None:
+                body = "\n".join(b.get("text", "") for b in content
+                                 if isinstance(b, dict) and b.get("type") == "text")
+                head = _first_line(body)
+                if head:
+                    turn["text"], turn["truncated"] = clip(
+                        f"{turn['text']} \u2192 {head}", TOOL_TEXT_LIMIT)
+    for index, turn in enumerate(turns):
+        if not turn["uuid"] or turn["uuid"].startswith("#"):
+            turn["uuid"] = f"turn-{index}"
+    return turns, ""
+
+
+def locate_pi(path_value, roots=None):
+    """pi hands over an absolute path; return it only if it sits inside a configured root.
+
+    The value comes from herdr, not a client, but a containment check is cheap insurance against
+    a path ref ever pointing outside the sessions tree.
+    """
+    if not isinstance(path_value, str) or not path_value:
+        return None
+    real = os.path.realpath(path_value)
+    for root in (roots if roots is not None else PI_ROOTS):
+        root_real = os.path.realpath(os.path.expanduser(root))
+        if real == root_real or real.startswith(root_real + os.sep):
+            return real if os.path.isfile(real) else None
+    return None
+
+
 # ---------------------------------------------------------------------------- locating
 
 
@@ -597,7 +728,10 @@ def _unavailable(reason, agent=""):
     }
 
 
-HARNESSES = {"claude": (locate_claude, parse_claude)}
+# Each harness is (locate, parse). PATH_HARNESSES also names the session-ref kind it accepts:
+# claude uses "id" (a uuid we glob for), pi uses "path" (an absolute file it hands over).
+HARNESSES = {"claude": (locate_claude, parse_claude), "pi": (locate_pi, parse_pi)}
+PATH_HARNESSES = {"pi"}
 
 
 def history(session, remote=None, limit=DEFAULT_LIMIT, before=None, include_tools=False,
@@ -611,17 +745,24 @@ def history(session, remote=None, limit=DEFAULT_LIMIT, before=None, include_tool
         return _unavailable("disabled", agent)
     if not isinstance(session, dict):
         return _unavailable("no-session", agent)
-    # kind "path" (a harness that hands over an absolute file) needs a containment check against
-    # the configured roots before it may be opened. Claude never uses it; wire it up with the
-    # harness that does. A ref we cannot make sense of is "no session", whatever the harness.
-    if session.get("kind") != "id":
-        if log and session:
-            log.info("transcript: session ref kind %r not supported", session.get("kind"))
-        return _unavailable("no-session", agent)
-    value = session.get("value")
-    if not isinstance(value, str) or not UUID_RE.match(value):
-        return _unavailable("no-session", agent)
     harness = session.get("agent") or agent
+    kind = session.get("kind")
+    value = session.get("value")
+    # A path harness (pi) hands over an absolute file; an id harness (claude) hands over a uuid we
+    # glob for. Validate the ref shape against what this harness actually uses -- a ref we cannot
+    # make sense of is "no session", whatever the harness.
+    if harness in PATH_HARNESSES:
+        if kind != "path" or not isinstance(value, str) or not value:
+            if log and session:
+                log.info("transcript: %r session ref kind %r not usable", harness, kind)
+            return _unavailable("no-session", agent)
+    else:
+        if kind != "id":
+            if log and session:
+                log.info("transcript: session ref kind %r not supported", kind)
+            return _unavailable("no-session", agent)
+        if not isinstance(value, str) or not UUID_RE.match(value):
+            return _unavailable("no-session", agent)
     entry = HARNESSES.get(harness)
     if entry is None:
         # A pane running a harness this relay cannot parse is a different sentence from a pane
