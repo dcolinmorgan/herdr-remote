@@ -145,9 +145,115 @@ SAFE_RESPONSES = {
     "yes, single permission", "trust, always allow", "no (tab to edit)",
     "approve all pending", "configure individually", "exit (cancel subagents)",
 }
-SAFE_KEYS = {"y", "n", "a", "Enter", "Tab", "Escape", "C-c", "Up", "Down", "Left", "Right", "BSpace"} | {
-    str(number) for number in range(10)
-}
+# Keys the relay will forward, in the grammar herdr actually validates. Live-verified against
+# herdr 0.8.0 (protocol 19) on a throwaway session:
+#   accepted -- bare specials (Enter Escape Tab Space Backspace BS Up Down Left Right F1..F12),
+#               any single character, `+`-joined chords (ctrl+c, shift+tab, alt+Up), and `C-c`,
+#               which is the ONE tmux-style spelling herdr still aliases to interrupt;
+#   rejected -- C-u, M-x, BTab, BSpace, PageUp, PageDown, Home, End, Insert, Delete.
+# `BSpace` used to sit in this set and could never have worked: herdr answers
+# `invalid_key: unsupported key BSpace`. Chords are validated by key_is_allowed(), not enumerated
+# here, because the web app composes them at runtime (ctrl+/shift+ any key) -- this set is the
+# bare-key half of the grammar, and it must stay a self-contained literal expression
+# (tests/test_telegram.py evaluates it straight out of the AST).
+SAFE_KEYS = {
+    "y", "n", "a",
+    "Enter", "Escape", "Tab", "Space", "Backspace", "BS",
+    "Up", "Down", "Left", "Right",
+    "C-c",
+} | {str(number) for number in range(10)} | {f"F{index}" for index in range(1, 13)}
+
+# Modifiers herdr accepts in a chord. `cmd`/`super` are also valid upstream but no client sends
+# them, so they stay out: an allowlist should not be wider than the UI that feeds it.
+SAFE_MODIFIERS = {"ctrl", "shift", "alt"}
+
+# Special key NAMES, lowercased, because herdr matches them case-insensitively -- `shift+tab` and
+# `esc` both ack, so a client spelling them that way is not wrong. Single characters stay
+# case-sensitive (they are typed literally), which is why they aren't in here.
+SAFE_SPECIAL_KEYS = {
+    "enter", "escape", "esc", "tab", "space", "backspace", "bs",
+    "up", "down", "left", "right",
+} | {f"f{index}" for index in range(1, 13)}
+
+
+# Keys herdr's own validator refuses in EVERY spelling -- live re-checked on herdr 0.8.2, which
+# answers `unsupported key PageUp` to PageUp/PgUp/pageup/PgDn/Page_Up alike, and the same for
+# Home and End with or without a modifier. No respelling reaches them through `pane send-keys`.
+#
+# `pane send-text` is a byte channel and passes ESC through verbatim (probed by running `cat -v`
+# in a throwaway pane, which then showed `^[[5~`), so the relay delivers these as the CSI bytes a
+# terminal would emit for the key. A real TUI reads them AS the key: `less` on a 500-line file
+# paged from row 1 to row 70 on ESC[6~ and back to row 1 on ESC[5~.
+#
+# Modified forms are computed rather than enumerated -- xterm encodes the modifier as
+# 1 + shift(1) + alt(2) + ctrl(4), so ctrl+Home is ESC[1;5H and shift+PageUp is ESC[5;2~.
+#
+# Insert and Delete are refused by herdr too and would be one line each here; they stay out until
+# a client asks for them, so this table only covers keys something actually sends.
+CSI_MODIFIER_BITS = {"shift": 1, "alt": 2, "ctrl": 4}
+CSI_TILDE_KEYS = {"pageup": "5", "pagedown": "6"}
+CSI_LETTER_KEYS = {"home": "H", "end": "F"}
+
+
+def key_escape_sequence(key):
+    """The CSI bytes for a key herdr cannot send, or "" when `pane send-keys` should take it.
+
+    Accepts the same `+`-joined grammar as key_is_allowed, so `PageUp`, `pageup` and `ctrl+Home`
+    all resolve. An unknown or repeated modifier resolves to "" and is then refused by
+    key_is_allowed, rather than silently going out as the unmodified key.
+    """
+    if not isinstance(key, str) or not key:
+        return ""
+    *modifiers, base = key.split("+")
+    base = base.lower()
+    if base not in CSI_TILDE_KEYS and base not in CSI_LETTER_KEYS:
+        return ""
+    modifiers = [modifier.lower() for modifier in modifiers]
+    if len(set(modifiers)) != len(modifiers):
+        return ""
+    if not all(modifier in CSI_MODIFIER_BITS for modifier in modifiers):
+        return ""
+    code = 1 + sum(CSI_MODIFIER_BITS[modifier] for modifier in modifiers)
+    if base in CSI_TILDE_KEYS:
+        number = CSI_TILDE_KEYS[base]
+        return f"\x1b[{number}~" if code == 1 else f"\x1b[{number};{code}~"
+    letter = CSI_LETTER_KEYS[base]
+    return f"\x1b[{letter}" if code == 1 else f"\x1b[1;{code}{letter}"
+
+
+def key_is_allowed(key):
+    """True when herdr's key validator would accept `key` AND the relay is willing to send it.
+
+    Two shapes pass: a bare key (SAFE_KEYS, or any special name in any case), and a `+`-joined
+    chord whose modifiers are all in SAFE_MODIFIERS and whose base is a single printable character
+    or a special name -- herdr takes `alt+Up`, `shift+tab` and `ctrl+c` alike.
+
+    Bare single characters stay limited to SAFE_KEYS (y/n/a/digits) even though herdr would type
+    any of them: send_keys is for control, and free text has its own gated channels.
+
+    A repeated modifier (`ctrl+ctrl+c`) is refused HERE regardless of what herdr does with it --
+    it only ever arrives from a client bug, and forwarding a malformed chord into a live terminal
+    is not the way to find that out.
+    """
+    if not isinstance(key, str) or not key:
+        return False
+    if key in SAFE_KEYS or key.lower() in SAFE_SPECIAL_KEYS:
+        return True
+    if key_escape_sequence(key):
+        return True
+    if "+" not in key:
+        return False
+    *modifiers, base = key.split("+")
+    if not modifiers or not base:
+        return False
+    modifiers = [modifier.lower() for modifier in modifiers]
+    if not all(modifier in SAFE_MODIFIERS for modifier in modifiers):
+        return False
+    if len(set(modifiers)) != len(modifiers):
+        return False
+    if base.lower() in SAFE_SPECIAL_KEYS:
+        return True
+    return len(base) == 1 and base.isprintable()
 
 
 # --- Audit logging ---
@@ -295,26 +401,20 @@ def _save_active_sessions():
         json.dump(payload, f)
 
 
-async def send_web_push(title: str, body: str, url: str = "/", clear: bool = False):
-    """Send push notification to all registered subscriptions.
-    
-    Uses collapse topic + TTL so offline devices get only the latest.
-    If clear=True, sends a clear instruction instead of showing a notification.
+def _deliver_push(payload, headers):
+    """POST one payload to every subscription. BLOCKING -- pywebpush is requests underneath.
+
+    Works off a snapshot of push_subscriptions and drops dead ones BY VALUE: this runs on a
+    worker thread now, so a push_subscribe arriving mid-flight would invalidate any index
+    computed before it and pop somebody else's subscription.
     """
-    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
-        return
     try:
-        from pywebpush import webpush, WebPushException
+        from pywebpush import webpush
     except ImportError:
         log.warning("pywebpush not installed, skipping push")
         return
-    if clear:
-        payload = json.dumps({"type": "clear", "tag": "herdr-blocked"})
-    else:
-        payload = json.dumps({"title": title, "body": body, "url": url})
-    headers = {"Topic": "herdr-herd", "TTL": "21600"}  # 6h TTL, collapse key
     dead = []
-    for i, sub in enumerate(push_subscriptions):
+    for sub in list(push_subscriptions):
         try:
             webpush(
                 subscription_info=sub,
@@ -324,19 +424,50 @@ async def send_web_push(title: str, body: str, url: str = "/", clear: bool = Fal
                 headers=headers,
             )
         except Exception as e:
-            log.warning("Push failed for sub %d: %s", i, e)
+            log.warning("Push failed for %.60s: %s", (sub or {}).get("endpoint", "?"), e)
+            # 404/410 is the push service saying this subscription is retired, not a transient
+            # failure -- anything else keeps its subscription for the next notification.
             if "410" in str(e) or "404" in str(e):
-                dead.append(i)
+                dead.append(sub)
+    for sub in dead:
+        try:
+            push_subscriptions.remove(sub)
+        except ValueError:
+            pass
     if dead:
-        for i in reversed(dead):
-            push_subscriptions.pop(i)
         _save_push_subs()
+
+
+async def send_web_push(title: str, body: str, url: str = "/", clear: bool = False):
+    """Send push notification to all registered subscriptions.
+
+    Uses collapse topic + TTL so offline devices get only the latest.
+    If clear=True, sends a clear instruction instead of showing a notification.
+    """
+    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
+        return
+    if clear:
+        payload = json.dumps({"type": "clear", "tag": "herdr-blocked"})
+    else:
+        payload = json.dumps({"title": title, "body": body, "url": url})
+    headers = {"Topic": "herdr-herd", "TTL": "21600"}  # 6h TTL, collapse key
+    await asyncio.to_thread(_deliver_push, payload, headers)
 
 _load_push_subs()
 _load_active_sessions()
 
 
 def _invoke_herdr(*args, remote=None):
+    """Run one herdr command, locally or over SSH. BLOCKING -- never call this from the loop.
+
+    Every herdr call is a subprocess. Locally that is a few ms, but a read reaching past the
+    viewport costs seconds and an SSH call can run to the timeout below, and for that whole time
+    an inline caller serves no other client, runs no poll tick and sends no broadcast. Everything
+    reachable from async code goes through asyncio.to_thread.
+
+    Only the SSH branch touches shared state (_remote_locks, behind _remote_locks_guard), so the
+    worker threads need no further synchronising.
+    """
     session = active_session_for(remote)
     if remote:
         cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", remote]
@@ -392,6 +523,26 @@ def get_workspace_labels(remote=None):
         return {}
 
 
+def activity_title(title, agent):
+    """The terminal title, but only when it carries something the cwd does not.
+
+    herdr passes the pane's terminal title straight through, and a claude that is working sets it
+    to what it is doing ("fix P0, draft the P1 plan"). Idle and done panes are the problem: of the
+    nine agent panes on the host this was measured on, seven reported no title at all and two
+    reported the plain banner "Claude Code" -- which is the harness's name, already in the `agent`
+    field right beside it, and worth less than the cwd a client would drop to show it. Match the
+    banner by prefix so codex and opencode get the same treatment without a per-harness list, and
+    so a title that merely mentions the harness ("Claude Code: fix the poll") survives.
+    """
+    title = (title or "").strip()
+    if not title:
+        return ""
+    flattened = re.sub(r"[^a-z0-9]", "", title.lower())
+    if agent and flattened.startswith(re.sub(r"[^a-z0-9]", "", agent.lower())):
+        return ""
+    return title
+
+
 def get_agents_from_host(remote=None):
     raw = run_herdr("pane", "list", remote=remote)
     host_label = remote or "local"
@@ -406,6 +557,11 @@ def get_agents_from_host(remote=None):
                 "label": p.get("label", ""),
                 # Names the space, and stands in for panes that have no label.
                 "workspace_label": workspace_labels.get(p.get("workspace_id", ""), ""),
+                # A working claude sets its terminal title to what it is doing, so this is live
+                # activity rather than a stable session name. Idle and done panes report either
+                # nothing or the harness's own banner, which says less than the cwd it would
+                # displace on a client, so activity_title drops those.
+                "title": activity_title(p.get("terminal_title_stripped"), p.get("agent", "")),
                 "status": p.get("agent_status", "unknown"),
                 "cwd": p.get("cwd", ""),
                 "project": os.path.basename(p.get("cwd", "")),
@@ -514,22 +670,44 @@ def _source_key(host):
     raise KeyError(host)
 
 
-def apply_session_switch(host, session, ip="", device=""):
+def session_switch_names(host):
+    """Session names a switch to `host` may name, or None when the host is unknown.
+
+    BLOCKING -- one `herdr session list`, which is an ssh round trip for a remote. Split out of
+    apply_session_switch so a caller on the event loop can read this on a worker thread and still
+    run the mutation itself: reset_pane_state drains an asyncio.Queue and bumps POLL_GENERATION,
+    neither of which is safe off the loop thread.
+    """
+    try:
+        source = _source_key(host)
+    except KeyError:
+        return None
+    return {entry["name"] for entry in get_sessions(remote=source)}
+
+
+def apply_session_switch(host, session, ip="", device="", *, names):
     """Point one source at a session. Returns (ok, error_message, changed).
+
+    `names` is the allowlist a named session is checked against -- read it with
+    session_switch_names, off the loop. It is keyword-only and has no default on purpose: this
+    function must NOT be able to reach a blocking call, and a caller that omits the allowlist
+    should fail loudly rather than fall back to reading it here. A falsy `names` therefore
+    rejects every named session; only `session=None` (follow herdr's own default) still passes.
 
     `changed` is False on the no-op path (already-active selection) and on
     any rejection, True only when ACTIVE_SESSIONS was actually mutated.
     Callers must skip the broadcast + re-poll when it's False -- that's the
     expensive part the no-op short-circuit below exists to avoid, and it is
     defeated if the caller runs it anyway.
+
+    Must run on the event-loop thread: reset_pane_state below is not thread-safe.
     """
     try:
         source = _source_key(host)
     except KeyError:
         return False, f"unknown host: {host}", False
 
-    # Re-selecting the already-active session is a no-op: skip the blocking
-    # `herdr session list` call and, crucially, the pane-state reset below.
+    # Re-selecting the already-active session is a no-op: skip the pane-state reset below.
     # `source in ACTIVE_SESSIONS` (not `.get()`) matters here -- a key that
     # has never been set is not the same thing as an explicit None value.
     if source in ACTIVE_SESSIONS and ACTIVE_SESSIONS[source] == session:
@@ -540,8 +718,7 @@ def apply_session_switch(host, session, ip="", device=""):
             # session lands in a set-membership check next; a list/dict is
             # unhashable there and would raise instead of being rejected.
             return False, f"unknown session: {session}", False
-        names = {s["name"] for s in get_sessions(remote=source)}
-        if session not in names:
+        if session not in (names or frozenset()):
             return False, f"unknown session: {session}", False
 
     ACTIVE_SESSIONS[source] = session
@@ -576,12 +753,10 @@ def sessions_message():
 
 async def broadcast_sessions():
     gen = POLL_GENERATION
-    msg = sessions_message()
-    # This guard cannot fire today: sessions_message -> get_sessions ->
-    # run_herdr -> subprocess.run is entirely synchronous, so nothing can
-    # bump POLL_GENERATION between the two lines above. It stays correct
-    # and becomes load-bearing the moment that chain gains an await (e.g.
-    # a future to_thread fix for the blocking subprocess call).
+    msg = await asyncio.to_thread(sessions_message)
+    # This guard is load-bearing now that the line above yields: sessions_message runs one
+    # `herdr session list` per source on a worker thread, so a session_switch CAN land while
+    # this message is being built, and the message it would carry is then already wrong.
     #
     # It does NOT cover the real staleness window: broadcast() below awaits
     # ws.send() once per client, so a switch landing mid fan-out can still
@@ -861,14 +1036,14 @@ async def broadcast(msg):
     clients.difference_update(dead)
 
 async def send_current_snapshot(ws):
-    await ws.send(json.dumps(sessions_message()))
-    agents = get_all_agents()
+    await ws.send(json.dumps(await asyncio.to_thread(sessions_message)))
+    agents = await asyncio.to_thread(get_all_agents)
     update_pane_maps(agents)
     await ws.send(json.dumps({"type": "agents", "agents": agents}))
     for agent in agents:
         if agent["status"] != "blocked":
             continue
-        content = read_pane(agent["pane_id"], remote=agent.get("remote"))
+        content = await asyncio.to_thread(read_pane, agent["pane_id"], remote=agent.get("remote"))
         await ws.send(json.dumps(blocked_message(
             agent["pane_id"],
             agent["agent"],
@@ -893,7 +1068,7 @@ async def poll_loop():
 
 async def _poll_once():
         gen = POLL_GENERATION
-        agents = get_all_agents()
+        agents = await asyncio.to_thread(get_all_agents)
         update_pane_maps(agents)
         # Always broadcast (even empty list) so clients stay in sync
         await broadcast({"type": "agents", "agents": agents})
@@ -902,7 +1077,7 @@ async def _poll_once():
         for a in agents:
             pid, status = a["pane_id"], a["status"]
             if status == "blocked":
-                content = read_pane(pid, remote=a.get("remote"))
+                content = await asyncio.to_thread(read_pane, pid, remote=a.get("remote"))
                 message = blocked_message(
                     pid,
                     a["agent"],
@@ -954,7 +1129,7 @@ async def event_push():
         event_remote = pane_remote_map.get(pane_id)
 
         if pane_id and event.get("type") == "agent_event":
-            agents = get_all_agents()
+            agents = await asyncio.to_thread(get_all_agents)
             if status == "blocked" and not any(
                 agent["pane_id"] == pane_id for agent in agents
             ):
@@ -978,7 +1153,7 @@ async def event_push():
         if status == "blocked" and pane_id:
             remote = pane_remote_map.get(pane_id)
             if remote or host == "local":
-                content = read_pane(pane_id, remote=remote)
+                content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
             else:
                 content = event.get("prompt", "Agent is blocked")
             message = blocked_message(
@@ -1192,10 +1367,12 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "invalid question option"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                if not prompt_matches(pane_id, msg.get("prompt_id", ""), remote=remote):
+                if not await asyncio.to_thread(
+                    prompt_matches, pane_id, msg.get("prompt_id", ""), remote=remote
+                ):
                     await ws.send(json.dumps({"type": "error", "message": "question changed; refresh and try again"}))
                     continue
-                if not toggle_question_option(pane_id, option, remote=remote):
+                if not await asyncio.to_thread(toggle_question_option, pane_id, option, remote=remote):
                     await ws.send(json.dumps({"type": "error", "message": "question option toggle failed"}))
             elif msg_type == "question_submit":
                 pane_id = msg["pane_id"]
@@ -1203,10 +1380,12 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                if not prompt_matches(pane_id, msg.get("prompt_id", ""), remote=remote):
+                if not await asyncio.to_thread(
+                    prompt_matches, pane_id, msg.get("prompt_id", ""), remote=remote
+                ):
                     await ws.send(json.dumps({"type": "error", "message": "question changed; refresh and try again"}))
                     continue
-                if not submit_multi_question(pane_id, remote=remote):
+                if not await asyncio.to_thread(submit_multi_question, pane_id, remote=remote):
                     await ws.send(json.dumps({"type": "error", "message": "question submission failed"}))
             elif msg_type == "respond":
                 pane_id = msg["pane_id"]
@@ -1226,20 +1405,26 @@ async def handle_client(ws):
                     await ws.send(json.dumps(command_error("response empty or too long")))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                content = read_pane(pane_id, remote=remote)
+                content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
                     await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
                     continue
-                question = detect_question(content) if pane_is_omp(pane_id, remote=remote) else None
+                question = (
+                    detect_question(content)
+                    if await asyncio.to_thread(pane_is_omp, pane_id, remote=remote)
+                    else None
+                )
                 log.info("Response from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("respond", ip, device, pane_id, f"text={text!r}")
                 if question:
-                    delivered = respond_to_question(pane_id, text, question, remote=remote)
+                    delivered = await asyncio.to_thread(
+                        respond_to_question, pane_id, text, question, remote=remote
+                    )
                 elif custom_editor_active(content) or text.lower() in SAFE_RESPONSES:
-                    delivered = _mutate_herdr(
-                        "pane", "send-text", pane_id, text, remote=remote
-                    ) and _mutate_herdr(
-                        "pane", "send-keys", pane_id, "Enter", remote=remote
+                    delivered = await asyncio.to_thread(
+                        _mutate_herdr, "pane", "send-text", pane_id, text, remote=remote
+                    ) and await asyncio.to_thread(
+                        _mutate_herdr, "pane", "send-keys", pane_id, "Enter", remote=remote
                     )
                 else:
                     await ws.send(json.dumps({
@@ -1255,7 +1440,13 @@ async def handle_client(ws):
                 await ws.send(json.dumps(response))
             elif msg_type == "session_switch":
                 request_id = msg.get("request_id")
-                ok, err, changed = apply_session_switch(msg.get("host"), msg.get("session"), ip, device)
+                # The allowlist read is one `herdr session list` per call -- an ssh round trip
+                # for a remote -- so it goes to a worker thread. The mutation stays here: it
+                # drains an asyncio.Queue and bumps POLL_GENERATION, neither safe off the loop.
+                names = await asyncio.to_thread(session_switch_names, msg.get("host"))
+                ok, err, changed = apply_session_switch(
+                    msg.get("host"), msg.get("session"), ip, device, names=names
+                )
                 if not ok:
                     response = {"type": "error", "message": err}
                     if request_id:
@@ -1292,7 +1483,8 @@ async def handle_client(ws):
                     await ws.send(json.dumps({"type": "error", "message": "invalid pane read format"}))
                     continue
                 remote = pane_remote_map.get(pane_id)
-                content = run_herdr(
+                content = await asyncio.to_thread(
+                    run_herdr,
                     "pane", "read", pane_id, "--lines", str(lines), "--source", "recent",
                     "--format", read_format, remote=remote
                 )
@@ -1304,7 +1496,9 @@ async def handle_client(ws):
                     continue
                 remote = pane_remote_map.get(pane_id)
                 # Try to read conversation history from agent's session log
-                history = run_herdr("agent", "history", pane_id, "--format", "json", remote=remote)
+                history = await asyncio.to_thread(
+                    run_herdr, "agent", "history", pane_id, "--format", "json", remote=remote
+                )
                 messages = []
                 try:
                     data = json.loads(history) if history else {}
@@ -1326,25 +1520,59 @@ async def handle_client(ws):
                     await ws.send(json.dumps(command_error("unknown pane_id")))
                     continue
                 keys = msg.get("keys", [])
-                if not all(k in SAFE_KEYS for k in keys):
+                if not isinstance(keys, list) or not keys:
+                    log.warning("send_keys from %s (%s) has no key list: %.120r", ip, device, keys)
                     await ws.send(json.dumps(command_error("keys contain disallowed values")))
                     continue
+                refused = [key for key in keys if not key_is_allowed(key)]
+                if refused:
+                    # Logged because the refusal is otherwise INVISIBLE: this branch returns above
+                    # the `log.info` below, so a client sending a key this relay does not know
+                    # left no trace at all -- which is exactly the case that needs diagnosing,
+                    # since it is what a client newer than its relay looks like.
+                    log.warning("send_keys from %s (%s) refused for pane %s: %.120r",
+                                ip, device, pane_id, refused)
+                    detail = ", ".join(str(key)[:24] for key in refused[:4])
+                    await ws.send(json.dumps(
+                        command_error(f"keys contain disallowed values: {detail}")))
+                    continue
                 remote = pane_remote_map.get(pane_id)
-                content = read_pane(pane_id, remote=remote)
+                content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 if detect_approval_options(content) and any(key.isdigit() for key in keys):
                     if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
                         await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
                         continue
                 log.info("Keys from %s (%s): pane=%s keys=%s", ip, device, pane_id, keys)
                 audit("send_keys", ip, device, pane_id, f"keys={keys}")
-                try:
-                    result = run_herdr_result("pane", "send-keys", pane_id, *keys, remote=remote)
-                except Exception as exc:
-                    log.warning("send_keys command failed for pane %s: %s", pane_id, exc)
-                    await ws.send(json.dumps(command_error("send_keys command failed")))
-                    continue
-                if result.returncode != 0:
-                    log.warning("send_keys command failed for pane %s with exit %s", pane_id, result.returncode)
+                # Keys herdr's validator refuses (CSI_TILDE_KEYS / CSI_LETTER_KEYS) travel as raw
+                # CSI bytes through `pane send-text`. Consecutive keys of one kind go out in a
+                # single call, and the runs keep the order the client sent them -- a client that
+                # queues [Escape, PageUp, Enter] gets those three in that order, not regrouped.
+                runs = []
+                for key in keys:
+                    sequence = key_escape_sequence(key)
+                    kind = "send-text" if sequence else "send-keys"
+                    if runs and runs[-1][0] == kind:
+                        runs[-1][1].append(sequence or key)
+                    else:
+                        runs.append((kind, [sequence or key]))
+                failure = ""
+                for kind, payload in runs:
+                    # send-text takes ONE text argument, so a run of CSI keys is concatenated.
+                    args = ["".join(payload)] if kind == "send-text" else payload
+                    try:
+                        result = await asyncio.to_thread(
+                            run_herdr_result, "pane", kind, pane_id, *args, remote=remote
+                        )
+                    except Exception as exc:
+                        failure = f"raised {exc}"
+                    else:
+                        if result.returncode != 0:
+                            failure = f"exit {result.returncode}"
+                    if failure:
+                        log.warning("send_keys %s failed for pane %s: %s", kind, pane_id, failure)
+                        break
+                if failure:
                     await ws.send(json.dumps(command_error("send_keys command failed")))
                     continue
                 response = {"type": "command_result", "command": "send_keys", "ok": True}
@@ -1363,7 +1591,7 @@ async def handle_client(ws):
                 remote = pane_remote_map.get(pane_id)
                 log.info("Text from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("send_text", ip, device, pane_id, f"text={text!r}")
-                run_herdr("pane", "send-text", pane_id, text, remote=remote)
+                await asyncio.to_thread(run_herdr, "pane", "send-text", pane_id, text, remote=remote)
             elif msg_type == "agent_prompt":
                 # Use 'herdr agent prompt' for proper submission (works with Codex, Claude, etc.)
                 request_id = msg.get("request_id")
@@ -1384,7 +1612,7 @@ async def handle_client(ws):
                 remote = pane_remote_map.get(pane_id)
                 log.info("Agent prompt from %s (%s): pane=%s text=%r", ip, device, pane_id, text[:100])
                 audit("agent_prompt", ip, device, pane_id, f"text={text[:100]!r}")
-                run_herdr("agent", "prompt", pane_id, text, remote=remote)
+                await asyncio.to_thread(run_herdr, "agent", "prompt", pane_id, text, remote=remote)
                 response = {"type": "command_result", "command": "agent_prompt", "ok": True}
                 if request_id:
                     response["request_id"] = request_id
@@ -1394,7 +1622,9 @@ async def handle_client(ws):
                 if workspace_id:
                     log.info("Create tab from %s (%s): workspace=%s", ip, device, workspace_id)
                     audit("create_tab", ip, device, "", f"workspace={workspace_id}")
-                    run_herdr("tab", "create", "--workspace", workspace_id, "--focus")
+                    await asyncio.to_thread(
+                        run_herdr, "tab", "create", "--workspace", workspace_id, "--focus"
+                    )
                     await ws.send(json.dumps({"type": "tab_created", "ok": True}))
                 else:
                     await ws.send(json.dumps({"type": "error", "message": "workspace_id required"}))
@@ -1498,7 +1728,12 @@ async def main():
         if zc is not None:
             try:
                 if info is not None:
-                    zc.unregister_service(info)
+                    # unregister_service submits a coroutine to zeroconf's own loop and waits on
+                    # .result(). Called from this loop it deadlocks against itself until zeroconf
+                    # gives up at _LOADED_SYSTEM_TIMEOUT -- measured 10.4s of a shutdown that
+                    # should be instant, on every restart. register_service was already on its own
+                    # thread; the teardown beside it never was.
+                    await asyncio.to_thread(zc.unregister_service, info)
             finally:
                 zc.close()
 

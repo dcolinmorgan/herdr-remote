@@ -218,11 +218,17 @@ final class RelayConnection {
             : agent.id
 
         DispatchQueue.global(qos: .utility).async { [self] in
+            // `visible`, not `recent`, as the relay does (PROMPT_READ_SOURCE). `recent` past the
+            // pane's viewport makes herdr harvest the extra rows by walking the agent's own
+            // scroll interface, which moves the operator's terminal -- something a read fired by
+            // a status change must never do. 20 rows sits inside most viewports, so this is
+            // usually a no-op; on a pane split down under 20 rows it is not. The prompt is on
+            // screen by definition, so nothing is given up either way.
             let raw: String
             if let remote {
-                raw = runSSH(remote, "herdr", "pane", "read", paneId, "--lines", "20", "--source", "recent")
+                raw = runSSH(remote, "herdr", "pane", "read", paneId, "--lines", "20", "--source", "visible")
             } else {
-                raw = runHerdr("pane", "read", paneId, "--lines", "20", "--source", "recent")
+                raw = runHerdr("pane", "read", paneId, "--lines", "20", "--source", "visible")
             }
             let lines = raw.components(separatedBy: .newlines)
                 .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
