@@ -1,6 +1,6 @@
 id = "herdr-remote.relay"
 name = "Herdr Remote Relay"
-version = "0.7.5"
+version = "0.8.0"
 min_herdr_version = "0.7.0"
 description = "Push agent events to the local herdr-remote relay via UDP"
 platforms = ["macos", "linux", "windows"]

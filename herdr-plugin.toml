@@ -1,6 +1,6 @@
 id = "herdr-remote.relay"
 name = "Herdr Remote"
-version = "0.7.5"
+version = "0.8.0"
 min_herdr_version = "0.7.0"
 description = "Monitor and approve herdr agents from your phone, menu bar, or Telegram"
 platforms = ["macos", "linux", "windows"]
