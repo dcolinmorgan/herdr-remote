@@ -160,30 +160,84 @@
                              Checked="OnModeChanged" />
             </StackPanel>
 
-            <!-- Relay fields -->
-            <StackPanel x:Name="RelayFields">
-                <TextBlock Text="Relay URLs" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
+            <!-- Relay fields. One row per relay, each carrying its own token: two relays
+                 that want different tokens is the case a single shared field could not
+                 reach, and the pair only means anything together. IsSharedSizeScope is what
+                 lines the column headings up with the rows without the two places stating
+                 the same widths and drifting apart. -->
+            <StackPanel x:Name="RelayFields" Grid.IsSharedSizeScope="True">
+                <Grid Margin="0,12,0,0">
+                    <TextBlock Text="Relays" Style="{StaticResource FieldLabel}" />
+                    <Button Content="+ Add relay"
+                            HorizontalAlignment="Right"
+                            Style="{StaticResource PlainButton}"
+                            Background="{StaticResource Fill06}"
+                            Foreground="{StaticResource Blue}"
+                            FontFamily="{StaticResource UiFont}"
+                            FontSize="11"
+                            Padding="8,2"
+                            Click="OnAddRelay" />
+                </Grid>
                 <TextBlock Style="{StaticResource FieldHint}"
-                           Text="One per line — ws://127.0.0.1:8375 locally, or a wss:// tunnel URL. Every relay listed is connected at once and their agents share one list, tagged with the relay they came from." />
-                <TextBox x:Name="UrlBox"
-                         Style="{StaticResource ReplyBox}"
-                         AcceptsReturn="True"
-                         TextWrapping="NoWrap"
-                         VerticalScrollBarVisibility="Auto"
-                         Height="76" />
+                           Text="Every relay here is connected at once and their agents share one list, tagged with the relay they came from. The token is that one relay's own (HERDR_RELAY_TOKEN) — leave it empty for a relay that needs none, which is the usual case for ws://127.0.0.1:8375. Tokens are stored encrypted with DPAPI; paste a URL that already carries ?token=… and it moves into the box beside it." />
 
-                <TextBlock Text="Relay Token" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
-                <TextBlock Style="{StaticResource FieldHint}"
-                           Text="Required when the relay binds beyond loopback or runs behind a tunnel (HERDR_RELAY_TOKEN). Stored encrypted with DPAPI. Sent to every relay above — one that needs no token ignores it." />
-                <PasswordBox x:Name="TokenBox"
-                             Background="{StaticResource Fill05}"
-                             Foreground="White"
-                             CaretBrush="White"
-                             BorderBrush="{StaticResource Stroke10}"
-                             BorderThickness="0.7"
-                             Padding="10,7"
-                             FontFamily="{StaticResource MonoFont}"
-                             FontSize="11" />
+                <Grid Margin="0,0,0,3">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" SharedSizeGroup="RelayToken" />
+                        <ColumnDefinition Width="Auto" SharedSizeGroup="RelayRemove" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="URL" Margin="10,0,0,0" Style="{StaticResource FieldLabel}"
+                               FontWeight="Normal" Foreground="{StaticResource Text40}" FontSize="10" />
+                    <!-- 15, not 10: the box below carries 5 of margin before its own
+                         10 of padding, and a heading a few pixels off its column reads
+                         as a mistake rather than as a heading. -->
+                    <TextBlock Grid.Column="1" Text="Token" Margin="15,0,0,0"
+                               Style="{StaticResource FieldLabel}"
+                               FontWeight="Normal" Foreground="{StaticResource Text40}" FontSize="10" />
+                </Grid>
+
+                <ItemsControl x:Name="RelayList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,0,0,5">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="RelayToken" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="RelayRemove" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox Style="{StaticResource ReplyBox}"
+                                         Tag="ws://127.0.0.1:8375"
+                                         Text="{Binding Url, UpdateSourceTrigger=PropertyChanged}"
+                                         Loaded="OnRelayUrlLoaded"
+                                         LostFocus="OnRelayUrlLostFocus" />
+                                <!-- Password is not a dependency property, so this one is
+                                     seeded and read back by hand — see the two handlers. -->
+                                <PasswordBox Grid.Column="1"
+                                             Width="132"
+                                             Margin="5,0,0,0"
+                                             Background="{StaticResource Fill05}"
+                                             Foreground="White"
+                                             CaretBrush="White"
+                                             BorderBrush="{StaticResource Stroke10}"
+                                             BorderThickness="0.7"
+                                             Padding="10,7"
+                                             FontFamily="{StaticResource MonoFont}"
+                                             FontSize="11"
+                                             Loaded="OnRelayTokenLoaded"
+                                             PasswordChanged="OnRelayTokenChanged" />
+                                <Button Grid.Column="2"
+                                        Content="✕"
+                                        Style="{StaticResource GlyphButton}"
+                                        Foreground="{StaticResource Text40}"
+                                        FontSize="11"
+                                        Margin="3,0,0,0"
+                                        ToolTip="Remove this relay"
+                                        Click="OnRemoveRelay" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </StackPanel>
 
             <!-- Direct fields -->

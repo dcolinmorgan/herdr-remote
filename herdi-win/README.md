@@ -140,9 +140,9 @@ every binding's culture through `XmlLanguage.GetSpecificCulture()`.
 
 1. Launch `Herdi.exe`. It sits in the tray; there is no main window.
 2. Tray → **Settings…** → pick a source:
-   - **Relay (WebSocket)** — enter one relay URL per line (`ws://127.0.0.1:8375` locally,
-     or the `wss://` tunnel URL) and the token if a relay requires one. Every line is
-     connected at once; see [Several relays at once](#several-relays-at-once).
+   - **Relay (WebSocket)** — one row per relay: its URL (`ws://127.0.0.1:8375` locally, or
+     the `wss://` tunnel URL) and, beside it, that relay's own token if it needs one. Every
+     row is connected at once; see [Several relays at once](#several-relays-at-once).
    - **Direct (herdr CLI + SSH)** — enter one SSH target per line, e.g. `user@devbox`.
      No relay needed. See [Direct mode](#direct-mode) for the auth requirement.
 3. Tray → **Settings…** → **Panel Appearance** to set the panel's colour and how
@@ -179,7 +179,7 @@ toasts stop working without it.
 | Launch at login | per-user `Run` registry key |
 | Notify When Finished | tray toggle; on by default |
 | Self-update | GitHub Releases, same repo and 10-minute throttle as the mac app |
-| Token storage | DPAPI-encrypted (CurrentUser) in `%LOCALAPPDATA%\herdr-remote\settings.json` |
+| Token storage | one per relay, DPAPI-encrypted (CurrentUser) in `%LOCALAPPDATA%\herdr-remote\settings.json` |
 | Fullscreen awareness | a blocked agent does not pop the panel while another app is fullscreen or presenting |
 | Keyboard | `Ctrl+Y` Allow · `Ctrl+T` Trust · `Ctrl+N` Deny · `Esc` back / close · `Enter` send |
 
@@ -240,15 +240,40 @@ What the shape costs, and how each is paid for:
 | A relay removed from Settings | its panes go with it: nobody is going to send a snapshot for it, so the per-source sweep could never reach them |
 | A settings save that changed nothing about a relay | keeps the socket it already has. `Connect()` runs on **every** save, including one that touched only the panel's opacity, and rebuilding a healthy connection there would re-run the whole backoff for a colour change |
 
-**One token, every relay.** The `Relay Token` field is sent to all of them. That is not the
-limitation it looks like: a relay with no `HERDR_RELAY_TOKEN` set skips the check entirely
-(`herdr_relay.py:384`), so handing one to a loopback relay that wants none is harmless — the
-canonical pair, a tokenless local relay beside a token-guarded tunnel, works as it stands.
-Two relays that each require a *different* token is the case it does not cover.
+### One token per relay, and never in the URL
 
-An older `settings.json` is read unchanged: the single `relayUrl` key becomes the first
-entry of `relayUrls` on load and is dropped from the file on the next save, the same
-migration `islandExpandedOpacity` already gets.
+Each row carries its own token, because a shared one only ever reached the canonical pair —
+a tokenless loopback relay beside a token-guarded tunnel, which works because a relay with
+no `HERDR_RELAY_TOKEN` skips the check entirely (`herdr_relay.py:1926`), so handing one to a
+relay that wants none is harmless. Two relays each wanting a *different* token is what it
+could not do, and there is no third relay you can add to make it work.
+
+`?token=` on the URL is the obvious way around that, and the relay does honour it — the
+handshake goes through `process_request`, which reads the query string as well as the
+`Authorization` header (`herdr_relay.py:1931`). **This client still refuses to keep it
+there,** because a relay URL is not only an address here: it is the source key stamped on
+every agent, so a secret written into one is carried into
+
+- **every toast's `launch` argument**, which Windows persists in the notification platform's
+  own database — `Agent.Id` is `<relay url>|<pane id>` and `ToastService` puts it there;
+- **the tray line**, whenever exactly one relay is configured and it prints in full;
+- **`settings.json`, in the clear**, beside the DPAPI blob that exists to prevent that;
+- **the logs of whatever fronts the relay** — a tunnel records query strings, not headers.
+
+So a URL pasted with `?token=…` still works: **the moment the box loses focus the token
+moves into the field beside it** and the URL is left clean. That is the whole handling of
+it — it is an input format, not a storage one. `SettingsStore.SplitToken` does the same
+thing on load, so a hand-edited file is cleaned before the URL can become a source key.
+
+A relay that answers **401** says so in words. .NET reports a refused upgrade as *"The
+server returned status code '401' when status code '101' was expected"*; the row instead
+reads `needs a token — set one for this relay in Settings`, or `token rejected` when one
+was sent, prefixed with that relay's label since only one of several may be failing.
+
+An older `settings.json` is read unchanged and migrated in one step: `relayUrl`, or
+`relayUrls` behind a single `relayTokenProtected`, becomes the `relays` list — each URL
+paired with the token they all shared — and the old keys are dropped from the file on the
+next save, the same migration `islandExpandedOpacity` already gets.
 
 ## Type
 

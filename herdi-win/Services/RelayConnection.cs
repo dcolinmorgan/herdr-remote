@@ -51,7 +51,7 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         // Marshals collection/property mutations onto the UI thread. Falls back to
         // inline execution so the class stays usable without a WPF Dispatcher.
         _post = post ?? (a => a());
-        _hostAddress = DescribeRelays(settings.RelayUrls);
+        _hostAddress = DescribeRelays(settings.Relays.Select(r => r.Url).ToList());
         _cli = new HerdrCli(settings);
         _direct = new HerdrPoller(settings, _cli, _post);
         _direct.Polled += OnPolled;
@@ -101,11 +101,11 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
     /// Start (or restart) whichever transport the settings ask for. Called again after the
     /// settings dialog saves, which is also when a mode switch takes effect.
     /// </summary>
-    public void Connect(string? urlOverride = null)
+    public void Connect(RelayEndpoint? relayOverride = null)
     {
         _direct.Stop();
-        // An explicit URL is only ever passed to force a relay connection.
-        var mode = urlOverride is not null ? ConnectionMode.Relay : _settings.Mode;
+        // An explicit relay is only ever passed to force a relay connection.
+        var mode = relayOverride is not null ? ConnectionMode.Relay : _settings.Mode;
         if (mode != Mode)
         {
             // The two transports namespace pane ids differently and may not even cover the
@@ -127,35 +127,36 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        var urls = urlOverride is not null
-            ? new List<string> { urlOverride }
-            : _settings.RelayUrls.ToList();
-        ReconcileSockets(urls, _settings.RelayToken);
+        var relays = relayOverride is not null
+            ? new List<RelayEndpoint> { relayOverride }
+            : _settings.Relays.ToList();
+        ReconcileSockets(relays);
         RefreshAggregate();
     }
 
     /// <summary>
-    /// Bring the live sockets in line with the configured URLs.
+    /// Bring the live sockets in line with the configured relays.
     ///
     /// Unchanged relays keep the socket they already have rather than being torn down and
     /// rebuilt. This is not only about churn: <see cref="Connect"/> runs on <em>every</em>
     /// settings save, including one that touched nothing but the panel's opacity, and
     /// restarting a healthy relay there would drop its connection and re-run the whole
-    /// backoff for a colour change.
+    /// backoff for a colour change. "Unchanged" is the URL <em>and</em> the token, because a
+    /// relay that was just given one is the same address answering differently.
     /// </summary>
-    private void ReconcileSockets(IReadOnlyList<string> urls, string token)
+    private void ReconcileSockets(IReadOnlyList<RelayEndpoint> relays)
     {
         var kept = new List<RelaySocket>();
-        foreach (var url in urls)
+        foreach (var relay in relays)
         {
-            if (string.IsNullOrWhiteSpace(url)) continue;
-            var existing = _sockets.FirstOrDefault(s => s.Matches(url, token));
+            if (string.IsNullOrWhiteSpace(relay.Url)) continue;
+            var existing = _sockets.FirstOrDefault(s => s.Matches(relay.Url, relay.Token));
             if (existing is not null && !kept.Contains(existing))
             {
                 kept.Add(existing);
                 continue;
             }
-            var socket = new RelaySocket(url, token, _post);
+            var socket = new RelaySocket(relay.Url, relay.Token, _post);
             socket.MessageReceived += Handle;
             socket.StateChanged += _ => RefreshAggregate();
             kept.Add(socket);

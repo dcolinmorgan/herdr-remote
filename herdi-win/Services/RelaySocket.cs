@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using Herdi.Models;
@@ -37,6 +38,11 @@ public sealed class RelaySocket : IDisposable
     /// is tagged with, so it has to be the stored string rather than anything normalised:
     /// the settings list is what a later <see cref="RelayConnection.Connect"/> diffs
     /// against to decide which sockets survive.
+    ///
+    /// It carries no token. <see cref="SettingsStore.SplitToken"/> takes a `?token=` out of
+    /// one before it is ever stored, precisely because of the sentence above — this string
+    /// ends up inside <see cref="Agent.Id"/>, and from there in every toast's launch
+    /// argument. The secret goes on the handshake header instead.
     /// </summary>
     public string Url { get; }
 
@@ -117,30 +123,37 @@ public sealed class RelaySocket : IDisposable
     {
         while (!token.IsCancellationRequested && !_disposed)
         {
-            try
+            using (var socket = new ClientWebSocket())
             {
-                using var socket = new ClientWebSocket();
-                if (!string.IsNullOrEmpty(_token))
+                try
                 {
-                    // The relay accepts either an Authorization header or ?token=
-                    // (herdr_relay.py:386). The header keeps the secret out of logs.
-                    socket.Options.SetRequestHeader("Authorization", "Bearer " + _token);
+                    // Asked for so a refused handshake can be told apart from an unreachable
+                    // one below; without it the status code is not kept.
+                    socket.Options.CollectHttpResponseDetails = true;
+                    if (!string.IsNullOrEmpty(_token))
+                    {
+                        // The relay accepts either an Authorization header or ?token=
+                        // (herdr_relay.py:1926). The header keeps the secret out of logs --
+                        // a tunnel in front of the relay records query strings and not
+                        // headers -- and out of this socket's Url, which is a source key.
+                        socket.Options.SetRequestHeader("Authorization", "Bearer " + _token);
+                    }
+                    _socket = socket;
+
+                    await socket.ConnectAsync(new Uri(Url), token);
+                    SetState(true, null);
+                    _reconnectAttempt = 0;
+
+                    await PumpAsync(socket, token);
                 }
-                _socket = socket;
-
-                await socket.ConnectAsync(new Uri(Url), token);
-                SetState(true, null);
-                _reconnectAttempt = 0;
-
-                await PumpAsync(socket, token);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                SetState(false, ex.Message);
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    SetState(false, Explain(ex, socket.HttpStatusCode));
+                }
             }
 
             if (token.IsCancellationRequested || _disposed) break;
@@ -158,6 +171,23 @@ public sealed class RelaySocket : IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// What to put in front of the operator when a connection attempt fails.
+    ///
+    /// A relay that refuses the handshake answers 401, which .NET reports as "The server
+    /// returned status code '401' when status code '101' was expected" — true, and no help at
+    /// all. Now that every relay carries its own token, this is also the only place that knows
+    /// <em>which</em> token was refused; the tray prefixes the message with this relay's label.
+    /// Everything else is passed through as the runtime described it.
+    /// </summary>
+    private string Explain(Exception ex, HttpStatusCode status) => status switch
+    {
+        HttpStatusCode.Unauthorized => _token.Length == 0
+            ? "needs a token — set one for this relay in Settings"
+            : "token rejected — check this relay's token in Settings",
+        _ => ex.Message,
+    };
 
     private async Task PumpAsync(ClientWebSocket socket, CancellationToken token)
     {

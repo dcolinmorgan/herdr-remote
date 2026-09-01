@@ -402,11 +402,14 @@ class ClientPayloadTests(unittest.TestCase):
         store = (ROOT / "herdi-win" / "Services" / "SettingsStore.cs").read_text(
             encoding="utf-8"
         )
-        self.assertIn("public IReadOnlyList<string> RelayUrls", store)
-        # The old single-URL key survives as a migration read only: a settings.json written
-        # by an earlier build must keep the relay it had.
+        self.assertIn("public IReadOnlyList<RelayEndpoint> Relays", store)
+        # Both older shapes survive as migration reads only: a settings.json written by an
+        # earlier build must keep the relays it had, and the token they shared.
         self.assertNotIn("public string RelayUrl\n", store)
+        self.assertNotIn("public IReadOnlyList<string> RelayUrls", store)
         self.assertIn("_data.RelayUrl", store)
+        self.assertIn("_data.RelayUrls", store)
+        self.assertIn("_data.RelayTokenProtected", store)
 
         connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
             encoding="utf-8"
@@ -421,6 +424,68 @@ class ClientPayloadTests(unittest.TestCase):
         )
         # Each relay backs off on its own schedule, on the mac app's curve.
         self.assertIn("1 << Math.Min(_reconnectAttempt, 5)", socket)
+
+    def test_windows_relay_token_travels_beside_its_relay_not_inside_the_url(self):
+        """One token per relay, and never on the query string.
+
+        A shared token reached the common pair — a tokenless loopback relay beside a
+        token-guarded tunnel — and nothing past it. `?token=` is the obvious workaround and
+        the relay does honour it (herdr_relay.py:1931), but a relay URL is this client's
+        source key: it is stamped on every agent, so a secret written there is copied into
+        each toast's launch argument, printed in the tray line, and stored in settings.json
+        in the clear beside the DPAPI blob that exists to stop precisely that.
+        """
+        store = (ROOT / "herdi-win" / "Services" / "SettingsStore.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("public sealed record RelayEndpoint(string Url, string Token)", store)
+        # The shared field is gone, not merely unused.
+        self.assertNotIn("public string RelayToken", store)
+        # Accepted as input so a share link can be pasted whole, and taken straight out --
+        # on the way in and on the way out, so a hand-edited file is cleaned too.
+        self.assertIn("public static (string Url, string Token) SplitToken(string url)", store)
+        self.assertIn("SplitToken(relay.Url)", store)
+        # Still one DPAPI blob per token, never a plaintext one.
+        self.assertIn("TokenProtected = Protect(r.Token)", store)
+
+        socket = (ROOT / "herdi-win" / "Services" / "RelaySocket.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('SetRequestHeader("Authorization", "Bearer " + _token)', socket)
+        # Comments here discuss `?token=` at length; the code must never write one.
+        code = "\n".join(
+            line for line in socket.splitlines() if not line.lstrip().startswith("//")
+        )
+        self.assertNotIn("token=", code, "a token is being appended to the relay URL")
+        # A refused handshake is reported as something the operator can act on: .NET's own
+        # message names a status code and no remedy, and with a token per relay this is the
+        # only place that knows which one was turned down.
+        self.assertIn("HttpStatusCode.Unauthorized", socket)
+        self.assertIn("CollectHttpResponseDetails = true", socket)
+
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        # A socket survives a settings save only if the URL *and* the token still match --
+        # a relay that was just given one is the same address answering differently.
+        self.assertIn("s.Matches(relay.Url, relay.Token)", connection)
+
+        xaml = (ROOT / "herdi-win" / "Views" / "SettingsWindow.xaml").read_text(
+            encoding="utf-8"
+        )
+        # A row per relay, each with its own box, rather than one field for all of them.
+        self.assertIn('<ItemsControl x:Name="RelayList"', xaml)
+        self.assertIn("PasswordChanged=\"OnRelayTokenChanged\"", xaml)
+        self.assertNotIn('x:Name="TokenBox"', xaml)
+        self.assertNotIn('x:Name="UrlBox"', xaml)
+
+        dialog = (ROOT / "herdi-win" / "Views" / "SettingsWindow.xaml.cs").read_text(
+            encoding="utf-8"
+        )
+        # Split when the box is left, so the move is something the operator watches happen
+        # rather than a rewrite behind their back at save time.
+        self.assertIn("SettingsStore.SplitToken(row.Url)", dialog)
+        self.assertIn("_settings.Relays = relays", dialog)
 
     def test_windows_client_never_puts_a_composite_pane_id_on_the_wire(self):
         """Every herdr numbers its own panes, so two relays both report `w1:p1`.
