@@ -1,0 +1,133 @@
+# Build every client and attach it to the GitHub release for a tag.
+#
+# Push a tag and this runs; nothing else triggers it. Both apps ship their own updater
+# pointed at this repo's releases/latest, so a release is not a convenience here -- it is
+# the update channel, and a half-finished one reaches every install within ten minutes.
+# Everything below follows from that:
+#
+#   - The version check runs first and fails the whole thing. An app whose compiled-in
+#     version differs from the tag offers an update, installs it, and offers it again.
+#   - Windows publishes both deployment modes, per architecture. The updater picks per
+#     install (Updater.IsUsableAsset), and an install whose asset is missing gets nothing
+#     -- or worse, a build that cannot start on its machine. See herdi-win/README.md.
+#   - The release is created with its assets in one call, so it is never briefly latest
+#     and empty.
+#   - workflow_dispatch builds everything and skips the release job: a dry run.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  versions:
+    name: Version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Every build script must agree with the tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            python3 .github/scripts/check-versions.py "$REF_NAME"
+          else
+            python3 .github/scripts/check-versions.py   # dry run: report only
+          fi
+
+  windows:
+    name: Windows
+    needs: versions
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: herdi-win
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+      # -Zip builds self-contained and framework-dependent together. Both are uploaded:
+      # the small one strands installs on machines with no .NET 8 Desktop Runtime, the
+      # large one makes every other install's update six times bigger than it needs to be.
+      - name: Build win-x64 (both deployment modes)
+        run: ./build.ps1 -Zip
+      # Cross-published from the x64 runner. Drop this step to stop shipping ARM64; the
+      # updater matches assets by RID, so arm64 installs simply see no update instead of
+      # being handed an x64 build.
+      - name: Build win-arm64 (both deployment modes)
+        run: ./build.ps1 -Zip -Arch win-arm64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: herdi-win/dist/*.zip
+          if-no-files-found: error
+          # These are release assets, not build debris worth keeping for 90 days.
+          retention-days: 7
+
+  macos:
+    name: macOS
+    needs: versions
+    # Pinned, not macos-latest: the app targets macOS 14 and the runner label decides
+    # which SDK and which Swift compile it. An image bump should be a commit, not a
+    # surprise on a release day.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      # dmg.sh rebuilds through build.sh itself and names the DMG from the version it
+      # finds in the app it just built, so there is nothing to pass it.
+      - name: Build app and DMG
+        working-directory: herdi-mac
+        run: ./dmg.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: herdi-mac/dist/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish
+    if: github.ref_type == 'tag'
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Attach everything to the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -l assets
+          # A tag may already have a release (the mac DMG has been published by hand up to
+          # now), so add to it rather than failing. --clobber replaces a same-named asset.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" assets/* --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --generate-notes
+          fi
+          {
+            echo "### $TAG"
+            echo
+            cd assets && for f in *; do
+              echo "- \`$f\` ($(du -h "$f" | cut -f1))"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -8,9 +8,6 @@ VERSION="0.7.5"
 BUILD_DIR="$SCRIPT_DIR/.build/release"
 APP_DIR="$SCRIPT_DIR/dist/$APP_NAME.app"
 
-# Sync version to plugin manifests
-sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" "$SCRIPT_DIR/../herdr-plugin.toml" "$SCRIPT_DIR/../relay/herdr-plugin.toml" 2>/dev/null || true
-
 echo "▸ Building release..."
 cd "$SCRIPT_DIR"
 swift build -c release
