@@ -1366,19 +1366,29 @@ async def handle_client(ws):
                 run_herdr("pane", "send-text", pane_id, text, remote=remote)
             elif msg_type == "agent_prompt":
                 # Use 'herdr agent prompt' for proper submission (works with Codex, Claude, etc.)
+                request_id = msg.get("request_id")
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
-                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    response = {"type": "error", "message": "unknown pane_id"}
+                    if request_id:
+                        response["request_id"] = request_id
+                    await ws.send(json.dumps(response))
                     continue
                 text = msg.get("text", "")
                 if not text or len(text) > 10000:
-                    await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
+                    response = {"type": "error", "message": "text empty or too long"}
+                    if request_id:
+                        response["request_id"] = request_id
+                    await ws.send(json.dumps(response))
                     continue
                 remote = pane_remote_map.get(pane_id)
                 log.info("Agent prompt from %s (%s): pane=%s text=%r", ip, device, pane_id, text[:100])
                 audit("agent_prompt", ip, device, pane_id, f"text={text[:100]!r}")
                 run_herdr("agent", "prompt", pane_id, text, remote=remote)
-                await ws.send(json.dumps({"type": "command_result", "command": "agent_prompt", "ok": True}))
+                response = {"type": "command_result", "command": "agent_prompt", "ok": True}
+                if request_id:
+                    response["request_id"] = request_id
+                await ws.send(json.dumps(response))
             elif msg_type == "create_tab":
                 workspace_id = msg.get("workspace_id", "")
                 if workspace_id:
