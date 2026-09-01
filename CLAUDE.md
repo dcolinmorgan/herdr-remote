@@ -510,6 +510,21 @@ session view; `hidePanel` restores exactly that, which is also why closing a pan
 reveals the agent list under a live session. The test proves it with `elementFromPoint` at the
 panel's own centre, at both phone and desktop widths.
 
+**There is one socket, and a handler belongs to the socket that installed it.** `close()` is
+asynchronous, so the socket being replaced fires its `onclose` *after* the replacement is already
+live. While the departing socket kept its handlers, that late close reported offline and scheduled
+a reconnect, which then closed the **healthy** socket, whose own close scheduled the next one:
+switching relays started a permanent offline -> connecting -> live cycle every 3s that a reload
+cleared and the next switch started again. So `connect()` detaches the old socket's four handlers
+before closing it, and each new socket's handlers begin `if (ws !== sock) return` — which also
+keeps a snapshot still in flight from the relay you are leaving out of `handleMessage`, where it
+would merge that relay's panes into the next one's state. There is likewise **one pending
+reconnect** (`reconnectTimer`, cleared at the top of `connect()`): two chains each closing the
+other's socket is the same loop by another route. `tests/test_web_connection.py` measures the
+ordering in a browser against a stand-in socket; four of its five tests fail on the code this
+replaced, and the fifth — a dropped socket still reconnecting — is what stops the guard from
+becoming a way of switching reconnection off.
+
 ## WebSocket Protocol
 
 Messages are JSON with a `type` field:

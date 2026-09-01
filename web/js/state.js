@@ -264,20 +264,37 @@ function renderSessions() {
 }
 
 // Connection
+//
+// `close()` is asynchronous, so the socket being replaced fires its `onclose` after the replacement
+// is already live. Left attached, that late close reported offline and scheduled a reconnect which
+// then closed the healthy socket -- switching relays started a permanent offline/connecting/live
+// cycle. Hence: detach before closing, a per-socket guard, and one pending reconnect at a time.
+let reconnectTimer = null;
+
 function connect() {
   let url = localStorage.getItem('herdr_relay_url') || (isSelfRelay ? autoRelayUrl : (isDemo ? DEMO_RELAY : ''));
   if (!url) { showSetup(); return; }
-  if (ws) ws.close();
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (ws) {
+    ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
+    ws.close();
+  }
   setStatus('connecting');
   // Append token as query param if stored separately
   const token = localStorage.getItem('herdr_relay_token');
   let wsUrl = url;
   if (token) wsUrl += (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
-  ws = new WebSocket(wsUrl);
-  ws.onopen = () => { setStatus('connected'); if(window.cue) cue('ready'); };
-  ws.onclose = () => { setStatus('disconnected'); setTimeout(connect, 3000); };
-  ws.onerror = () => setStatus('disconnected');
-  ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
+  const sock = new WebSocket(wsUrl);
+  ws = sock;
+  sock.onopen = () => { if (ws !== sock) return; setStatus('connected'); if(window.cue) cue('ready'); };
+  sock.onclose = () => { if (ws !== sock) return; setStatus('disconnected'); scheduleReconnect(); };
+  sock.onerror = () => { if (ws !== sock) return; setStatus('disconnected'); };
+  sock.onmessage = (e) => { if (ws !== sock) return; handleMessage(JSON.parse(e.data)); };
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 3000);
 }
 
 function setStatus(s) {
