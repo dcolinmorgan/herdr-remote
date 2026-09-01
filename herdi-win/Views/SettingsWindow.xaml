@@ -7,7 +7,9 @@
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         ShowInTaskbar="True"
-        Background="#FF17181A">
+        Background="#FF17181A"
+        FontFamily="{StaticResource UiFont}"
+        TextOptions.TextFormattingMode="Display">
 
     <Window.Resources>
         <Style x:Key="FieldLabel" TargetType="TextBlock">
@@ -160,14 +162,19 @@
 
             <!-- Relay fields -->
             <StackPanel x:Name="RelayFields">
-                <TextBlock Text="Relay URL" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
+                <TextBlock Text="Relay URLs" Margin="0,12,0,0" Style="{StaticResource FieldLabel}" />
                 <TextBlock Style="{StaticResource FieldHint}"
-                           Text="ws://127.0.0.1:8375 locally, or the wss:// tunnel URL." />
-                <TextBox x:Name="UrlBox" Style="{StaticResource ReplyBox}" />
+                           Text="One per line — ws://127.0.0.1:8375 locally, or a wss:// tunnel URL. Every relay listed is connected at once and their agents share one list, tagged with the relay they came from." />
+                <TextBox x:Name="UrlBox"
+                         Style="{StaticResource ReplyBox}"
+                         AcceptsReturn="True"
+                         TextWrapping="NoWrap"
+                         VerticalScrollBarVisibility="Auto"
+                         Height="76" />
 
                 <TextBlock Text="Relay Token" Margin="0,14,0,0" Style="{StaticResource FieldLabel}" />
                 <TextBlock Style="{StaticResource FieldHint}"
-                           Text="Required when the relay binds beyond loopback or runs behind a tunnel (HERDR_RELAY_TOKEN). Stored encrypted with DPAPI." />
+                           Text="Required when the relay binds beyond loopback or runs behind a tunnel (HERDR_RELAY_TOKEN). Stored encrypted with DPAPI. Sent to every relay above — one that needs no token ignores it." />
                 <PasswordBox x:Name="TokenBox"
                              Background="{StaticResource Fill05}"
                              Foreground="White"

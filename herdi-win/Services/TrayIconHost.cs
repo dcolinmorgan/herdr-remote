@@ -41,12 +41,16 @@ public sealed class TrayIconHost : IDisposable
     private readonly Forms.ToolStripMenuItem _errorItem = new() { Enabled = false, Available = false };
     private readonly Forms.ToolStripMenuItem _toastErrorItem = new() { Enabled = false, Available = false };
     private readonly Forms.ToolStripMenuItem _remotesItem = new("Remote Hosts") { Available = false };
+    private readonly Forms.ToolStripMenuItem _relaysItem = new("Relays") { Available = false };
     private readonly Forms.ToolStripMenuItem _launchItem = new("Launch at Login");
     private readonly Forms.ToolStripMenuItem _notifyFinishItem = new("Notify When Finished");
     private readonly Forms.ToolStripMenuItem _versionItem = new();
 
     /// <summary>Host list the submenu was last built from, so it is only rebuilt on change.</summary>
     private string _remotesSignature = string.Empty;
+
+    /// <summary>Same, for the relay list — which carries live state, so it changes more often.</summary>
+    private string _relaysSignature = string.Empty;
 
     /// <summary>Pixel size the glyphs were loaded at, i.e. the tray size at that DPI.</summary>
     private int _glyphSize;
@@ -161,6 +165,9 @@ public sealed class TrayIconHost : IDisposable
         menu.Items.Add(_relayItem);
         menu.Items.Add(_errorItem);
         menu.Items.Add(_toastErrorItem);
+        // Relay mode only, and only worth opening with more than one relay: the line above
+        // already names a single one in full.
+        menu.Items.Add(_relaysItem);
         // Direct mode only: in relay mode the SSH targets are the relay's HERDR_REMOTES and
         // nothing on the wire tells us what they are.
         menu.Items.Add(_remotesItem);
@@ -233,6 +240,7 @@ public sealed class TrayIconHost : IDisposable
         _launchItem.Checked = StartupManager.IsEnabled;
         _notifyFinishItem.Checked = _settings.NotifyOnFinish;
         RefreshRemotes();
+        RefreshRelays();
 
         // Reconnects back off to 30s, so a silent "Disconnected" can sit there for a long
         // time with the reason known but unsaid. Show it under the relay URL.
@@ -345,6 +353,36 @@ public sealed class TrayIconHost : IDisposable
         foreach (var remote in remotes)
         {
             _remotesItem.DropDownItems.Add(new Forms.ToolStripMenuItem(remote) { Enabled = false });
+        }
+    }
+
+    /// <summary>
+    /// Keep the Relays submenu in step with what each relay is doing. Shown only with two or
+    /// more: with one, the line above it already prints that relay's URL and the status line
+    /// above *that* already says whether it is connected, so a submenu would be a third way
+    /// to read the same fact.
+    ///
+    /// The signature carries the live state as well as the URLs, unlike RefreshRemotes',
+    /// because this list is what says which relay went down — rebuilding only when the
+    /// configuration changed would freeze every dot at whatever it was on the last save.
+    /// </summary>
+    private void RefreshRelays()
+    {
+        var relays = _vm.Relays;
+        _relaysItem.Available = relays.Count > 1;
+        if (!_relaysItem.Available) return;
+
+        var signature = string.Join("\n", relays.Select(r => $"{r.Url}\t{r.IsConnected}"));
+        if (signature == _relaysSignature && _relaysItem.DropDownItems.Count > 0) return;
+        _relaysSignature = signature;
+
+        _relaysItem.DropDownItems.Clear();
+        foreach (var relay in relays)
+        {
+            // The same ●/○ pair the status line uses, so the two read as one vocabulary.
+            var mark = relay.IsConnected ? "●" : "○";
+            _relaysItem.DropDownItems.Add(
+                new Forms.ToolStripMenuItem($"{mark} {relay.Label}") { Enabled = false });
         }
     }
 

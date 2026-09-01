@@ -59,10 +59,30 @@ public sealed class SettingsStore
         set { _data.NotifyOnFinish = value; Save(); }
     }
 
-    public string RelayUrl
+    /// <summary>
+    /// Every relay to watch, in the order they were entered. All of them are connected at
+    /// once and their panes merged into one list — this used to be a single URL, so a second
+    /// relay meant editing the first one out, which does not show you two herds, it shows
+    /// you one and forgets the other.
+    ///
+    /// RelayUrl is the key the single-relay builds wrote. It is read once here, so an
+    /// existing settings.json keeps the relay it had, and nulled on the next save the same
+    /// way IslandExpandedOpacity is — Save omits nulls, so the file drops it for good.
+    /// </summary>
+    public IReadOnlyList<string> RelayUrls
     {
-        get => string.IsNullOrWhiteSpace(_data.RelayUrl) ? DefaultRelayUrl : _data.RelayUrl!;
-        set { _data.RelayUrl = value; Save(); }
+        get
+        {
+            if (_data.RelayUrls is { Count: > 0 }) return _data.RelayUrls;
+            if (!string.IsNullOrWhiteSpace(_data.RelayUrl)) return new[] { _data.RelayUrl! };
+            return new[] { DefaultRelayUrl };
+        }
+        set
+        {
+            _data.RelayUrls = Normalize(value);
+            _data.RelayUrl = null;
+            Save();
+        }
     }
 
     /// <summary>
@@ -91,7 +111,14 @@ public sealed class SettingsStore
         set { _data.HerdrPath = value.Trim(); Save(); }
     }
 
-    /// <summary>Shared secret for relay auth (HERDR_RELAY_TOKEN). Empty when unset.</summary>
+    /// <summary>
+    /// Shared secret for relay auth (HERDR_RELAY_TOKEN). Empty when unset.
+    ///
+    /// One token for every relay in <see cref="RelayUrls"/>, which is not the limitation it
+    /// looks like: a relay with no HERDR_RELAY_TOKEN set skips the check entirely
+    /// (herdr_relay.py:384), so sending one to a loopback relay that wants none is harmless.
+    /// The case it does not cover is two relays that each require a *different* token.
+    /// </summary>
     public string RelayToken
     {
         get => Unprotect(_data.RelayTokenProtected);
@@ -224,7 +251,7 @@ public sealed class SettingsStore
     private sealed class Data
     {
         public string? Mode { get; set; }
-        public string? RelayUrl { get; set; }
+        public List<string>? RelayUrls { get; set; }
         public string? RelayTokenProtected { get; set; }
         public List<string>? Remotes { get; set; }
         public string? HerdrPath { get; set; }
@@ -238,5 +265,9 @@ public sealed class SettingsStore
         // Save omits nulls, so the next write drops them from the file for good.
         public double? IslandCollapsedOpacity { get; set; }
         public double? IslandExpandedOpacity { get; set; }
+
+        // Written by the single-relay builds, migrated into RelayUrls on first read and
+        // nulled on the next save. Same treatment as the two above.
+        public string? RelayUrl { get; set; }
     }
 }

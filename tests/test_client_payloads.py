@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -249,7 +250,7 @@ class ClientPayloadTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("HostsAnswered", poller)
-        self.assertIn("ApplySnapshot(result.Agents, result.HostsAnswered)", connection)
+        self.assertIn("result.Agents, result.HostsAnswered", connection)
         self.assertIn("hostsCovered.Contains(agent.Host)", connection)
 
     def test_windows_every_expanded_row_opens_something(self):
@@ -296,7 +297,8 @@ class ClientPayloadTests(unittest.TestCase):
         )
         self.assertIn("public void SendPrompt(Agent agent, string text)", connection)
         self.assertIn("_direct.PromptAsync(agent, trimmed)", connection)
-        self.assertIn("Protocol.AgentPrompt(agent.Id, trimmed)", connection)
+        # PaneId, not Id: see test_windows_client_never_puts_a_composite_pane_id_on_the_wire.
+        self.assertIn("Protocol.AgentPrompt(agent.PaneId, trimmed)", connection)
 
         # Both sides submit with `herdr agent prompt`, the verb the relay's agent_prompt
         # handler runs — not by typing into the pane and hoping Enter takes. The relay reaches
@@ -352,6 +354,121 @@ class ClientPayloadTests(unittest.TestCase):
         # Built on first use, so a session that never opens it never pays for a WPF window.
         app = (ROOT / "herdi-win" / "App.xaml.cs").read_text(encoding="utf-8")
         self.assertIn("private IslandWindow? _island;", app)
+
+    def test_windows_ui_is_monospace_everywhere(self):
+        """The chrome and the pane it wraps have to be the same face.
+
+        The web client settled this already (CLAUDE.md, "Web App"): the app is a window
+        onto a terminal, and a proportional shell around a monospace pane reads as two
+        programs sharing one screen. The Windows client kept Segoe UI for the chrome, so a
+        580px card carried three faces at once.
+        """
+        styles = (ROOT / "herdi-win" / "Themes" / "Styles.xaml").read_text(encoding="utf-8")
+
+        fonts = {
+            key: value
+            for key, value in re.findall(
+                r'<FontFamily x:Key="(\w+)">([^<]+)</FontFamily>', styles
+            )
+        }
+        self.assertEqual({"UiFont", "MonoFont"}, set(fonts))
+        for key, stack in fonts.items():
+            first = stack.split(",")[0].strip()
+            self.assertIn(
+                first,
+                {"Cascadia Mono", "Consolas"},
+                f"{key} leads with {first!r}, which is not a monospace family",
+            )
+            # Segoe UI as a *fallback* would silently undo this on any machine missing the
+            # first two, which is the machine the check is for.
+            self.assertNotIn("Segoe UI", stack, f"{key} still falls back to a proportional face")
+
+        # Property inheritance is what reaches the controls that set no font of their own —
+        # PlainButton has none, so Cancel / Save / Install would stay on the WPF default.
+        for view in ("IslandWindow.xaml", "SettingsWindow.xaml"):
+            xaml = (ROOT / "herdi-win" / "Views" / view).read_text(encoding="utf-8")
+            self.assertIn(
+                'FontFamily="{StaticResource UiFont}"',
+                xaml,
+                f"{view} does not put its subtree on the monospace face",
+            )
+
+    def test_windows_client_watches_every_relay_at_once(self):
+        """Several relays, one herd. Switching between them is not the same feature.
+
+        A single stored URL meant a second relay could only be reached by editing the first
+        one out, which does not show two herds — it shows one and forgets the other.
+        """
+        store = (ROOT / "herdi-win" / "Services" / "SettingsStore.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("public IReadOnlyList<string> RelayUrls", store)
+        # The old single-URL key survives as a migration read only: a settings.json written
+        # by an earlier build must keep the relay it had.
+        self.assertNotIn("public string RelayUrl\n", store)
+        self.assertIn("_data.RelayUrl", store)
+
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("List<RelaySocket> _sockets", connection)
+        # Connected is "any": one unreachable tunnel must not take the other relays' agents
+        # off the list or turn the dot red while they are answering.
+        self.assertIn("_sockets.Any(s => s.IsConnected)", connection)
+
+        socket = (ROOT / "herdi-win" / "Services" / "RelaySocket.cs").read_text(
+            encoding="utf-8"
+        )
+        # Each relay backs off on its own schedule, on the mac app's curve.
+        self.assertIn("1 << Math.Min(_reconnectAttempt, 5)", socket)
+
+    def test_windows_client_never_puts_a_composite_pane_id_on_the_wire(self):
+        """Every herdr numbers its own panes, so two relays both report `w1:p1`.
+
+        Agent.Id carries the source key to keep those apart in one list; Agent.PaneId is the
+        half a relay message or a herdr CLI argument wants. Sending Id would name a pane no
+        relay has ever heard of — and a per-relay `pane_id` sent to the *wrong* relay would
+        land on a real, different pane, which is worse than an error.
+        """
+        agent = (ROOT / "herdi-win" / "Models" / "Agent.cs").read_text(encoding="utf-8")
+        self.assertIn("public string PaneId { get; }", agent)
+        self.assertIn("public string SourceId { get; }", agent)
+        self.assertIn("Id = ComposeId(sourceId, paneId);", agent)
+        self.assertIn("sourceId + SourceSeparator + paneId", agent)
+
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        leaked = re.findall(r"Protocol\.\w+\(agent\.Id\b", connection)
+        self.assertEqual([], leaked, "a relay message is being built from the composite id")
+
+        poller = (ROOT / "herdi-win" / "Services" / "HerdrPoller.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("agent.Id", poller, "a herdr CLI argument is taken from the composite id")
+
+        view_model = (ROOT / "herdi-win" / "ViewModels" / "IslandViewModel.cs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CopyToClipboard(a.PaneId)", view_model)
+
+    def test_windows_snapshot_sweep_is_scoped_to_the_relay_that_sent_it(self):
+        """`agents` is a complete list — complete for one relay, and silent about the rest.
+
+        Dropping every pane missing from it would have each relay delete the others' rows on
+        every snapshot, so the list would flicker between whichever answered last.
+        """
+        connection = (ROOT / "herdi-win" / "Services" / "RelayConnection.cs").read_text(
+            encoding="utf-8"
+        )
+        sweep = connection.split("private List<Agent> ApplySnapshot", 1)[1]
+        sweep = sweep.split("private Agent Upsert", 1)[0]
+        self.assertIn("agent.SourceId, sourceId", sweep)
+        self.assertIn("Agents.RemoveAt(i)", sweep)
+
+        # And a relay taken out of Settings takes its panes with it — nobody is going to send
+        # a snapshot for it, so the sweep above can never reach them.
+        self.assertIn("live.Contains(Agents[i].SourceId)", connection)
 
     def test_tui_sends_multi_selection_messages_with_prompt_identity(self):
         source = (ROOT / "relay" / "herdr_tui.py").read_text(encoding="utf-8")

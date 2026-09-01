@@ -17,7 +17,8 @@
         ResizeMode="NoResize"
         SizeToContent="WidthAndHeight"
         UseLayoutRounding="True"
-        TextOptions.TextFormattingMode="Display">
+        TextOptions.TextFormattingMode="Display"
+        FontFamily="{StaticResource UiFont}">
 
     <!-- A tray flyout: hidden until summoned, then anchored to the notification-area corner
          of the taskbar. Positioning lives in IslandWindow.UpdatePosition.

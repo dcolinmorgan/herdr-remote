@@ -140,8 +140,9 @@ every binding's culture through `XmlLanguage.GetSpecificCulture()`.
 
 1. Launch `Herdi.exe`. It sits in the tray; there is no main window.
 2. Tray → **Settings…** → pick a source:
-   - **Relay (WebSocket)** — enter the relay URL (`ws://127.0.0.1:8375` locally, or the
-     `wss://` tunnel URL) and the token if the relay requires one.
+   - **Relay (WebSocket)** — enter one relay URL per line (`ws://127.0.0.1:8375` locally,
+     or the `wss://` tunnel URL) and the token if a relay requires one. Every line is
+     connected at once; see [Several relays at once](#several-relays-at-once).
    - **Direct (herdr CLI + SSH)** — enter one SSH target per line, e.g. `user@devbox`.
      No relay needed. See [Direct mode](#direct-mode) for the auth requirement.
 3. Tray → **Settings…** → **Panel Appearance** to set the panel's colour and how
@@ -157,7 +158,8 @@ toasts stop working without it.
 
 | Capability | Notes |
 |---|---|
-| Relay mode | WebSocket to the relay, which does its own polling and SSH |
+| Relay mode | WebSocket to **every** configured relay at once, each doing its own polling and SSH |
+| Relay tag | which relay a row came from, shown on the row once there is more than one |
 | Direct mode | polls `herdr pane list` here — locally and over SSH — with no relay |
 | Remote agents | either mode; the row shows `⇄` and the host it lives on |
 | Blocked-agent toast | Title, body, sound — **plus** permission buttons and a reply box |
@@ -173,7 +175,7 @@ toasts stop working without it.
 | Interrupt | ^C to the pane, on the agents it can stop |
 | Tray icon | live count badge: red while agents are blocked, green while they work |
 | Tray tooltip | the full breakdown — `2 waiting on you · 3 working · 1 idle` |
-| Reconnect | exponential backoff capped at 30s |
+| Reconnect | exponential backoff capped at 30s, per relay |
 | Launch at login | per-user `Run` registry key |
 | Notify When Finished | tray toggle; on by default |
 | Self-update | GitHub Releases, same repo and 10-minute throttle as the mac app |
@@ -211,6 +213,66 @@ called finished — a closed pane is not a completed one, and there would be not
 Volume is the risk with this one, so **Notify When Finished** in the tray menu turns it off,
 and the per-pane tag means an agent whose status flaps between working and idle refreshes one
 toast instead of producing a stream of them.
+
+## Several relays at once
+
+Relay mode connects to **every** URL in Settings and merges their agents into one list.
+
+It used to hold a single URL, so reaching a second relay meant editing the first one out —
+which is not switching between two views of one herd, it is throwing one herd away. A
+laptop watching a work relay and a home one, or a tunnel beside the loopback relay it
+tunnels to, had to pick one and stop seeing the other.
+
+The panes of all of them are triaged together into the same NEEDS YOU / WORKING / IDLE
+sections rather than grouped per relay. `NEEDS YOU` is the ordering that matters, and a
+blocked agent does not become less urgent for being on the other relay. Which relay a row
+came from is a muted tag beside the agent's name, and it appears **only once there is more
+than one** — with a single relay it would print the same string on every row.
+
+What the shape costs, and how each is paid for:
+
+| | |
+|---|---|
+| Every herdr numbers its own panes, so two relays both report `w1:p1` | `Agent.Id` carries the source key; `Agent.PaneId` is the half that goes on the wire, and a test refuses any relay message built from the composite |
+| An `agents` snapshot is complete **for its own relay** and silent about the rest | the sweep that drops vanished panes is scoped to the source that sent it, or the relays would delete each other's rows on every snapshot |
+| One relay down | `IsConnected` is *any*, not *all* — a dead tunnel must not blank three live relays. Tray → **Relays** names each one with `●` / `○`, and the tray error line reads `1 of 3 relays unreachable` |
+| Reconnect | per relay, on its own backoff, so an unreachable one does not delay the others |
+| A relay removed from Settings | its panes go with it: nobody is going to send a snapshot for it, so the per-source sweep could never reach them |
+| A settings save that changed nothing about a relay | keeps the socket it already has. `Connect()` runs on **every** save, including one that touched only the panel's opacity, and rebuilding a healthy connection there would re-run the whole backoff for a colour change |
+
+**One token, every relay.** The `Relay Token` field is sent to all of them. That is not the
+limitation it looks like: a relay with no `HERDR_RELAY_TOKEN` set skips the check entirely
+(`herdr_relay.py:384`), so handing one to a loopback relay that wants none is harmless — the
+canonical pair, a tokenless local relay beside a token-guarded tunnel, works as it stands.
+Two relays that each require a *different* token is the case it does not cover.
+
+An older `settings.json` is read unchanged: the single `relayUrl` key becomes the first
+entry of `relayUrls` on load and is dropped from the file on the next save, the same
+migration `islandExpandedOpacity` already gets.
+
+## Type
+
+The whole UI is monospace — `Cascadia Mono`, then `Consolas` for Windows 10, then
+`Courier New`. This is the web client's decision (`CLAUDE.md`, *Web App*) applied here: the
+app is a window onto a terminal, and a proportional shell around a monospace pane reads as
+two programs sharing one card. The chrome was Segoe UI, so a 580px card carried three faces
+at once — Segoe for the row names, the mono stack for the locations and section headers,
+and the mono stack again for the pane's own output.
+
+Two details are load-bearing:
+
+- **`Cascadia Mono`, not `Cascadia Code`.** They are separate families and only Mono is
+  guaranteed to be installed by Windows Terminal. Code adds programming ligatures, which is
+  the last thing a status row wants.
+- **The face is set on the window, not only in the styles.** `PlainButton` sets no font, so
+  Cancel, Save and Install would have stayed on the WPF default; property inheritance from
+  the window root is what reaches them. `TextOptions.TextFormattingMode="Display"` goes with
+  it on the settings dialog — the island already had it — because monospace stems at 10-12px
+  land on half pixels under WPF's default `Ideal` metrics.
+
+`MonoFont` and `UiFont` name the same stack today and are still two keys: one is the chrome
+and one is terminal content, so a terminal face with wider glyph coverage can be dropped
+into the second without dragging the first along.
 
 ## Direct mode
 
@@ -308,11 +370,13 @@ against 420): a window appearing is not a shape growing.
 Windows analogue. Segoe MDL2 Assets and Segoe Fluent Icons differ in glyph coverage
 between Windows 10 and 11; text symbols render the same on both.
 
-**One settings dialog.** The mac app spreads the same choices across its status menu (a
-Direct/Relay toggle, an add-remote sheet) plus `UserDefaults` keys it never surfaces, and
-it has no way to type a relay URL at all. Here the source, the relay URL and token, the
-SSH hosts, the herdr path and the panel's appearance live in one dialog, and the choices
-are remembered across launches. The appearance controls apply to the live panel while the
+**One settings dialog, and more than one relay.** The mac app spreads the same choices
+across its status menu (a Direct/Relay toggle, an add-remote sheet) plus `UserDefaults`
+keys it never surfaces, and it has no way to type a relay URL at all. Here the source, the
+relay URLs and token, the SSH hosts, the herdr path and the panel's appearance live in one
+dialog, and the choices are remembered across launches. The relay field is a *list*, and
+every entry is connected at once — see [Several relays at once](#several-relays-at-once);
+macOS and iOS still hold a single relay each. The appearance controls apply to the live panel while the
 dialog is open — bringing it out if it is closed, since translucency can only be judged
 against what is behind it — and are rolled back on Cancel. Opacity is clamped to ≥ 20 % so
 a mis-drag cannot make the panel unreadable, and the dialog is reached from the tray rather
@@ -395,7 +459,8 @@ that fails quietly by design has no other way to account for itself.
 | `App.xaml.cs` | `HerdiMacApp.swift` (app delegate, wiring) |
 | `Models/Agent.cs` | `Agent.swift` |
 | `Models/Protocol.cs` | the wire protocol + relay allowlists |
-| `Services/RelayConnection.cs` | `RelayConnection.swift` (both modes, one merge path) |
+| `Services/RelayConnection.cs` | `RelayConnection.swift` (both modes, one merge path, N relays) |
+| `Services/RelaySocket.cs` | — (one WebSocket; macOS has only ever had one) |
 | `Services/HerdrCli.cs` | `runHerdr` + `runSSH` + `resolveHerdrPath` |
 | `Services/HerdrPoller.cs` | `pollHerdr` + `readPaneForBlocked` + `detectOptions` |
 | `Services/ConnectionMode.cs` | `RelayConnection.ConnectionMode` |

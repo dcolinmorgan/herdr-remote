@@ -1,11 +1,12 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Net.WebSockets;
 using System.Runtime.CompilerServices;
-using System.Text;
 using Herdi.Models;
 
 namespace Herdi.Services;
+
+/// <summary>One relay's connection state, for the tray's Relays submenu.</summary>
+public sealed record RelayStatus(string Url, string Label, bool IsConnected, string? Error);
 
 /// <summary>
 /// The app's single source of agent state, over either transport. Port of herdi-mac's
@@ -16,6 +17,25 @@ namespace Herdi.Services;
 /// Both modes share one merge path (<see cref="Upsert"/>), so grouping, toasts and the
 /// answered-elsewhere retraction behave identically whichever is active. The mac app
 /// keeps two separate merge loops and they have drifted apart.
+///
+/// Relay mode watches <em>every</em> configured relay at once rather than one at a time.
+/// It used to hold a single socket, so a second relay meant editing the URL in Settings —
+/// which is not switching between two views of one herd, it is throwing one herd away. The
+/// panes of all of them land in one list and are triaged together, because NEEDS YOU is
+/// the ordering that matters and a blocked agent does not become less urgent for being on
+/// the other relay. Which relay a row came from is a tag on the row
+/// (<see cref="Agent.SourceLabel"/>), shown only once there is more than one.
+///
+/// Three things follow from that and each was a bug the single-socket shape could not have:
+///
+/// - <b>Pane ids are only unique within one herdr.</b> Every relay hands out `w1:p1`, so
+///   <see cref="Agent.Id"/> carries the source key and <see cref="Agent.PaneId"/> is what
+///   goes back on the wire.
+/// - <b>A snapshot speaks for its own relay only.</b> The `agents` message is a complete
+///   list, but complete for the relay that sent it; the sweep that drops vanished panes is
+///   scoped to that source or the relays would delete each other's rows every poll.
+/// - <b>Connected is "any", not "all".</b> One unreachable tunnel must not make the dot red
+///   while three relays are answering; it names itself in the tray instead.
 /// </summary>
 public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
 {
@@ -23,10 +43,7 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
     private readonly SettingsStore _settings;
     private readonly HerdrCli _cli;
     private readonly HerdrPoller _direct;
-    private ClientWebSocket? _socket;
-    private CancellationTokenSource? _cts;
-    private int _reconnectAttempt;
-    private bool _disposed;
+    private readonly List<RelaySocket> _sockets = new();
 
     public RelayConnection(SettingsStore settings, Action<Action>? post = null)
     {
@@ -34,7 +51,7 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         // Marshals collection/property mutations onto the UI thread. Falls back to
         // inline execution so the class stays usable without a WPF Dispatcher.
         _post = post ?? (a => a());
-        _hostAddress = settings.RelayUrl;
+        _hostAddress = DescribeRelays(settings.RelayUrls);
         _cli = new HerdrCli(settings);
         _direct = new HerdrPoller(settings, _cli, _post);
         _direct.Polled += OnPolled;
@@ -53,6 +70,14 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
 
     private string? _lastError;
     public string? LastError { get => _lastError; private set => Set(ref _lastError, value); }
+
+    /// <summary>
+    /// Per-relay state, in the configured order. Empty in direct mode. The tray lists these
+    /// individually because the aggregate above deliberately hides which relay is down, and
+    /// "one of your three relays is unreachable" is not something a single dot can say.
+    /// </summary>
+    public IReadOnlyList<RelayStatus> Relays =>
+        _sockets.Select(s => new RelayStatus(s.Url, s.Label, s.IsConnected, s.LastError)).ToList();
 
     /// <summary>Raised when an agent newly enters the blocked state (drives the toast).</summary>
     public event Action<Agent>? AgentBlocked;
@@ -92,20 +117,128 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
 
         if (Mode == ConnectionMode.Direct)
         {
+            StopSockets();
             // The herdr path setting may have changed under us.
             _cli.Refresh();
-            _cts?.Cancel();
             HostAddress = DescribeDirectSources();
             LastError = null;
+            IsConnected = false;
             _direct.Start();
             return;
         }
 
-        var url = urlOverride ?? _settings.RelayUrl;
-        if (string.IsNullOrWhiteSpace(url)) return;
-        HostAddress = url;
-        _reconnectAttempt = 0;
-        _ = RunLoopAsync(url);
+        var urls = urlOverride is not null
+            ? new List<string> { urlOverride }
+            : _settings.RelayUrls.ToList();
+        ReconcileSockets(urls, _settings.RelayToken);
+        RefreshAggregate();
+    }
+
+    /// <summary>
+    /// Bring the live sockets in line with the configured URLs.
+    ///
+    /// Unchanged relays keep the socket they already have rather than being torn down and
+    /// rebuilt. This is not only about churn: <see cref="Connect"/> runs on <em>every</em>
+    /// settings save, including one that touched nothing but the panel's opacity, and
+    /// restarting a healthy relay there would drop its connection and re-run the whole
+    /// backoff for a colour change.
+    /// </summary>
+    private void ReconcileSockets(IReadOnlyList<string> urls, string token)
+    {
+        var kept = new List<RelaySocket>();
+        foreach (var url in urls)
+        {
+            if (string.IsNullOrWhiteSpace(url)) continue;
+            var existing = _sockets.FirstOrDefault(s => s.Matches(url, token));
+            if (existing is not null && !kept.Contains(existing))
+            {
+                kept.Add(existing);
+                continue;
+            }
+            var socket = new RelaySocket(url, token, _post);
+            socket.MessageReceived += Handle;
+            socket.StateChanged += _ => RefreshAggregate();
+            kept.Add(socket);
+        }
+
+        foreach (var gone in _sockets.Where(s => !kept.Contains(s)))
+        {
+            gone.MessageReceived -= Handle;
+            gone.Stop();
+            gone.Dispose();
+        }
+
+        _sockets.Clear();
+        _sockets.AddRange(kept);
+
+        // A relay that is no longer configured leaves nothing behind: its panes are not
+        // "vanished from a snapshot" — nobody is going to send one — so the per-source
+        // sweep in ApplySnapshot would never reach them.
+        var live = new HashSet<string>(_sockets.Select(s => s.Url), StringComparer.Ordinal);
+        for (var i = Agents.Count - 1; i >= 0; i--)
+        {
+            if (!live.Contains(Agents[i].SourceId)) Agents.RemoveAt(i);
+        }
+
+        foreach (var socket in _sockets) socket.Start();
+        ApplySourceVisibility();
+    }
+
+    private void StopSockets()
+    {
+        foreach (var socket in _sockets)
+        {
+            socket.MessageReceived -= Handle;
+            socket.Stop();
+            socket.Dispose();
+        }
+        _sockets.Clear();
+    }
+
+    /// <summary>
+    /// A row only names its relay once there is more than one to tell apart. Applied to
+    /// every agent, not just new ones: adding a second relay has to light the tag up on the
+    /// panes of the first, and removing it has to take the tag back off.
+    /// </summary>
+    private void ApplySourceVisibility()
+    {
+        var show = _sockets.Count > 1;
+        foreach (var agent in Agents) agent.ShowSource = show;
+    }
+
+    /// <summary>
+    /// Fold every relay's state into the one dot, one line and one error the UI binds to.
+    /// Connected is <em>any</em>: with three relays and one tunnel down, two thirds of the
+    /// herd is live and a red dot would be a lie about the other two.
+    /// </summary>
+    private void RefreshAggregate()
+    {
+        if (Mode == ConnectionMode.Direct) return;
+
+        IsConnected = _sockets.Any(s => s.IsConnected);
+        HostAddress = DescribeRelays(_sockets.Select(s => s.Url).ToList(), _sockets.Count(s => s.IsConnected));
+
+        // Whose error to show: the first relay that is down and has something to say. With
+        // one relay that is exactly what it used to be; with several the label is prefixed,
+        // because "connection refused" on its own does not say which relay refused it.
+        var failing = _sockets.FirstOrDefault(s => !s.IsConnected && !string.IsNullOrWhiteSpace(s.LastError));
+        LastError = failing is null
+            ? null
+            : _sockets.Count > 1 ? $"{failing.Label}: {failing.LastError}" : failing.LastError;
+    }
+
+    /// <summary>
+    /// What the tray prints under the status line. One relay names itself in full — the URL
+    /// is short and it is the thing you would check. Several would not fit and would not be
+    /// worth the width, so they become a count with how many are answering.
+    /// </summary>
+    private static string DescribeRelays(IReadOnlyList<string> urls, int? connected = null)
+    {
+        if (urls.Count == 0) return "no relay configured";
+        if (urls.Count == 1) return urls[0];
+        return connected is null
+            ? $"{urls.Count} relays"
+            : $"{urls.Count} relays · {connected} connected";
     }
 
     /// <summary>Human-readable summary of what direct mode is polling, for the tray.</summary>
@@ -118,135 +251,33 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         return parts.Count == 0 ? "direct · nothing configured" : "direct · " + string.Join(" + ", parts);
     }
 
-    public async void Disconnect()
+    public void Disconnect()
     {
         _direct.Stop();
-        _cts?.Cancel();
-        var socket = _socket;
-        _socket = null;
-        if (socket is { State: WebSocketState.Open })
-        {
-            try
-            {
-                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
-            }
-            catch (Exception)
-            {
-                // Closing a socket that is already torn down is not actionable.
-            }
-        }
-        socket?.Dispose();
+        StopSockets();
         _post(() => IsConnected = false);
-    }
-
-    /// <summary>
-    /// Connect, pump messages, and reconnect with exponential backoff capped at 30s —
-    /// same schedule as herdi-mac's scheduleReconnect (min(2^min(attempt,5), 30)).
-    /// </summary>
-    private async Task RunLoopAsync(string url)
-    {
-        _cts?.Cancel();
-        _cts = new CancellationTokenSource();
-        var token = _cts.Token;
-
-        while (!token.IsCancellationRequested && !_disposed)
-        {
-            try
-            {
-                using var socket = new ClientWebSocket();
-                if (!string.IsNullOrEmpty(_settings.RelayToken))
-                {
-                    // The relay accepts either an Authorization header or ?token=
-                    // (herdr_relay.py:386). The header keeps the secret out of logs.
-                    socket.Options.SetRequestHeader("Authorization", "Bearer " + _settings.RelayToken);
-                }
-                _socket = socket;
-
-                await socket.ConnectAsync(new Uri(url), token);
-                _post(() =>
-                {
-                    IsConnected = true;
-                    LastError = null;
-                });
-                _reconnectAttempt = 0;
-
-                await PumpAsync(socket, token);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _post(() =>
-                {
-                    IsConnected = false;
-                    LastError = ex.Message;
-                });
-            }
-
-            if (token.IsCancellationRequested || _disposed) break;
-
-            _post(() => IsConnected = false);
-            _reconnectAttempt++;
-            var delaySeconds = Math.Min(1 << Math.Min(_reconnectAttempt, 5), 30);
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), token);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-        }
-    }
-
-    private async Task PumpAsync(ClientWebSocket socket, CancellationToken token)
-    {
-        var buffer = new byte[16 * 1024];
-        var builder = new StringBuilder();
-
-        while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
-        {
-            WebSocketReceiveResult result;
-            do
-            {
-                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    return;
-                }
-                builder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-            }
-            while (!result.EndOfMessage);
-
-            var text = builder.ToString();
-            builder.Clear();
-            var msg = ServerMessage.Parse(text);
-            if (msg is not null) _post(() => Handle(msg));
-        }
     }
 
     // --- Inbound message handling (mirrors handleWS in RelayConnection.swift)
 
-    private void Handle(ServerMessage msg)
+    private void Handle(RelaySocket source, ServerMessage msg)
     {
         switch (msg.Type)
         {
             case "agents":
                 // A relay snapshot never carries prompts, and the relay follows it with a
                 // `blocked` message per newly blocked pane, so newly-blocked is ignored here.
-                ApplySnapshot(msg.Agents);
+                ApplySnapshot(source.Url, source.Label, msg.Agents);
                 break;
 
             case "agent_update":
-                if (msg.AgentUpdate is not null) Upsert(msg.AgentUpdate, out _);
+                if (msg.AgentUpdate is not null) Upsert(source.Url, source.Label, msg.AgentUpdate, out _);
                 break;
 
             case "blocked":
             {
                 if (msg.PaneId is null) break;
-                var agent = Find(msg.PaneId);
+                var agent = Find(source.Url, msg.PaneId);
                 if (agent is null) break;
                 agent.Prompt = msg.Prompt;
                 agent.PromptId = msg.PromptId;
@@ -264,7 +295,12 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
             case "pane_content":
                 if (msg.PaneId is not null && msg.Content is not null)
                 {
-                    PaneContentReceived?.Invoke(msg.PaneId, msg.Content);
+                    // Raised as the composite id: two relays can each be showing a `w1:p1`,
+                    // and the pane view compares this against the agent it has open.
+                    // Composed rather than looked up, so a read that lands before the
+                    // snapshot introducing its pane still reaches the view.
+                    PaneContentReceived?.Invoke(
+                        Agent.ComposeId(source.Url, msg.PaneId), msg.Content);
                 }
                 break;
         }
@@ -273,6 +309,13 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
     /// <summary>
     /// Merge a complete list of panes and drop whatever is no longer in it.
     /// </summary>
+    /// <param name="sourceId">
+    /// The source this snapshot speaks for. The sweep below is scoped to it: a relay's
+    /// `agents` message is complete for that relay and says nothing whatever about the
+    /// panes of any other, so an unscoped sweep would have every relay delete every other
+    /// relay's rows on each snapshot and the list would flicker between them.
+    /// </param>
+    /// <param name="sourceLabel">What a row calls that source.</param>
     /// <param name="snapshot">Every pane the source knows about.</param>
     /// <param name="hostsCovered">
     /// Hosts this snapshot actually speaks for, or null when it speaks for all of them (a
@@ -282,21 +325,26 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
     /// re-toast every blocked agent on it each time it came back.
     /// </param>
     /// <returns>The agents that entered the blocked state in this snapshot.</returns>
-    private List<Agent> ApplySnapshot(IEnumerable<AgentData> snapshot, ISet<string>? hostsCovered = null)
+    private List<Agent> ApplySnapshot(
+        string sourceId,
+        string sourceLabel,
+        IEnumerable<AgentData> snapshot,
+        ISet<string>? hostsCovered = null)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var newlyBlocked = new List<Agent>();
 
         foreach (var data in snapshot)
         {
-            seen.Add(data.PaneId);
-            var agent = Upsert(data, out var becameBlocked);
+            var agent = Upsert(sourceId, sourceLabel, data, out var becameBlocked);
+            seen.Add(agent.Id);
             if (becameBlocked) newlyBlocked.Add(agent);
         }
 
         for (var i = Agents.Count - 1; i >= 0; i--)
         {
             var agent = Agents[i];
+            if (!string.Equals(agent.SourceId, sourceId, StringComparison.Ordinal)) continue;
             if (seen.Contains(agent.Id)) continue;
             if (hostsCovered is not null && !hostsCovered.Contains(agent.Host)) continue;
             Agents.RemoveAt(i);
@@ -305,9 +353,9 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         return newlyBlocked;
     }
 
-    private Agent Upsert(AgentData data, out bool becameBlocked)
+    private Agent Upsert(string sourceId, string sourceLabel, AgentData data, out bool becameBlocked)
     {
-        var existing = Find(data.PaneId);
+        var existing = Find(sourceId, data.PaneId);
         var status = AgentStatusParser.Parse(data.Status);
 
         if (existing is not null)
@@ -320,6 +368,7 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
             existing.Project = data.Project;
             existing.Cwd = data.Cwd;
             existing.Host = data.Host ?? "local";
+            existing.SourceLabel = sourceLabel;
             // Answered from another client: drop the prompt and retract the toast.
             if (wasBlocked && status != AgentStatus.Blocked)
             {
@@ -343,7 +392,12 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
             status,
             data.Project,
             data.Cwd,
-            data.Host ?? "local");
+            data.Host ?? "local",
+            sourceId,
+            sourceLabel)
+        {
+            ShowSource = _sockets.Count > 1,
+        };
         Agents.Add(agent);
         return agent;
     }
@@ -363,7 +417,10 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         IsConnected = result.Reachable;
         LastError = result.Error;
 
-        var newlyBlocked = ApplySnapshot(result.Agents, result.HostsAnswered);
+        // Direct mode is one source by construction — the poller has already merged every
+        // configured host into this one result — so it needs no label of its own.
+        var newlyBlocked = ApplySnapshot(
+            Agent.DirectSource, string.Empty, result.Agents, result.HostsAnswered);
         foreach (var agent in newlyBlocked) _ = FillPromptAsync(agent);
     }
 
@@ -394,7 +451,17 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         if (!result.Ok && result.Error is not null) _post(() => LastError = result.Error);
     }
 
-    public Agent? Find(string paneId) => Agents.FirstOrDefault(a => a.Id == paneId);
+    /// <summary>Find by the composite <see cref="Agent.Id"/> — what a toast carries.</summary>
+    public Agent? Find(string id) => Agents.FirstOrDefault(a => a.Id == id);
+
+    /// <summary>
+    /// Find by the pair a wire message arrives as. The pane id alone is not enough: every
+    /// herdr numbers its own panes from w1:p1, so two relays routinely report the same one.
+    /// </summary>
+    public Agent? Find(string sourceId, string paneId) =>
+        Agents.FirstOrDefault(a =>
+            string.Equals(a.SourceId, sourceId, StringComparison.Ordinal) &&
+            string.Equals(a.PaneId, paneId, StringComparison.Ordinal));
 
     private static void Replace(ObservableCollection<string> target, List<string>? source)
     {
@@ -422,9 +489,9 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         }
         else
         {
-            Send(Protocol.SafeResponses.Contains(text.Trim())
-                ? Protocol.Respond(agent.Id, agent.PromptId, text)
-                : Protocol.AgentPrompt(agent.Id, text));
+            Send(agent, Protocol.SafeResponses.Contains(text.Trim())
+                ? Protocol.Respond(agent.PaneId, agent.PromptId, text)
+                : Protocol.AgentPrompt(agent.PaneId, text));
         }
 
         agent.Status = AgentStatus.Working;
@@ -445,20 +512,20 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
         if (trimmed.Length > Protocol.MaxPromptLength) trimmed = trimmed[..Protocol.MaxPromptLength];
 
         if (Mode == ConnectionMode.Direct) _ = ReportAsync(_direct.PromptAsync(agent, trimmed));
-        else Send(Protocol.AgentPrompt(agent.Id, trimmed));
+        else Send(agent, Protocol.AgentPrompt(agent.PaneId, trimmed));
     }
 
     /// <summary>Send ^C to the pane. The relay's key allowlist spells this "C-c".</summary>
     public void Interrupt(Agent agent)
     {
         if (Mode == ConnectionMode.Direct) _ = ReportAsync(_direct.InterruptAsync(agent));
-        else Send(Protocol.SendKeys(agent.Id, Protocol.InterruptKey));
+        else Send(agent, Protocol.SendKeys(agent.PaneId, Protocol.InterruptKey));
     }
 
     public void ReadPane(Agent agent, int lines = 30)
     {
         if (Mode == ConnectionMode.Direct) _ = ReadPaneDirectAsync(agent, lines);
-        else Send(Protocol.ReadPane(agent.Id, lines));
+        else Send(agent, Protocol.ReadPane(agent.PaneId, lines));
     }
 
     /// <summary>
@@ -471,7 +538,7 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
     public void ToggleQuestionOption(Agent agent, string option)
     {
         if (agent.PromptId is null || Mode == ConnectionMode.Direct) return;
-        Send(Protocol.QuestionToggle(agent.Id, agent.PromptId, option));
+        Send(agent, Protocol.QuestionToggle(agent.PaneId, agent.PromptId, option));
         if (agent.SelectedOptions.Contains(option)) agent.SelectedOptions.Remove(option);
         else agent.SelectedOptions.Add(option);
     }
@@ -480,36 +547,34 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
     public void SubmitQuestion(Agent agent)
     {
         if (agent.PromptId is null || Mode == ConnectionMode.Direct) return;
-        Send(Protocol.QuestionSubmit(agent.Id, agent.PromptId));
+        Send(agent, Protocol.QuestionSubmit(agent.PaneId, agent.PromptId));
         agent.Status = AgentStatus.Working;
         agent.ClearPrompt();
     }
 
-    private async void Send(string json)
+    /// <summary>
+    /// Send to the relay this agent came from, and to no other. Routing by the agent rather
+    /// than by "the socket" is the whole of what multi-relay costs at the outbound end: an
+    /// `agent_prompt` for `w1:p1` broadcast to every relay would land on a different pane on
+    /// each of them.
+    /// </summary>
+    private void Send(Agent agent, string json)
     {
-        var socket = _socket;
-        if (socket is not { State: WebSocketState.Open }) return;
-        try
+        var socket = _sockets.FirstOrDefault(s =>
+            string.Equals(s.Url, agent.SourceId, StringComparison.Ordinal));
+        if (socket is null)
         {
-            await socket.SendAsync(
-                new ArraySegment<byte>(Encoding.UTF8.GetBytes(json)),
-                WebSocketMessageType.Text,
-                true,
-                CancellationToken.None);
+            // The relay was removed from Settings while its pane was still on screen.
+            LastError = $"{agent.SourceLabel} is no longer configured";
+            return;
         }
-        catch (Exception ex)
-        {
-            _post(() => LastError = ex.Message);
-        }
+        socket.Send(json);
     }
 
     public void Dispose()
     {
-        _disposed = true;
         _direct.Dispose();
-        _cts?.Cancel();
-        _cts?.Dispose();
-        _socket?.Dispose();
+        StopSockets();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

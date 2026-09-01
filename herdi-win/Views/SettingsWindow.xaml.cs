@@ -42,7 +42,7 @@ public partial class SettingsWindow : Window
         // instead and Save stays reachable.
         MaxHeight = Math.Max(360, SystemParameters.WorkArea.Height - 40);
 
-        UrlBox.Text = settings.RelayUrl;
+        UrlBox.Text = string.Join(Environment.NewLine, settings.RelayUrls);
         TokenBox.Password = settings.RelayToken;
         RemotesBox.Text = string.Join(Environment.NewLine, settings.Remotes);
         HerdrPathBox.Text = settings.HerdrPath;
@@ -141,19 +141,28 @@ public partial class SettingsWindow : Window
     private void OnSave(object sender, RoutedEventArgs e)
     {
         var mode = SelectedMode;
-        var url = UrlBox.Text.Trim();
-        var remotes = RemotesBox.Text
-            .Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(host => host.Trim())
-            .Where(host => host.Length > 0)
-            .ToList();
+        var urls = Lines(UrlBox.Text);
+        var remotes = Lines(RemotesBox.Text);
         var herdrPath = HerdrPathBox.Text.Trim();
 
-        if (mode == ConnectionMode.Relay &&
-            (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) || parsed.Scheme is not ("ws" or "wss")))
+        if (mode == ConnectionMode.Relay)
         {
-            Warn("Enter a WebSocket URL starting with ws:// or wss://.");
-            return;
+            if (urls.Count == 0)
+            {
+                Warn("Relay mode needs at least one relay URL.");
+                return;
+            }
+
+            // Every line, not just the first: a typo on line 3 would otherwise be saved and
+            // then spend the rest of the session as a relay that silently never connects.
+            var bad = urls.FirstOrDefault(url =>
+                !Uri.TryCreate(url, UriKind.Absolute, out var parsed) ||
+                parsed.Scheme is not ("ws" or "wss"));
+            if (bad is not null)
+            {
+                Warn($"Not a WebSocket URL: {bad}\n\nEach line must start with ws:// or wss://.");
+                return;
+            }
         }
 
         if (mode == ConnectionMode.Direct && remotes.Count == 0 && herdrPath.Length == 0)
@@ -165,7 +174,9 @@ public partial class SettingsWindow : Window
         }
 
         _settings.Mode = mode;
-        _settings.RelayUrl = string.IsNullOrEmpty(url) ? _settings.RelayUrl : url;
+        // Only when there is something to write: switching to direct mode with the relay
+        // fields never touched must not blank the relay list on the way past.
+        if (urls.Count > 0) _settings.RelayUrls = urls;
         _settings.RelayToken = TokenBox.Password;
         _settings.Remotes = remotes;
         _settings.HerdrPath = herdrPath;
@@ -174,6 +185,17 @@ public partial class SettingsWindow : Window
         DialogResult = true;
         Close();
     }
+
+    /// <summary>
+    /// One entry per line, blanks dropped. Commas split too, for the SSH host box, which
+    /// has always taken either — and a comma is not legal in a WebSocket URL either, so the
+    /// relay list can share the same reader.
+    /// </summary>
+    private static List<string> Lines(string text) => text
+        .Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)
+        .Select(line => line.Trim())
+        .Where(line => line.Length > 0)
+        .ToList();
 
     private void Warn(string message) =>
         MessageBox.Show(this, message, "Herdi", MessageBoxButton.OK, MessageBoxImage.Warning);

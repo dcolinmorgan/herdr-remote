@@ -75,6 +75,7 @@
                                        Foreground="{StaticResource Green}"
                                        Opacity="0.6"
                                        Visibility="{Binding IsRemote, Converter={StaticResource BoolToVis}}" />
+                            <ContentControl Style="{StaticResource SourceTag}" />
                         </StackPanel>
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="{Binding DisplayLocation}"

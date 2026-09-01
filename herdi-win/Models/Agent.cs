@@ -28,17 +28,83 @@ public static class AgentStatusParser
 /// </summary>
 public sealed class Agent : INotifyPropertyChanged
 {
-    public Agent(string id, string name, AgentStatus status, string project, string cwd, string host = "local")
+    /// <summary>
+    /// Separates the source key from the pane id in <see cref="Id"/>. A vertical bar cannot
+    /// occur in either half — a herdr pane id is `w&lt;n&gt;:p&lt;n&gt;` and a source key is a
+    /// WebSocket URL or the literal "direct" — so the composite never has to be un-parsed.
+    /// </summary>
+    private const char SourceSeparator = '|';
+
+    public Agent(
+        string paneId,
+        string name,
+        AgentStatus status,
+        string project,
+        string cwd,
+        string host = "local",
+        string sourceId = DirectSource,
+        string sourceLabel = "")
     {
-        Id = id;
+        PaneId = paneId;
+        SourceId = sourceId;
+        Id = ComposeId(sourceId, paneId);
         _name = name;
         _status = status;
         _project = project;
         _cwd = cwd;
         _host = host;
+        _sourceLabel = sourceLabel;
     }
 
+    /// <summary>Source key for direct mode, which is a single source by construction.</summary>
+    public const string DirectSource = "direct";
+
+    /// <summary>
+    /// The <see cref="Id"/> a pane would have, without needing an Agent to ask. A
+    /// `pane_content` reply can arrive for a pane no snapshot has introduced yet, and
+    /// dropping the read for want of a row would leave the pane view on "Reading pane…"
+    /// until the next tick.
+    /// </summary>
+    public static string ComposeId(string sourceId, string paneId) =>
+        sourceId + SourceSeparator + paneId;
+
+    /// <summary>
+    /// Unique across every source this client is watching, which is why it is composite:
+    /// every herdr numbers its own panes, so two relays routinely both report a `w1:p1` and
+    /// a flat pane id would make them the same row. This is the collection identity, what
+    /// RelayConnection.Find matches, and what a toast carries so its
+    /// buttons come back to the right agent. It is never put on the wire — see
+    /// <see cref="PaneId"/>.
+    /// </summary>
     public string Id { get; }
+
+    /// <summary>
+    /// The pane id as the owning source knows it, i.e. what goes out in a relay message or
+    /// a herdr CLI argument. In direct mode this still carries the host prefix
+    /// HerdrPoller.ParsePanes puts on a remote pane, and HerdrPoller.PaneIdOf takes it off.
+    /// </summary>
+    public string PaneId { get; }
+
+    /// <summary>Which source reported this pane: a relay URL, or <see cref="DirectSource"/>.</summary>
+    public string SourceId { get; }
+
+    private string _sourceLabel;
+
+    /// <summary>
+    /// Short name of that source for display — a relay URL's authority. Mutable because the
+    /// same pane keeps its identity across a settings save that renames nothing but the
+    /// label it is shown under.
+    /// </summary>
+    public string SourceLabel { get => _sourceLabel; set => Set(ref _sourceLabel, value); }
+
+    private bool _showSource;
+
+    /// <summary>
+    /// Whether a row should print <see cref="SourceLabel"/>. False while there is only one
+    /// relay, which is the ordinary case: naming the only source there is says nothing and
+    /// costs a line of a 580px card.
+    /// </summary>
+    public bool ShowSource { get => _showSource; set => Set(ref _showSource, value); }
 
     private string _name;
     public string Name { get => _name; set => Set(ref _name, value); }

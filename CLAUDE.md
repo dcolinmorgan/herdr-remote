@@ -22,6 +22,8 @@ The relay (`relay/herdr_relay.py`) is the central hub: it polls herdr for agent 
 
 The mac and Windows clients can also skip the relay entirely. Their **direct** mode runs the CLI itself — `herdr pane list` locally and `ssh <target> herdr pane list` per configured host — on the same SSH terms as the relay (`ConnectTimeout=5`, `BatchMode=yes`, `HERDR_REMOTE_BIN`). The host list is per client: `herdi_remotes` in `UserDefaults` on macOS, `%LOCALAPPDATA%\herdr-remote\settings.json` on Windows. Nothing in this mode touches the relay, so none of the relay constraints below apply to it.
 
+**The Windows client's relay mode holds a list, not a URL** (`herdi-win/README.md#several-relays-at-once`): every configured relay is connected at once and their agents are merged into one triaged list, tagged with the relay they came from. Two consequences reach the protocol rather than the UI. A **pane id is only unique within one herdr**, so `Agent.Id` there is `<relay url>|<pane id>` and only the second half goes back on the wire — the same collision the relay already documents for workspace and tab ids across hosts. And an **`agents` snapshot is complete only for the relay that sent it**, so the client's sweep for vanished panes is scoped per source; a client that swept the whole list per snapshot would have each relay delete the others' rows. macOS, iOS, the web app and the TUI still hold one relay each and are unaffected.
+
 One relay constraint does reach them, because it is herdr's, not the relay's: **an
 automatic read must pass `--source visible`.** `recent` past the viewport is a
 *harvesting* read — herdr walks the agent's own scroll interface to fetch the rest,

@@ -35,8 +35,24 @@
     <SolidColorBrush x:Key="Stroke10" Color="White" Opacity="0.10" />
     <SolidColorBrush x:Key="Stroke15" Color="White" Opacity="0.15" />
 
-    <FontFamily x:Key="UiFont">Segoe UI Variable Display, Segoe UI</FontFamily>
-    <!-- Cascadia ships with Windows 11 / Terminal; Consolas covers Windows 10. -->
+    <!-- The whole UI is monospace, for the reason the web client's is (CLAUDE.md, "Web
+         App"): this is a window onto a terminal, and a proportional shell around a
+         monospace pane reads as two programs sharing one card. It was Segoe UI, which put
+         the row names, the section counts and the pane's own output in three different
+         faces on a 580px card.
+
+         Cascadia ships with Windows 11 and Windows Terminal, Consolas covers Windows 10,
+         Courier New is the floor that exists everywhere. Both keys name the same stack
+         today and are kept apart anyway: UiFont is the chrome and MonoFont is terminal
+         content, so a future terminal face (herdi-mac's, or a Nerd Font for glyph
+         coverage) can be dropped into one without dragging the other along.
+
+         Windows-only caveat behind the ordering: "Cascadia Mono" and "Cascadia Code" are
+         separate families, and only Mono is guaranteed to be installed by Terminal — Code
+         adds the programming ligatures, which is exactly what a status row does not want.
+         Consolas is asked for before Courier New because Courier New is thin enough at
+         9-10px to disappear against Text40. -->
+    <FontFamily x:Key="UiFont">Cascadia Mono, Consolas, Courier New</FontFamily>
     <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Courier New</FontFamily>
 
     <!-- Scrollbar-less scroll viewer: herdi-mac uses showsIndicators: false. -->
@@ -234,6 +250,44 @@
                             Padding="{TemplateBinding Padding}">
                         <StackPanel IsItemsHost="True"
                                     KeyboardNavigation.DirectionalNavigation="Cycle" />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Which relay a pane came from. One definition, used by the herd row, the pane view
+         and the approval card, so the three cannot come to disagree about what a relay is
+         called. A ContentControl rather than a copied Border because the chip binds to the
+         ambient DataContext: the row template's is the Agent itself, the two surfaces set
+         DataContext="{Binding ActiveAgent}" on the tag and get the same thing.
+
+         Collapsed unless Agent.ShowSource, which RelayConnection sets only while more than
+         one relay is configured — with one, the tag would print the same string on every
+         row in the list and say nothing. FallbackValue covers the surfaces' null
+         ActiveAgent, where the binding produces no value at all and Visibility would
+         otherwise fall back to its own default of Visible. -->
+    <Style x:Key="SourceTag" TargetType="ContentControl">
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="6,0,0,0" />
+        <Setter Property="ToolTip" Value="{Binding SourceLabel}" />
+        <Setter Property="Visibility"
+                Value="{Binding ShowSource, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContentControl">
+                    <Border Background="{StaticResource Fill06}"
+                            BorderBrush="{StaticResource Stroke10}"
+                            BorderThickness="0.7"
+                            CornerRadius="3"
+                            Padding="4,0">
+                        <TextBlock Text="{Binding SourceLabel}"
+                                   FontFamily="{StaticResource MonoFont}"
+                                   FontSize="9"
+                                   Foreground="{StaticResource Text60}"
+                                   TextTrimming="CharacterEllipsis"
+                                   MaxWidth="140" />
                     </Border>
                 </ControlTemplate>
             </Setter.Value>
