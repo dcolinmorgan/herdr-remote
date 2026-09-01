@@ -202,7 +202,15 @@ class ClientPayloadTests(unittest.TestCase):
         # with it the options each side parses back out of the same text. How much is read
         # to get there differs on purpose: 100 lines for a pane view the relay also serves,
         # 50 for a toast.
+        #
+        # The SOURCE now differs too, and deliberately: the relay reads `visible`, because its
+        # read runs on a 2s poll and a `recent` text read of more lines than the pane is tall
+        # makes herdr harvest an alt-screen agent's scrollback -- seconds per read, and it
+        # scrolls the operator's terminal. The Windows client asks for `recent` but only 50
+        # lines, so it stays under a normal pane's height and normally lands on the same
+        # viewport. Panes shorter than 50 rows are where the two can disagree.
         self.assertIn('"--lines", "100"', relay)
+        self.assertIn('PROMPT_READ_SOURCE = "visible"', relay)
         self.assertIn("PromptReadLines = 50", poller)
         self.assertIn("lines[-50:]", relay)
         self.assertIn("PromptKeepLines = 20", poller)
