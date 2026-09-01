@@ -388,6 +388,19 @@ the tab would leave nowhere to go and start an agent in it. A pane whose tab `ta
 caught up with — the poll race right after a create — lands in a trailing `…` group rather than
 vanishing.
 
+**The Spaces and Tabs strips keep their sideways scroll across a snapshot.** They live inside
+`#agents`, which `render()` rewrites with `innerHTML` on every `agents` message — every two seconds
+— and that throws away the very elements holding the offset, so a space you had scrolled the strip
+to reach walked back off the screen under your thumb. `render()` now saves and restores it around
+the write (`chipStripScroll` / `restoreChipStripScroll`), keyed by **what the strip is**
+(`data-strip="spaces"|"tabs"`) rather than by its position in the list: the herd draws one strip and
+the space view draws two, and picking a space is exactly the moment you have just scrolled the
+Spaces row. The value is assigned rather than clamped by hand, so a strip that lost chips since the
+last snapshot lands at its own new end. It is the same bug the sibling row has, and
+`tests/test_web_spaces.py`'s `WebStripScrollTests` measures all three rows together — five of its
+six tests fail on the code this replaced, and the sixth is the guard that stops the fix from
+switching the sibling row's anchor off altogether.
+
 **What a row is called is two questions, so two functions and an explicit scope** (`paneParts` /
 `paneTitleInTab`), not one function guessing from whatever heading happens to be above it:
 
@@ -436,11 +449,23 @@ is at most three chips beside a row that is at most five. Sharing one row is **3
 takes the overflow, the padding, the border and `overscroll-behavior` (`.term-content`'s reason — at
 either end of a sideways drag the chain reaches the document and the browser reads it as the gesture
 that unloads the app), while the two groups inside it are plain flex boxes keeping their own ids and
-their own `aria-label`s. **A rebuilt strip loses its scroll position** — `replaceChildren` empties
-it, and an empty box has nothing to scroll — so `scrollSibsToOpenPane` puts the *pane* chip back on
-screen afterwards, never the tab chip, which is leftmost and never the one that went missing. It
-runs **after** the view is displayed: `renderSiblings` fires while the view is still `display:none`,
-where every rect is zero and no chip can be found to be off screen. The row sits in **normal flow**
+their own `aria-label`s. **A sideways scroll is the reader's, and it survives a rebuild they did not
+ask for.** The row is rebuilt from every `agents` snapshot — that is how a terminal appearing beside
+the open pane shows up without a reopen — and a rebuild costs it its position: `replaceChildren`
+empties both groups, the row's `scrollWidth` collapses with them, and the browser answers by clamping
+`scrollLeft` to 0. `scrollSibsToOpenPane` then pulled the open chip back into view from there, so a
+reader scrolling the row to read the name of a pane at the far end was snapped back to their own pane
+**every two seconds**. `renderSiblings` therefore carries the offset across the rebuild, and the
+auto-scroll is **anchored**: `sibsAnchoredTo` fires it once per pane, dropped only where "new" is
+meant — `openTerminal`'s real-switch branch (which covers entering a session from the list, where
+`activePane` is null) and the row disappearing. A **re-entry clears nothing**, so the `blocked` event
+that re-enters `openTerminal` for the pane already in front of you cannot drag the row back at the
+one moment you are most likely to be reading it. It is the *pane* chip that is anchored, never the
+tab chip, which is leftmost and never the one that went missing; and the placing call runs **after**
+the view is displayed, because `renderSiblings` fires while the view is still `display:none`, where
+every rect is zero, no chip can be found to be off screen and `scrollLeft` cannot be written either
+— which is why a row with no box is left unanchored rather than counted as placed. The row sits in
+**normal flow**
 under the header, which is why the absolutely-positioned history panel covers it exactly as it
 already covered the output and `positionHistoryPanel` is untouched. The search bar is in that same
 flow *after* it, so opening search pushes the output down rather than hiding it.
