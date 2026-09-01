@@ -21,7 +21,7 @@ curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/H
 - **Daily activity digest** -- `/digest` in Telegram shows working time + block count
 - **Terminal interaction** -- read output, send commands, interrupt agents remotely
 - **Notifications** -- know instantly when agents need you or finish
-- **11 themes** -- dark, herdr, light, sand, clay, dune, nord, rose, dracula, kanagawa, midnight
+- **Light, dark, or system** -- the web app is Claude Code's own palette, following your phone's appearance or pinned either way in Settings
 
 ## Screenshots
 

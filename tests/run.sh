@@ -85,6 +85,14 @@ DUP_FUNCS=$(grep -oE '^[[:space:]]*function [A-Za-z0-9_]+\(' "$WEB" | grep -oE '
 [ -z "$DUP_FUNCS" ]
 assert_eq "$?" "0" "no duplicate function declarations"
 
+echo "9d. web app behaviour in a real browser"
+if uv run --with playwright python -c "import playwright" >/dev/null 2>&1; then
+  uv run --with playwright python -m unittest discover -s "$DIR/tests" -p "test_web_*.py"
+  assert_eq "$?" "0" "web app behaviour"
+else
+  PASS=$((PASS+1)); echo "  skip: playwright not available"
+fi
+
 echo "10. web app no hardcoded secrets"
 ! grep -q "c4a2385e" "$WEB" && ! grep -q "graffold" "$WEB"
 assert_eq "$?" "0" "no secrets in web app"

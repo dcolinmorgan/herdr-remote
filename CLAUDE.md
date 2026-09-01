@@ -107,7 +107,390 @@ Runtime session overrides (per source) are persisted to `active_sessions.json` i
 
 ## Web App
 
-The web app is a single self-contained HTML file (`web/index.html`) with inline CSS and JS — no build step. It's deployed to Cloudflare Pages. It includes 11 color themes, a mobile terminal keyboard, PWA support, and agent-icon detection.
+The web app is a single self-contained HTML file (`web/index.html`) with inline CSS and JS — no build step. It's deployed to Cloudflare Pages. It carries a mobile terminal keyboard, PWA support, and agent-icon detection.
+
+**The palette is Claude Code's own ground, by way of collie** (`collie/web/src/index.css`): a neutral
+grey ramp on `#0a0a0a`, with the four status hues tuned against each ground rather than one set
+reused for both. The values are collie's oklch rasterized, because the `theme-color` metas, the web
+manifest and `ANSI_COLORS` are all hex and a token that disagreed with a meta shows as a seam under
+the URL bar. It is written **once**, as a block of `light-dark()` pairs resolved by the root's own
+`color-scheme`; the other shape — a light palette plus a dark `@media` copy — has to restate every
+value, and then a third time for an explicit pin. That is what makes the Settings switch two lines
+of CSS (`:root[data-theme="light"|"dark"] { color-scheme: … }`), and it puts native UI — scrollbars,
+form controls, the caret, the iOS keyboard — on the right side of the theme for free. The cost is a
+floor of Chrome 123 / Safari 17.5, next to the `color-mix()` already load-bearing throughout the
+file.
+
+- **Auto is the *absence* of a pin**, so it works with JavaScript disabled entirely. What JS owns is
+  the part CSS cannot do: taking a **stale** pin back off — Dark → Auto leaving `data-theme` stamped
+  is the bug the two-way write exists to stop — and the two `theme-color` metas, which carry `media`
+  attributes and therefore follow the OS rather than the pin, so a pinned reader is given the pinned
+  colour in *both*. The choice is a **bare string** in `localStorage.herdr_theme`, written by
+  `setTheme` and read by a script in `<head>` before first paint; `JSON.stringify` there would store
+  `"dark"` *with* the quotes and the anti-flash would silently never fire again. Three exclusive
+  choices are a `radiogroup`, not three `aria-pressed` toggles announcing three independent
+  switches, and the selected one fills with the inverted neutral the session view's toggles already
+  use — blue would read as the *selection* colour the chips own.
+- **`--on-accent` is the text ON a saturated fill.** A saturated token is dark in the light theme
+  and light in the dark one, so no single literal serves both: the `color: #fff` these controls
+  carried measured **2.6:1** against the dark theme's blue. The pair measures ≥6.6:1 on all four
+  hues in both themes.
+- **The mirror is dark under both themes** and carries its own `color-scheme: dark`. `ANSI_COLORS`
+  is VS Code's Dark+ set — the same 16 collie ships — authored for a dark ground, and it sits beside
+  truecolor an agent emits that no palette can re-theme. That `color-scheme` also puts the tokens
+  used *inside* the pane (the search highlight) on their dark halves, and stops a light theme from
+  handing dark output a light scrollbar.
+- **The UI is monospace**, because the app is a window onto a terminal and a proportional shell
+  around a monospace pane read as two programs sharing a screen. `--font-mono` is the system stack;
+  the bundled **Hack Nerd Font is deliberately not in it** — 982KB, and today nothing fetches it
+  until a session opens, since a `display: none` element loads no font. It stays first in
+  `--font-term`, where its Nerd Font glyphs are the reason it is shipped at all. Every measured
+  layout assertion in `tests/test_web_*.py` — the key labels that must not clip at 320px, the herd
+  row that gives up the project before the tab, the chrome budgets — passes unchanged under it.
+
+`tests/test_web_theme.py` measures all of it in a browser: the two grounds, a pin beating the OS in
+both directions, the stale pin coming off, the pre-paint stamp surviving a reload, the metas, the
+contrast on each saturated fill, and "monospace" as two equal-length strings of different glyphs
+measuring the same width.
+
+The history panel renders a conversation, not a log: a person's turn is a tinted bubble, the
+agent's is full-width markdown, a tool call is one compact row, and a file edit opens into its
+diff. Two renderers do that work, and both build **DOM nodes, never HTML strings** — every
+character of transcript text lands in a `textContent`, which is the same boundary `ansiFragment`
+holds and is what makes the escaping provable rather than remembered.
+
+- `mdFragment` is a hand-rolled markdown subset (no build step, and the CSP blocks every CDN).
+  What it supports is measured, not guessed: across the 2,572 assistant text blocks (838KB) in
+  the 25 largest transcripts here, inline code appears in 43.8%, bold 32.6%, bullets 11.2%,
+  headings 10.3%, **GFM tables 8.7% — more often than fenced code at 5.2%** — ordered lists 5.7%,
+  rules 2.5%, italics 2.4%, quotes 1.4%, links 1.3%, strikethrough 0.1% (unsupported).
+  Deliberately absent: `_underscore_` emphasis, which would mangle `snake_case_identifiers`; and
+  `*emphasis*` requires non-space just inside both delimiters so `rename *.ts to *.tsx` survives.
+  Blocks are flat, links are `https?:`/`mailto:` only, and headings become `.md-h1`…`.md-h6` divs
+  rather than real `h1`s so an agent's `#` cannot outrank the panel's own title.
+- `diffFragment` colours `+`/`-`/context lines and moves the marker into its own gutter cell, so
+  the code keeps its real indentation instead of being shifted a column.
+- A turn is stamped in the **reader's** zone, not the file's. Claude writes every transcript
+  timestamp in UTC — all 4,450 rows sampled here end in `Z` — and this was `ts.slice(11, 16)`, five
+  characters lifted straight out of the string, so a turn made at 17:08 in UTC+8 read 09:08.
+  `turnStamp` parses it and formats through `toLocaleTimeString`; the **date rides along when the
+  turn is not from today**, because paging back is the whole point of the panel and a bare `18:51`
+  cannot say which day it belongs to. A string the platform will not parse falls back to the old
+  slice, and an empty fallback yields no stamp rather than a blank one.
+- Renderer behaviour is tested in a real browser: `tests/test_web_history.py` loads
+  `web/index.html` over `file://` with playwright and asserts the DOM (skipped, not failed, where
+  playwright or chromium is missing; `tests/run.sh` step 9d runs every `tests/test_web_*.py` in one
+  process with playwright on the path, which is why each file shares **one** browser at module
+  scope — a class that started a second playwright instance is the contention that makes
+  `page.goto` time out). `WebHistoryPanelTests` pins the page to `Asia/Shanghai` and `en-GB` and
+  reopens it as `America/Los_Angeles`, because "the reader's zone" is exactly the claim and the
+  runner's own clock would make it a test of the runner.
+
+The panel's header is **one row**, and the filter opens *in place of* the conversation title
+(`toggleHistoryFind`) rather than beside it. It was two rows — a title bar over a filter bar,
+measured **80px of a 390×844 screen, 9.5%, spent before a single turn had rendered** — and the
+filter, which is only wanted while you are looking for something, paid for its input box
+permanently. It is 35px now, and the same 35px in both states: every child of that flex row is
+pinned to 22px, because the row's height is set by its tallest child and an input even two pixels
+taller than a chip would make the header jump every time the filter opened. Closing the filter
+**drops the needle** — one still hiding turns while its input is off screen would read as a
+conversation with pieces missing — and a fresh page closes it, so a needle cannot survive into the
+next conversation.
+
+The list carries **`overscroll-behavior: contain`**, for the same reason `.term-content` does: at
+the top of it a downward drag chained to the document and handed Chrome its pull-to-refresh, which
+reloads the whole app — losing the open session, the panel, and however far back you had paged. The
+two are asserted together so they cannot drift apart.
+
+**A selection has to survive a page that rebuilds itself, and that is a question about blast
+radius.** Measured in chromium, on every way there is to update text under one:
+
+| what you do | what happens to a range inside |
+|---|---|
+| `el.replaceChildren(…)` | collapses to `(el, 0)` — the top of the buffer |
+| `node.data = next` | collapses to `(node, 0)` — the DOM spec's `replaceData` |
+| `node.appendData(extra)` | untouched |
+
+So no node can be rewritten without moving what is anchored in it, and the only question is how
+little has to be rewritten. `ansiFragment` emits one span per styled **run**, and a run spans
+newlines — a pane with no colour in it is *one text node holding the whole buffer* — so a change on
+the last line moved a caret sitting on line 3 to the top of the output. **That is the reported bug:**
+a touch drag leaves a **caret** behind, the tick rebuilt the buffer, the caret came back at
+`(el, 0)`, and the reader's next drag highlighted the first line. Freezing cannot fix it, because
+freezing on a caret would stop the mirror for good on the first tap. Collie polls the same mirror
+and carries no selection code at all (its one `getSelection` is about not stealing focus), because
+React renders one keyed node per line: a change on line 7 never touches line 3's node.
+
+**So the mirror is one span per line** (`mirrorLineNodes`), and a tick is a reconcile
+(`mirrorPatch`):
+
+- **identical content touches no DOM** — most ticks, since an idle pane repeats itself every 3s and
+  the old code rebuilt the buffer 20 times a minute for nothing;
+- **a buffer that scrolled by k lines keeps the nodes of the lines that stayed** (`mirrorShift`,
+  verified in full before it is acted on and capped at 64, because a jump of more than a screenful
+  is a repaint) — which is the only way a range survives a pane that is actually working;
+- **a line that only grew takes `appendData`**, the one range-safe mutation, so it may land mid-drag;
+- **a rewritten line rebuilds itself** and nothing else, so a caret ends up at the start of its own
+  line rather than at the top of the buffer;
+- **a caret in a line being deleted is dropped**, not left to fall back to `(el, 0)` — which is
+  exactly where the next drag would extend from.
+
+The newline between two lines is a text node **between** the spans rather than inside one, so
+`el.textContent` is byte-identical to the old flat render — `doSearch` counts offsets in it — and
+the boxes are asserted equal to it rather than read off the CSS. Cost on a 1000-line coloured
+buffer (the deepest a herdr read reaches): identical tick **0.1ms** against the old 3.9ms, a repaint
+14.3ms against 3.9ms; at the default 200 lines, 0.1ms and 3.9ms against 0.9ms. The common tick got
+40× cheaper and the worst one 4× dearer.
+
+**The mirror carries scrollback, and paging back holds it.** Every read is `recent`. It used to be
+decided per pane — `recent` wherever `scrollback` was non-zero, `visible` where it was 0 — on the
+belief that an agent pane never has a ring, because its TUI runs on the alternate screen. That is a
+distinction without a difference: measured on this host (herdr 0.8.2, all 35 live panes, ansi,
+`recent` 200 against `visible` at the pane's own height), **every agent pane reports no ring, so the
+two reads come back byte-identical**. Where they do differ — shell panes holding a ring, +1.4KB to
++52KB — the extra bytes *are* the scrollback the reader opened the pane to see, so `visible` there
+is not a saving but a missing feature.
+
+Nor can the choice be split by read rather than by pane. `visible` returns the rendered grid and
+nothing else, and `mirrorPatch` reconciles the **whole** buffer — so priming one `recent` read on
+open and then following with `visible` would show the history for exactly one tick before the 3s
+pass deleted every line the viewport no longer holds. The follow read is bounded at
+`PANE_LINES_BASE` instead, which costs nothing extra: `loadMore` stops the tick before `paneLines`
+can grow past it.
+
+Two rules fall out of it, and each was its own leak:
+
+- **Only follow mode auto-refreshes.** The tick reused whatever `paneLines` had grown to, so one
+  tap on "load more" put a 600-line read on a timer and the ceiling put a 1000-line one there:
+  **125.7KB per tick, 42KB/s**, re-fetching output the reader had already scrolled away from — and
+  the next tick would have replaced their page anyway. Held mode sends nothing; `followPane` (the
+  refresh button) is the way back, and it is the *only* way back, which is why that button is no
+  longer a bare re-read — in held mode a re-read would just fetch the same page again.
+- **Only a real switch resets the reading state.** `openTerminal` is re-entered on every `blocked`
+  event for the pane already in front of you, and it reset `paneLines` unconditionally. With a
+  follow flag beside it that becomes: the reader is pulled back to the live screen the moment
+  their agent asks a question — the one moment they are most likely to be reading. `paneLines`,
+  `paneFollowing` and `userScrolledUp` now sit inside the same `activePane !== paneId` guard the
+  panels do.
+
+**A real selection still stops the tick outright** (`selectionInside`), because a line the reader is
+selecting inside can still be the line that gets rewritten. It is checked in four places:
+`mirrorTick`, which then does not even *send* the read (a herdr call, an SSH round trip on a remote
+host, for content it may not render); the `pane_content` handler, for a read in flight when the drag
+started and for a manual refresh; `loadMore`, whose answer puts hundreds of lines *in front* of what
+is on screen; and `render`'s list write — there **after** the name maps and the sibling strips, so
+only the list holds still. Nothing is queued: the tick repeats.
+
+**Only a *vertical* arrival at the top asks for more lines.** `scroll` says nothing about which axis
+moved, and `scrollTop === 0` is true for the whole of a sideways drag — permanently true when the
+output is shorter than the box. Measured: one wheel right took the read from 200 lines to 600 and
+the next to 1000, each answer a wholesale different content, and `loadMore` reaches `refreshPane`
+directly so the tick's own guard never saw it.
+
+**A switch empties the mirror** (`clearPaneMirror`), because until the new pane's read lands there
+is nothing true to put there. The read is a relay round trip — milliseconds locally, an SSH hop and
+up to seconds on a remote host — and for that whole window the buffer on screen was the output of
+the pane you *left*, sitting under the new pane's title and beside its filled chip, with nothing
+saying it was stale. Three things go with it, and each is its own bug otherwise: `__mirror`, the
+element property `mirrorPatch` reconciles against, which now describes another pane; any **range
+inside that output**, because `selectionInside` guards the mirror and cannot tell a stale drag from
+a live one — it would have refused the new pane's first read and left the mirror empty until the
+reader tapped somewhere; and the scroll. Only on a **real switch**: `openTerminal` is re-entered on
+every `blocked` event for the pane already in front of you, and blanking there would blink the
+output away every time an agent asked a question.
+
+`tests/test_web_selection.py` measures all of it, the collapse table included.
+
+The history panel asks for tool turns **by default** (`history_.tools` starts `true`). The relay's
+own default is still `include_tools: false` — this is the web client's choice, because a tool call
+is most of what an agent's turn consists of and hiding them rendered a conversation with holes in
+it. It costs reach: tool turns spend page slots and characters from the same budget as the prose,
+so a page reaches less far back. The `Tools` chip is the way to prose-only.
+
+The key pad and the panel layering are geometry, so `tests/test_web_keys.py` measures them rather
+than reading the CSS. The arrow keys sit in a `grid-template-areas` inverted T — `up` shares its
+column with `down`, and the empty cell is above `left`, where a keyboard has nothing either — and
+the test asserts the boxes, not the rule. The pad is **seven columns and two rows**, sized against
+measurements at 390×844 across four revisions: four rows of 44px was 271px closed / 415px with
+presets open, five columns and three rows was 205 / 301, seven columns with the pad switch and the
+presets disclosure sharing one line was 121 / 201, and trimming every key's own height and padding
+brought it to **111 / 183**. Twelve keys need thirteen cells because of the arrows' empty corner,
+which makes seven the narrowest grid that fits two rows; `Enter` spans both rows, and no label clips
+down to a 320px viewport (40px a cell). The same pass took the digit pad from 3×3 of 52px keys
+(164px, taller than the keys pad above it) to **one row of nine** (73px), and the quick dock from
+two labelled sections of 44px buttons to a 3×2 grid — colour already said which two were the
+confirm pair. Tests hold the dock under 14% / 22.5% of the screen, count the rows, and check every
+label for clipping, so none of it can grow back quietly.
+
+Two things were found by measuring rather than reading, both in the same trim pass:
+
+- **The input row is a flex box, so an inline `padding` on any child governs the whole row.** It
+  stayed 60px after `.term-input button:last-child`'s padding was cut, because the `/` and Send
+  buttons carried theirs inline where no rule reaches — every child stretches to the tallest. Both
+  moved into `.term-cmd` / `.term-send`, the row is 43px, and a test refuses any inline `padding`
+  under `.term-input` so the trap cannot be re-set.
+- **`key-green` / `key-blue` / `key-red` had no CSS at all.** The single-letter form of the three
+  approval answers rendered as 11×19px native buttons in Chrome's own grey, unthemed, in the middle
+  of a dark dock — unhittable, and invisible as a group. `#actionKeys` is now a 3-column grid of
+  30px keys tinted from the same accents as the answers above them; it costs the dock 14px while a
+  pane is blocked.
+Panes with no agent in them are **not in the herd list**, which is agents only. Two thirds of the
+panes on a real host are these — 20 of 30 — they carry no `status` at all, and triaging them would
+bury ten agents under twenty rows that can never be anything but Recent. They are reached by picking
+a space (which groups by tab and shows both kinds together) and from the sibling strip inside a
+session. A terminal's dot is **hollow** rather than a fifth shade competing with the four buckets,
+which is the same thing `worstTriage` says by returning null for a set holding only these.
+
+**The herd list is `triage`, the one ordering the whole page agrees on**: `Needs you` → `Ready ·
+unseen` → `Working` → `Recent`, tested in `tests/test_web_spaces.py`. Ported from Collie's
+`lib/triage.ts`, and the point of it is one classifier — `bucketOf` — that the rows, the space chips
+and the tab chips all route through, so a chip and the row it stands for cannot come to disagree
+about what a colour means.
+
+- **`Ready · unseen` is the section that could not exist before** the relay kept timestamps: an agent
+  that finished while you weren't looking. It is a **comparison, not a flag** — `status === "done" &&
+  last_active_at > last_seen_at` — so opening the pane clears it with no bookkeeping on either side.
+- **The dot is the bucket's colour, not the status's.** `done` means two different things depending
+  on whether you have looked at it, and only the bucket knows which. Orange for `ready` sits where it
+  belongs on red → orange → green → grey and leaves blue meaning *selection*, which is all it means
+  anywhere else on this page.
+- **Only `Recent` folds, and only `Recent` inverts.** Collapsing an alert defeats the alert, and an
+  attention section is ordered by urgency, which does not invert. The three above it have **no
+  controls at all**, and that absence is what marks the fourth as the one you may put away. Both
+  preferences persist, because a phone reopens this page constantly.
+- **Sorting:** the attention sections by `last_active_at` desc, `Recent` by `last_seen_at` desc.
+- **The no-timestamp path is free.** Every comparator returns 0, `Array.prototype.sort` is stable, so
+  each section keeps the order the relay already sent and `Ready` is simply empty. No feature
+  detection, no branch — which is what keeps an older relay, and `demo-worker`, working untouched.
+
+**Picking a space groups its panes by tab** (`groupPanesByTab`) — agents *and* bare shells, because
+that is the one view where "what is in this tab" is the question being asked. **Empty tabs render**
+(`(empty tab)`): a freshly created tab holds a shell the relay may not have listed yet, and hiding
+the tab would leave nowhere to go and start an agent in it. A pane whose tab `tab list` has not
+caught up with — the poll race right after a create — lands in a trailing `…` group rather than
+vanishing.
+
+**What a row is called is two questions, so two functions and an explicit scope** (`paneParts` /
+`paneTitleInTab`), not one function guessing from whatever heading happens to be above it:
+
+- In the **herd** the title carries the two things that *locate* a piece of work, the space and the
+  tab, **as separate spans rather than a joined string**. At 390px tail-truncating the join eats the
+  tab name and leaves every row reading `herdr-remote-dev · d…`, where the characters that survive
+  are the ones every row in that space shares. Separate spans let the **project** give up width
+  first and the tab — the only discriminator — survive; `test_the_project_gives_up_width_before_the_tab_does`
+  measures it rather than reading the CSS.
+- The project is the **space's label**, never `p.project`: the relay sets that to `basename(cwd)`,
+  which is a per-pane fact and the very thing `informativeCwd` decides whether to show on line two.
+- In a **space's own view** both are already established by the heading, so repeating them says
+  nothing — and worse, two panes in one tab would become indistinguishable. There the pane's own name
+  leads and the cwd sits beneath.
+- **`paneName` is `label || pane_id`, and never `project`.** On the real host every card in
+  `tmp-workspace` was called `tmp-workspace`, and so was the heading above them. The id is the only
+  field that always separates two siblings, and the same string feeds `data-agent-name` (the rename
+  prefill) and the row's `aria-label`, so what a pane is *called* cannot drift from what it announces.
+- **`informativeCwd`** drops the cwd when its basename equals the space label — a space is almost
+  always named after its directory, so that line spent itself repeating line one. What is left when
+  everything drops out is the **pane id**: measured here, three agents share one tab of one space
+  whose directory *is* the space's name, so their label, tab and cwd are all empty or identical and
+  all three rows read `tuyaos-ai-qemu` with an empty second line.
+- **`meaningfulTabLabel`** drops a *positional* tab label when the space has only one tab — herdr
+  labels an unlabelled tab `"1"`, and `billing · 1` reads as a bug rather than a name. With two or
+  more the number stays: weak, but the only thing telling two panes in one project apart.
+- Relatedly, **a tab has been renamed when its label is not a bare integer** — *not* when it differs
+  from `number`. Live on this host, `wT:t4` has label `"2"` and number `4`, because herdr's label is
+  the tab's **position** in its space while the number is a separate counter; comparing the two
+  called that a rename and rendered a heading reading `2` beside one reading `Tab 1`.
+
+**The session view carries herdr's own two levels below the space, in one row** (`renderSiblings` →
+`renderTabStrip` / `renderPaneStrip`, ported from Collie's `TabStrip` + `PaneStrip`): the tabs of
+this space, then a 1px rule, then the panes of this tab. The space above them is the level left to
+the herd list, which is a tap on Back. Both groups are DOM nodes, both are rebuilt from every
+`agents` snapshot — so a terminal appearing beside the open pane shows up without a reopen — and
+each is **hidden on its own when it holds no choice**: the tabs unless the space has two *reachable*
+tabs (6 of the 10 agent panes measured sit in a single-tab space), the panes unless the tab holds a
+second pane (10 of 10 do, so that is the group which always shows). When neither has anything to say
+the row goes, border and all — nothing at all when `HERDR_SHELL_PANES` is off and each tab holds one
+agent, which is the same "renders exactly as before" guarantee the list has.
+
+They were **two rows of 33px**, and 4 of the 10 agent panes measured paid for both — for a row that
+is at most three chips beside a row that is at most five. Sharing one row is **33px back, 3.9% of a
+390×844 screen**, and it costs a horizontal scroll the two separate rows did not need: the outer row
+takes the overflow, the padding, the border and `overscroll-behavior` (`.term-content`'s reason — at
+either end of a sideways drag the chain reaches the document and the browser reads it as the gesture
+that unloads the app), while the two groups inside it are plain flex boxes keeping their own ids and
+their own `aria-label`s. **A rebuilt strip loses its scroll position** — `replaceChildren` empties
+it, and an empty box has nothing to scroll — so `scrollSibsToOpenPane` puts the *pane* chip back on
+screen afterwards, never the tab chip, which is leftmost and never the one that went missing. It
+runs **after** the view is displayed: `renderSiblings` fires while the view is still `display:none`,
+where every rect is zero and no chip can be found to be off screen. The row sits in **normal flow**
+under the header, which is why the absolutely-positioned history panel covers it exactly as it
+already covered the output and `positionHistoryPanel` is untouched. The search bar is in that same
+flow *after* it, so opening search pushes the output down rather than hiding it.
+
+**The chrome above the output is measured, and it was 20% of the phone.** 69px of app header, of
+which the session view covered the bottom 20 — its `top` was a hardcoded `49px` against a header
+sized by a 44px button, so both header buttons were clipped through the whole of a session — then
+55px of session header, itself 55 because `back` carried a `1.4rem` font-size around a 20px icon,
+text metrics for a button with no text in it. Then the two sibling rows. **170px, 20.1%, before a
+single line of a pane had rendered.** It is **116px, 13.7%** now: the app header is a *height*
+(`--header-h`, the one place the number is written, and what `.terminal-view`'s `top` is computed
+from, so the two cannot drift again), the session header pins every child to 28px the way the
+history bar does, and the two levels share a row. `tests/test_web_spaces.py` measures all three
+against the screen rather than reading the CSS.
+
+What that replaced was one flat row of the *other* panes in the workspace, tagged `Tab` and `Space`,
+each chip named `label || pane_id`. Three things were wrong with it, and each is now a rule:
+
+- **A pane is named by what it can still say for itself** (`paneChipName`, Collie's
+  `paneDisplayName`): the operator's label, then — for an agent — the activity `title` it is
+  reporting, then the harness name; for a terminal, its cwd basename, then `shell`. **28 of the 30
+  panes on the measured host carry no label at all**, so `label || pane_id` *was* the pane id: the
+  row read `w6:pH  w6:pQ  w6:pR`, three chips whose names differ by one character. `project` is
+  never in it — the relay sets that to `basename(cwd)`, which by construction every pane in one
+  worktree shares. The pane id's **suffix** rides along as a muted tag, because a name is routinely
+  shared by every chip in the row (three shells in `herdr`, three claudes in one tab) and the suffix
+  is the only part that separates them.
+- **The pane you are standing in is in the row, filled.** The old row listed the others, so a row of
+  chips had no *you are here* in it. Blue is selection everywhere else on this page, and this is a
+  selection; the open pane and its tab carry it, and `aria-current` is what the CSS fills off.
+- **A tab is reachable by name.** Tapping one lands on `tabLandingPane` — the neediest agent in it
+  by `bucketOf`, and failing that its first terminal — so the tap goes to whatever would have been
+  highest in the herd list. A tab with no pane the client can name is **not a chip**: there is no CLI
+  for pointing at an empty tab, and that is also what keeps the row honest with `HERDR_SHELL_PANES`
+  off, where it becomes the tabs holding agents. The tab you are in is inert rather than
+  re-entering `openTerminal` and closing the panel you have open.
+
+A chip carries the same dot its card does, from the same `bucketOf`/`worstTriage` the herd uses, so
+the row needs no legend and the two places cannot disagree about a pane. **Neither group is labelled
+in words**: measured at 390×844, a `Tabs` / `Panes` label cost 40px of the row including its gap,
+and 4 of the 5 rows that scrolled on the real host overflowed by *less* than that (3px, 13px, 17px,
+41px) — so the label is on each group's `aria-label`, where it is still announced and costs nothing,
+and the distinction is carried by shape (a tab chip is squarer), by the id tag a tab has not got,
+and — now that they share a row — by the 1px rule between them, which is drawn only when there is
+something on both sides of it.
+A chip's own height is **fixed at 22px rather than padded**, because a name taken from an activity
+title carries CJK, whose glyphs are taller than latin at the same size, and the row grew 2px whenever
+one appeared; the name is capped at `min(32vw, 260px)` with the whole of it in the tooltip, since one
+205px title chip would otherwise be most of a 390px row.
+
+Every toggle in the session view says whether its panel is open through **`aria-pressed`**, and the
+CSS fills the chip off that attribute alone — `setPressed` is the only writer, so the pixels and the
+screen reader cannot drift apart. Search, History and the two dock buttons used to render pixel
+identical either way; they now fill with the *inverted neutral* (`--text` on `--bg`), which is
+unmistakably lit, carries no semantics of its own to clash with the orange/red keys, and is the one
+pair of colours guaranteed to contrast in all eleven themes — a blue fill sat next to the blue Send
+button and read as a second Send. Blue fill is reserved for *selection* (the Keys/123 switch, the
+`Tools` filter), and `refresh` deliberately has **no** pressed state at all: it fires and returns,
+and the contrast with the two chips beside it is what marks those two as toggles. Mutually
+exclusive pairs are restated together rather than one at a time (`showDock`, and `toggleSearch`
+routing history's close through `navClose` instead of hiding the element and orphaning its history
+entry). Settings and Timeline are siblings of the session view, which is
+`position: fixed; z-index: 50` over an opaque background below the 768px breakpoint: a panel
+opened from inside a session used to render in normal flow *underneath* it, present and
+unreachable. `openPanel` records what the panel covered in `panelReturn` and deactivates the
+session view; `hidePanel` restores exactly that, which is also why closing a panel no longer
+reveals the agent list under a live session. The test proves it with `elementFromPoint` at the
+panel's own centre, at both phone and desktop widths.
 
 ## WebSocket Protocol
 
@@ -148,10 +531,11 @@ of the **same `pane list`** the poll already runs, so listing them costs nothing
 
 Two things are true of a shell pane and not of an agent pane:
 
-- **It has a real scrollback ring.** Agent panes run on the alternate screen and report
-  `max_offset_from_bottom: 0` without exception; shell panes here report 0 to 693. A 400-line
-  `recent` read on one measured **10ms end to end through the relay**, against the multi-second
-  harvest the same request triggers on an idle agent pane. Scrollback is worth offering here.
+- **It has a real scrollback ring, and reading it is cheap.** Shell panes here report 0 to 9258.
+  A 400-line `recent` read on one measured **10ms end to end through the relay**, against the
+  multi-second harvest the same request triggers on an idle agent pane. Scrollback is worth
+  offering here. It is no longer what *distinguishes* the two kinds — on herdr 0.8.2 most agent
+  panes report a ring too (see the read-semantics section) — but the cost of reading it still is.
 - **Writing to it is a command.** `respond` on a shell pane skips the question detector entirely —
   there is nothing to detect — and sends `pane send-text` followed by `Enter`. No harness stands
   between the text and the shell. That is why the whole feature is behind `HERDR_SHELL_PANES` and
@@ -317,14 +701,19 @@ The rules are all rules about not lying to the operator:
     was read (a remote host, or a file past `HERDR_TRANSCRIPT_MAX_BYTES`) — say so instead of
     implying the conversation starts there.
 
-### herdr read semantics the relay is built on (live-probed, herdr 0.8.0 / protocol 19)
+### herdr read semantics the relay is built on (live-probed on herdr 0.8.0 / protocol 19; re-probed on 0.8.2 where a bullet says so)
 
 - **`pane.read` is clamped at ~1000 lines, silently.** 1000, 1500 and 5000 all return the same 1000
   rows with `truncated` unchanged. There is no offset/paging parameter, so 1000 lines back from the
   bottom is the deepest any single read can reach.
-- **An agent pane has NO scrollback.** Every agent pane reports `scroll.max_offset_from_bottom: 0`
-  (its TUI runs on the alternate screen); shell panes on the primary screen report thousands. A
-  client can read that field instead of probing.
+- **An agent pane may or may not have scrollback, and no client may assume either way.** This
+  said the opposite — every agent pane reports 0, because its TUI runs on the alternate screen —
+  and it was true of herdr 0.8.0. Re-probed on **0.8.2: 9 of the 10 agent panes on this host
+  report a ring** (151, 434, 594, 938, 1262, 1267, 1400, 1662, 8439) and exactly one reports 0.
+  The field is still the right thing to read instead of probing; what it answers is "could a
+  scrollback read return anything here", which is all `canLoadMore` wants. It is **not** a way to
+  tell an agent pane from a terminal, and the web mirror's read source used to be picked off it
+  believing otherwise — see the follow/held rule in the Web App section.
 - **`recent` + `format: text` on an idle agent pane HARVESTS**: herdr walks the agent's own
   mouse-scroll interface, which measured 6.2s for 200 lines and 12.7s for 400 (~31ms/line), only
   works while the agent is idle, isn't deterministic, and visibly scrolls the operator's terminal up
