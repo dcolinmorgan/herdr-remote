@@ -19,8 +19,10 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title, {
       body: data.body,
-      icon: '/logo.svg',
-      badge: '/logo.svg',
+      // PNG, not the svg: svg notification icons are not reliably supported, and a notification
+      // that silently drops its icon is the one place there is no fallback to look at.
+      icon: '/icon-192.png',
+      badge: '/favicon-32.png',
       tag: 'herdr-blocked',
       renotify: true,
       data: { url: data.url },

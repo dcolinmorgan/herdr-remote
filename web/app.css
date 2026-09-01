@@ -1,0 +1,456 @@
+@font-face {
+  font-family: 'Hack Nerd Font';
+  src: url('./HackNerdFont-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+:root {
+  color-scheme: light dark;
+  /* The app header's height, and the ONE place it is written down. `.terminal-view` is fixed and
+     has to start below it; that top was a hardcoded 49px against a header measuring 69px, so the
+     session view covered the bottom 20px of the header and clipped its two buttons. A height
+     rather than padding, because a header sized by its tallest child is a height nobody can state. */
+  --header-h: 44px;
+  /* Claude Code's own ground, by way of collie's `web/src/index.css`: a neutral grey ramp on
+     #0a0a0a, with the four status hues tuned against each ground rather than one set reused for
+     both. The values are collie's oklch rasterized -- the theme-color metas above and ANSI_COLORS
+     below are hex, and a token that disagreed with a meta shows up as a seam under the URL bar.
+
+     ONE block, not a light palette plus a dark `@media` copy of it: every value is a `light-dark()`
+     pair and the root's own `color-scheme` picks the half. That is what makes the Settings pin two
+     lines of CSS instead of a third copy of the palette, and it puts native UI -- scrollbars, form
+     controls, the caret, the iOS keyboard -- on the right side of the theme for free. */
+  --bg: light-dark(#f5f5f5, #0a0a0a);
+  --surface: light-dark(#ffffff, #171717);
+  --border: light-dark(#e5e5e5, #2e2e2e);
+  --text: light-dark(#0a0a0a, #fafafa);
+  --muted: light-dark(#5d5d5d, #a1a1a1);
+  --green: light-dark(#006a29, #4ac777);
+  --red: light-dark(#ac0010, #ff5e5e);
+  --blue: light-dark(#005bb5, #59aaf8);
+  --orange: light-dark(#804a00, #f4b93c);
+  /* Text ON a saturated fill. A saturated token is DARK in the light theme and LIGHT in the dark
+     one, so no single literal serves both: `color: #fff` on the Send button measured 2.6:1 against
+     the dark theme's blue. This pair measures >= 6.6:1 on all four hues in both themes. */
+  --on-accent: light-dark(#ffffff, #0a0a0a);
+  /* The mirror is dark under BOTH themes: ANSI_COLORS is VS Code's Dark+ set, authored for a dark
+     ground, and it sits beside truecolor an agent emits that no palette can re-theme. */
+  --term-bg: #0a0a0a; --term-text: #fafafa;
+  /* Monospace, the whole app -- this is a window onto a terminal, and a proportional UI wrapped
+     around a monospace pane read as two programs sharing a screen. The bundled Hack Nerd Font is
+     deliberately NOT in this stack: it is 982KB, and today nothing fetches it until a session
+     opens, because a `display: none` element loads no font. Making it the UI font would put that
+     download in front of the first paint of every cold load. It stays first in --font-term, where
+     its Nerd Font glyphs are the reason it is shipped at all. */
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --font-term: 'Hack Nerd Font', 'CaskaydiaCove Nerd Font Mono', 'JetBrainsMono Nerd Font Mono', var(--font-mono);
+}
+/* The two pins, and the whole cost of the switch. An attribute rather than a class so the
+   pre-paint script in <head> can stamp it with one assignment and no bookkeeping, and so Auto is
+   the ABSENCE of a value -- there is no third state to keep in step with localStorage. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+*:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+/* Painted as well as body: with viewport-fit=cover the UA canvas behind body is
+   visible in the insets, and an unpainted one shows the light default. */
+html { background: var(--bg); }
+body { font-family: var(--font-mono); background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); }
+
+.header { height: calc(var(--header-h) + env(safe-area-inset-top, 0px)); padding: env(safe-area-inset-top, 0px) 14px 0; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; position: relative; }
+.header h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
+/* 44px square was the whole of the header's height and then some. The hit target keeps its width
+   -- a thumb misses sideways on this row, where the two buttons sit next to each other, far more
+   than it misses vertically -- and gives up the height the header itself has to fit in. */
+.header button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; min-width: 40px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 8px; transition: color 0.15s, background 0.15s; }
+.header button:hover { color: var(--text); background: var(--border); }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot.pulse { animation: pulse 2s infinite; }
+/* A terminal has no status to colour -- herdr reports agent_status "unknown" for every pane
+   without an agent -- so its dot is hollow rather than a fourth shade of grey competing with
+   Done and Idle. Same size and position, so the rows still line up down the left edge. */
+.dot-hollow { background: none; border: 1.5px solid var(--muted); opacity: 0.7; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.view { flex: 1; overflow-y: auto; }
+
+/* Settings */
+.settings { display: none; padding: 16px; }
+.settings.active { display: block; }
+.settings h2 { font-size: 0.9rem; margin-bottom: 12px; }
+.setting-group { background: var(--surface); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+.setting-group label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 6px; }
+.setting-group input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+.setting-group select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+.setting-group .hint { font-size: 0.65rem; color: var(--muted); margin-top: 4px; }
+.setting-group button { margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--green); color: var(--on-accent); font-weight: 600; font-size: 13px; cursor: pointer; }
+/* Appearance: one row, three exclusive choices, so a `radiogroup` rather than three `aria-pressed`
+   toggles -- which would announce three independent switches, one of which happens to be on. The
+   selected one fills with the INVERTED NEUTRAL, the same pair every toggle in the session view uses
+   and the only one guaranteed to contrast under both themes; blue here would read as the selection
+   colour the chips already own. Buttons override .setting-group button's margin, which is written
+   for a lone Connect button at the bottom of a group. */
+.theme-seg { display: flex; gap: 6px; margin-top: 2px; }
+.theme-seg button { flex: 1; margin-top: 0; padding: 0; min-height: 32px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.theme-seg button[aria-checked="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+
+
+/* Agent list */
+.agents { padding: 12px; }
+.section-header { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin: 16px 0 8px; display: flex; align-items: center; gap: 5px; }
+.agent { background: var(--surface); border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; cursor: pointer; border: 1px solid var(--border); transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
+.agent:hover { border-color: color-mix(in srgb, var(--text) 20%, transparent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.agent:active { transform: scale(0.99); box-shadow: none; }
+.agent .dot { width: 10px; height: 10px; }
+.agent.blocked { border-color: var(--red); background: color-mix(in srgb, var(--red) 5%, var(--surface)); }
+.workspace-card { border-color: color-mix(in srgb, var(--text) 10%, transparent); }
+.count-pill { display: inline-block; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--text) 8%, transparent); font-size: 0.65rem; }
+.chip-strip { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 8px 12px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.chip-strip::-webkit-scrollbar { display: none; }
+.chip-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
+.chip { padding: 6px 14px; border-radius: 9999px; border: none; font-size: 0.8rem; font-weight: 500; white-space: nowrap; cursor: pointer; position: relative; transition: all 0.15s; background: var(--border); color: var(--muted); }
+.chip.active { background: var(--blue); color: var(--on-accent); }
+.chip.alert::after { content: ''; position: absolute; top: -2px; right: -2px; width: 8px; height: 8px; border-radius: 50%; background: var(--red); border: 2px solid var(--bg); }
+.chip:active { transform: scale(0.95); }
+.chip-add { border: 2px dashed var(--border); background: transparent; color: var(--muted); font-size: 1rem; padding: 4px 12px; }
+.chip-add:hover { border-color: var(--blue); color: var(--blue); }
+
+/* Session picker. The wrapper is the positioning context so the menu hangs
+   under the button rather than the header's left edge. */
+.session-picker { position: relative; display: inline-flex; align-items: center; }
+/* Pill styling borrowed from .chip so it reads as a control at rest; the id
+   beats .header button's 44px icon-button sizing. */
+#sessionSelector { min-width: 0; min-height: 0; padding: 5px 12px; border-radius: 9999px; background: var(--border); color: var(--muted); font-size: 0.8rem; font-weight: 500; white-space: nowrap; }
+#sessionSelector:hover { color: var(--text); }
+#sessionSelector:active { transform: scale(0.95); }
+/* 60 sits above .terminal-view (50), which starts below the header and so must
+   not cover a menu hanging off it. Deliberately below #cmdPalette (100) and
+   #contextMenu (200) — those are modals that should cover a dropdown. */
+#sessionMenu { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 60; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 4px; min-width: 160px; font-size: 0.8rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+#sessionMenu [role="option"] { padding: 6px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+#sessionMenu [role="option"]:hover { background: var(--border); }
+/* Fixed width so names align whether or not the row is ticked. */
+.session-mark { display: inline-block; width: 1.1em; }
+/* Where herdr itself is pointed. Drawn inside the chip so it reads the same on the selected one. */
+.chip.focused { box-shadow: inset 0 0 0 1.5px var(--green); }
+/* One dot per chip, from worstTriage -- so a chip and the row it stands for cannot disagree about
+   what a colour means. Absent, not grey, when the set holds no agent. */
+.chip-dot { width: 6px; height: 6px; display: inline-block; margin-right: 5px; vertical-align: 1px; }
+/* Recent's fold and direction. Pushed to the far end of the heading, and deliberately plain: the
+   three attention sections have no controls at all, and that difference is what marks Recent as the
+   only one you may put away. */
+.section-header .sec-count { opacity: 0.6; font-weight: 400; }
+.section-header .sec-btn { margin-left: auto; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.8rem; line-height: 1; padding: 2px 4px; font-family: inherit; }
+.section-header .sec-btn + .sec-btn { margin-left: 0; }
+.section-header .sec-btn:hover { color: var(--text); }
+/* A tab's heading inside one space. Lighter than a section header: it groups, it does not triage. */
+.tab-heading { font-size: 0.7rem; font-weight: 600; color: var(--muted); margin: 14px 0 6px; display: flex; align-items: center; gap: 5px; }
+.empty-tab { font-size: 0.7rem; color: var(--muted); padding: 2px 2px 8px; }
+/* Line one of a card, as two spans rather than one string: at 390px a joined `project · tab`
+   tail-truncates to `project · t…`, and the characters that survive are the ones every row in that
+   project shares. Only the project may shrink; the tab is the discriminator. */
+.agent .project { display: flex; align-items: baseline; min-width: 0; }
+.agent .pane-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* `white-space: pre` because the separator's spaces are inside the span, and a flex container
+   collapses them -- the title rendered `herdr-remote-dev·1`. */
+.agent .pane-sep { flex: none; color: var(--muted); white-space: pre; }
+.agent .pane-tab { flex: none; color: var(--muted); }
+.agent .pane-host { flex: none; margin-left: 4px; }
+/* Ready · unseen: finished while you were not looking. Card chrome like `blocked`, because both are
+   sections a human is required in, and the same accent the section header and the chip use. */
+.agent.ready { border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); background: color-mix(in srgb, var(--orange) 5%, var(--surface)); }
+
+.agent.focused { border-color: color-mix(in srgb, var(--green) 55%, var(--border)); background: color-mix(in srgb, var(--green) 4%, var(--surface)); }
+.agent .info { flex: 1; min-width: 0; }
+.agent .project { font-size: 0.9rem; font-weight: 500; }
+.agent .meta { font-size: 0.7rem; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Terminal view */
+.terminal-view { display: none; flex-direction: column; position: fixed; inset: 0; top: calc(var(--header-h) + env(safe-area-inset-top, 0px)); left: env(safe-area-inset-left, 0px); right: env(safe-area-inset-right, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); background: var(--bg); z-index: 50; }
+.terminal-view.active { display: flex; }
+/* Every child pinned to 28px, the same rule the history bar runs on and for the same reason: a
+   flex row is as tall as its tallest child, and this one was 55px because `back` carried a 1.4rem
+   font-size around a 20px icon -- text metrics for a button with no text in it. 55px -> 39px. */
+.term-header { padding: 5px 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.term-header > * { height: 28px; flex-shrink: 0; display: flex; align-items: center; }
+.term-header .back { background: none; border: none; color: var(--blue); cursor: pointer; padding: 0 6px; justify-content: center; }
+/* display:block, after the rule above, so the ellipsis works -- a flex child clips without one. */
+.term-header .title { display: block; flex: 1 1 auto; min-width: 0; font-size: 0.8rem; font-weight: 500; line-height: 28px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-header .refresh-btn { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 2px; justify-content: center; }
+/* Search and History open a panel; Refresh is a one-shot. Only the two toggles carry a pressed
+   state, and they carry it as a filled chip rather than a colour shift -- an icon that only
+   changes hue reads as "hovered", not as "this panel is open", and on a phone there is no hover
+   state to compare it against. Driven by `aria-pressed` so the pixels and the screen reader
+   cannot disagree, and the off state keeps a transparent border so nothing shifts when it fills. */
+.term-header .icon-toggle { background: none; border: 1px solid transparent; border-radius: 7px; color: var(--muted); cursor: pointer; padding: 4px; display: flex; align-items: center; }
+.term-header .icon-toggle:hover, .term-header .refresh-btn:hover { color: var(--text); }
+.term-header .icon-toggle[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+/* The open pane's reachable neighbours, split by the relation that matters: a tabmate is a pane
+   the operator has on screen beside this one, anything else in the workspace is a tab away. In
+   normal flow rather than absolute, so the history and search panels cover it the way they cover
+   the output. Measured on a real host: at most three tabmates and at most five panes in a
+   workspace, so chips are the whole control -- no menu -- and the row is absent for three of ten
+   agent panes and for every pane when HERDR_SHELL_PANES is off. */
+/* ONE row for both levels. They were two rows of 33px, 66px of a 390x844 screen, and 4 of the 10
+   agent panes on the measured host paid for both -- for a row that is at most three chips and a row
+   that is at most five. The scroll, the padding and the border live on the outer row now; the two
+   groups inside it are plain flex boxes that keep their own ids, their own aria-labels and their
+   own "hidden when it holds no choice" rule. overscroll-behavior for the reason .term-content has
+   it: at either end of a horizontal drag the chain reaches the document and hands the browser its
+   back gesture, which unloads the app. */
+.term-sibs { display: flex; align-items: center; gap: 8px; overflow-x: auto; overscroll-behavior: contain; padding: 5px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.term-sibs::-webkit-scrollbar { display: none; }
+.term-siblings { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* The only thing separating the two levels now that they share a row -- 1px against the 40px a
+   written label cost, and shape still says the rest: a tab chip is squarer and carries no id tag. */
+.sib-sep { width: 1px; height: 15px; background: var(--border); flex-shrink: 0; }
+/* A tab is squarer than a pane, which -- with the 1px rule between the groups and the id tag a tab
+   has not got -- is what tells the two levels apart now that they share a row and neither carries a
+   written label. Measured at 390x844: a `Tabs` / `Panes` label cost 40px of the row including its
+   gap, and 4 of the 5 rows that scrolled on the real host overflowed by LESS than that -- 3px, 13px,
+   17px, 41px. The name is on each group's aria-label, where it costs nothing and is still announced. */
+.term-sib.sib-tab { border-radius: 6px; }
+/* An explicit height rather than padding: a chip naming a pane by its activity title carries CJK,
+   whose glyphs are taller than latin at the same font-size, and the row grew 2px whenever one
+   showed up. The row's height is set by its tallest chip, so it has to be the chip that is fixed. */
+.term-sib { display: flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px; border-radius: 9999px; border: 1px solid var(--border); background: none; color: var(--text); font-size: 0.7rem; font-family: inherit; white-space: nowrap; cursor: pointer; }
+/* A title can be a sentence -- `分析主目录文件状态并规划迁移` is one of the two on the measured host, and
+   its chip came to 205px of a 390px row -- so one chip is not allowed to become the whole strip.
+   32vw bites on those and on nothing else: the longest directory name here, `herdr-remote-dev`,
+   fits inside it. The whole name stays in the tooltip. */
+.term-siblings .sib-name { max-width: min(32vw, 260px); overflow: hidden; text-overflow: ellipsis; }
+.term-sib .dot { width: 6px; height: 6px; }
+.term-sib:active { transform: scale(0.95); }
+/* Blue is selection everywhere else on this page (the Keys/123 switch, the Tools filter), and the
+   chip you are standing in IS the selection -- so the open pane and its tab are filled. That fill
+   is also the anchor the strip used to lack: it listed the OTHER panes and left the one you were
+   in unmarked, so a row of chips had no `you are here` in it at all. */
+.term-sib[aria-current="true"] { background: var(--blue); border-color: var(--blue); color: var(--on-accent); }
+.term-sib[aria-current="true"] .sib-tag { color: color-mix(in srgb, var(--on-accent) 72%, transparent); }
+/* The pane id's own suffix, hung off the name. 28 of the 30 panes on the measured host carry no
+   operator label at all, so the name above is routinely shared by every chip in the strip -- three
+   shells sitting in `herdr`, three claudes in one tab -- and this is the only part that separates
+   them. Small and muted, because it is a handle rather than a name. */
+.term-siblings .sib-tag { color: var(--muted); font-size: 0.6rem; font-variant-numeric: tabular-nums; }
+/* top is set from the header's real height when the panel opens (positionHistoryPanel); 39px is
+   the phone-sized fallback for a first paint before JS runs -- the header's own 28px child plus
+   its 5px of padding and its border. */
+.term-history { position: absolute; top: 39px; left: 0; right: 0; bottom: 0; background: var(--surface); display: flex; flex-direction: column; z-index: 10; }
+/* ONE row. The panel used to stack a title bar over a filter bar -- measured 80px of a 390x844
+   screen, 9.5%, spent before a single turn had rendered -- and the filter, which is only wanted
+   while you are looking for something, paid for its input box permanently. The Find chip now opens
+   the input IN PLACE of the title, so the row is the same height either way: 80px -> 35px. */
+.term-history .hist-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.term-history .hist-close { height: 22px; background: none; border: none; padding: 0; display: flex; align-items: center; color: var(--muted); cursor: pointer; }
+.term-history .hist-title { font-size: 0.8rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-history .hist-toggle { height: 22px; background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 0.65rem; padding: 0 8px; cursor: pointer; }
+.term-history .hist-toggle[aria-pressed="true"] { background: var(--blue); border-color: var(--blue); color: var(--on-accent); }
+/* Same 22px as the chips beside it: the row's height is set by its tallest child, so an input
+   even two pixels taller than a chip would make the header jump every time the filter opened. */
+.term-history .hist-find { flex: 1; min-width: 0; height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.75rem; }
+.term-history .hist-find:focus { outline: none; border-color: var(--blue); }
+.term-history .hist-count { font-size: 0.65rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* `overscroll-behavior: contain`, for the same reason `.term-content` carries it: at the top of the
+   list a downward drag chained to the document and handed Chrome its pull-to-refresh, which reloads
+   the whole app -- losing the open session, the panel, and however far back you had paged. The
+   gesture now stops at the panel, exactly as it already did over the terminal. */
+.term-history .hist-body { flex: 1; overflow-y: auto; padding: 12px; font-size: 0.8rem; line-height: 1.5; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.term-history .hist-edge { color: var(--muted); font-size: 0.7rem; text-align: center; padding: 8px 4px; }
+.term-history .hist-more { display: block; width: 100%; padding: 8px; margin-bottom: 8px; background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--blue); font-size: 0.75rem; cursor: pointer; }
+.term-history .hist-more:disabled { color: var(--muted); cursor: default; }
+/* A conversation, not a log: who said what has to read at a glance, so a person's turn is a
+   tinted bubble on its own side and the agent's is full width. Both are markdown (see
+   mdFragment), which is why nothing here sets `white-space: pre-wrap` on the whole block --
+   only fenced code and diffs keep their own whitespace. */
+.term-history .msg { padding: 8px 0; border-bottom: none; }
+.term-history .msg-role { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; display: flex; gap: 6px; align-items: baseline; }
+.term-history .msg-time { font-weight: 400; text-transform: none; color: var(--muted); font-size: 0.65rem; font-variant-numeric: tabular-nums; }
+.term-history .msg-user { color: var(--blue); }
+.term-history .msg-assistant { color: var(--green); }
+.term-history .msg-text { word-break: break-word; }
+.term-history .msg.user { max-width: 88%; margin-left: auto; }
+.term-history .msg.user .msg-role { justify-content: flex-end; }
+.term-history .msg.user .msg-text { background: color-mix(in srgb, var(--blue) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--border)); border-radius: 12px 12px 3px 12px; padding: 8px 11px; }
+.term-history .msg.assistant + .msg.assistant .msg-role { display: none; }
+.term-history .msg.note { max-width: 92%; margin: 0 auto; }
+.term-history .msg.note .msg-text { color: var(--muted); font-size: 0.75rem; border-left: 2px solid var(--border); padding-left: 8px; }
+.term-history .msg-clip { color: var(--orange); font-size: 0.65rem; }
+
+/* Markdown. Measured shares of the assistant text blocks on this machine: inline code 43.8%,
+   bold 32.6%, bullets 11.2%, headings 10.3%, tables 8.7%, ordered lists 5.7%, fences 5.2%. */
+.term-history .msg-text > :first-child { margin-top: 0; }
+.term-history .msg-text > :last-child { margin-bottom: 0; }
+.term-history .msg-text p { margin: 0 0 8px; line-height: 1.5; white-space: pre-wrap; }
+.term-history .msg-text .md-h { font-weight: 600; margin: 12px 0 6px; line-height: 1.3; }
+.term-history .msg-text .md-h1, .term-history .msg-text .md-h2 { font-size: 0.95rem; }
+.term-history .msg-text .md-h3 { font-size: 0.88rem; }
+.term-history .msg-text .md-h4, .term-history .msg-text .md-h5, .term-history .msg-text .md-h6 { font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.term-history .msg-text code { font-family: var(--font-mono); font-size: 0.82em; background: color-mix(in srgb, var(--text) 8%, transparent); border-radius: 4px; padding: 1px 4px; }
+.term-history .msg-text pre { margin: 0 0 8px; padding: 9px 11px; background: color-mix(in srgb, var(--text) 6%, var(--bg)); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
+.term-history .msg-text pre code { background: none; padding: 0; font-size: 0.75rem; line-height: 1.45; white-space: pre; }
+.term-history .msg-text ul, .term-history .msg-text ol { margin: 0 0 8px; padding-left: 20px; line-height: 1.5; }
+.term-history .msg-text li { margin: 2px 0; }
+.term-history .msg-text blockquote { margin: 0 0 8px; padding: 2px 0 2px 10px; border-left: 3px solid color-mix(in srgb, var(--blue) 40%, var(--border)); color: var(--muted); white-space: pre-wrap; }
+.term-history .msg-text hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.term-history .msg-text a { color: var(--blue); }
+.term-history .msg-text .md-table { overflow-x: auto; margin: 0 0 8px; }
+.term-history .msg-text table { border-collapse: collapse; font-size: 0.78rem; }
+.term-history .msg-text th, .term-history .msg-text td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.term-history .msg-text th { background: color-mix(in srgb, var(--text) 6%, transparent); font-weight: 600; white-space: nowrap; }
+
+/* A tool call still earns one line -- on the biggest session measured here 674 of 794 turns were
+   tool calls -- but a file edit now opens into its diff. */
+.term-history .msg.tool { padding: 2px 0; }
+.term-history .msg.tool .tool-head { display: flex; align-items: baseline; gap: 6px; font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); }
+.term-history details.msg.tool > .tool-head { cursor: pointer; list-style: none; }
+.term-history details.msg.tool > .tool-head::-webkit-details-marker { display: none; }
+.term-history details.msg.tool > .tool-head::before { content: '\25b8'; flex-shrink: 0; transition: transform 0.15s; }
+.term-history details.msg.tool[open] > .tool-head::before { transform: rotate(90deg); }
+.term-history .msg.tool .tool-name { color: var(--text); font-weight: 600; flex-shrink: 0; }
+.term-history .msg.tool.failed .tool-name { color: var(--red); }
+/* min-width: 0 or the target refuses to shrink and pushes the +/- count off the panel. */
+.term-history .msg.tool .tool-target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-history .msg.tool .tool-error { color: var(--red); flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-history .msg.tool .tool-stat { flex-shrink: 0; display: flex; gap: 4px; font-variant-numeric: tabular-nums; }
+.term-history .msg.tool .stat-add { color: var(--green); }
+.term-history .msg.tool .stat-del { color: var(--red); }
+
+/* The diff. Whitespace is load-bearing here, and the +/- marker lives in its own gutter so the
+   code keeps its real indentation. */
+.term-history .diff { margin: 4px 0 8px 14px; border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.45; }
+.term-history .diff-line { white-space: pre; padding-right: 8px; }
+.term-history .diff-line::before { content: attr(data-mark); display: inline-block; width: 1.4em; text-align: center; color: var(--muted); user-select: none; }
+.term-history .diff-line.add { background: color-mix(in srgb, var(--green) 14%, transparent); }
+.term-history .diff-line.add::before { color: var(--green); }
+.term-history .diff-line.del { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.term-history .diff-line.del::before { color: var(--red); }
+.term-history .diff-line.gap { color: var(--muted); text-align: center; background: color-mix(in srgb, var(--text) 4%, transparent); }
+.term-history .diff-line.gap::before { content: none; }
+.term-history .diff-edge { font-size: 0.65rem; color: var(--orange); margin: -4px 0 8px 14px; }
+.term-search { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.term-search input { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
+.term-search input:focus { outline: none; border-color: var(--blue); }
+.term-search span { font-size: 0.7rem; color: var(--muted); min-width: 40px; text-align: center; }
+.term-search button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
+.term-search button:hover { color: var(--text); }
+.search-highlight { background: var(--orange); color: var(--on-accent); border-radius: 2px; }
+.search-current { background: var(--blue); color: var(--on-accent); }
+.ctx-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 8px; cursor: pointer; color: var(--text); font-size: 0.85rem; }
+.ctx-item:hover { background: var(--border); }
+.ctx-item.danger { color: var(--red); }
+.ctx-item svg { flex-shrink: 0; }
+.session-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; background: var(--bg); border: 1px solid var(--border); }
+.session-item:hover { border-color: var(--blue); }
+.session-item.active { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, var(--bg)); }
+.session-name { font-weight: 500; flex: 1; }
+.session-url { font-size: 0.7rem; color: var(--muted); font-family: var(--font-mono); }
+.term-content { flex: 1; min-width: 0; overflow: auto; padding: 10px 12px; background: var(--term-bg); color-scheme: dark; font-family: var(--font-term); font-size: clamp(0.68rem, 2.7vw, 0.8rem); line-height: 1.35; white-space: pre; color: var(--term-text); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.quick-actions { padding: 6px 10px; border-top: 1px solid var(--border); display: flex; gap: 5px; flex-wrap: wrap; flex-shrink: 0; }
+.quick-actions button { padding: 8px 12px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; flex: 1; min-width: 70px; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.btn-yes { background: var(--green); color: var(--on-accent); } .btn-trust { background: var(--blue); color: var(--on-accent); } .btn-no { background: var(--red); color: var(--on-accent); }
+.term-input { border-top: 1px solid var(--border); padding: 5px 10px; display: flex; gap: 5px; background: var(--surface); flex-shrink: 0; }
+.term-input input { flex: 1; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: var(--font-term); min-width: 0; }
+.term-cmd { padding: 6px 11px; border-radius: 6px; border: 1px solid var(--blue); background: var(--bg); color: var(--blue); font-weight: 700; font-size: 14px; flex-shrink: 0; cursor: pointer; }
+.term-send { padding: 6px 13px; border-radius: 6px; border: none; background: var(--blue); color: var(--on-accent); flex-shrink: 0; cursor: pointer; display: flex; align-items: center; }
+/* The keys and quick-action docks are toggles too, and they were the worst of the set: pixel
+   identical before and after a dock slid up right behind them. Same filled-chip vocabulary as the
+   header, so "lit" means the same thing everywhere in the session view. The per-button colour has
+   to live here rather than inline, or it would outrank the pressed rule. */
+.dock-toggle { padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); cursor: pointer; flex-shrink: 0; display: flex; align-items: center; }
+.dock-toggle.dock-quick { color: var(--orange); }
+.dock-toggle.dock-keys { color: var(--muted); }
+.dock-toggle[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+.term-keys { border-top: 1px solid var(--border); padding: 5px 10px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; }
+.nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
+.nav-key:active { background: var(--border); transform: scale(0.97); }
+.mod-key { font-size: 12px; }
+/* The arrow cluster is laid out as the inverted T a keyboard has: `up` shares its column with
+   `down`, and the empty cell is above `left`, where a keyboard has nothing either. The old pad ran
+   Tab/left/down/up across one row and right/Shift/Ctrl across the next, so the arrows neither
+   aligned nor read in any keyboard order.
+
+   Seven columns and TWO rows, sized against a measurement rather than a guess: the same twelve
+   keys were four rows of 44px (271px of an 844px phone), then three rows of five columns (205px),
+   and are 118px now. The pad is aimed at, not read, so spending width buys back the terminal lines
+   that actually matter. Twelve keys need thirteen cells because of the arrows' empty corner, which
+   makes seven the narrowest grid that fits two rows. Enter spans both -- it is the most-pressed
+   key here -- and PgUp/PgDn keep a shared column so paging is one thumb going straight up and
+   down. */
+.keys-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
+  grid-template-areas:
+    "esc  space pgup  .     up    tab   enter"
+    "ctrl shift pgdn  left  down  right enter"; }
+/* Scoped to the pad: the quick-action dock keeps the 44px target, but 12 keys at 44px is a third
+   of a phone screen and the pad is aimed at, not read. */
+.keys-grid .nav-key { min-height: 34px; padding: 4px 2px; font-size: 12px; }
+.keys-grid .mod-key { font-size: 11px; }
+/* Both control affordances on one line. The Keys/123 switch used to be a full 44px button row of
+   its own and the Presets disclosure another line under the pad -- 62px of chrome around 122px of
+   keys. */
+.keys-bar { display: flex; align-items: center; gap: 4px; width: 100%; margin-bottom: 4px; }
+.keys-bar .tab-btn { padding: 3px 14px; font-size: 11px; }
+.keys-bar .presets-btn { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; cursor: pointer; padding: 2px 4px; }
+.keys-bar .presets-btn[aria-pressed="true"] { color: var(--blue); }
+#ctrlPresets .ctrl-key { min-height: 32px; padding: 4px 2px; font-size: 11px; }
+.mod-key.armed { background: var(--blue); border-color: var(--blue); color: var(--on-accent); }
+/* Same reasoning as the pad, plus a two-word phrase has to wrap rather than clip at a third of
+   the dock's width. */
+#quickDock .nav-key { min-height: 34px; padding: 4px 4px; font-size: 12px; line-height: 1.2; text-align: center; }
+.tab-btn { padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
+.tab-btn[aria-pressed="true"] { background: var(--blue); color: var(--on-accent); border-color: var(--blue); }
+.ctrl-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer; min-height: 44px; }
+.ctrl-key:active { background: var(--border); }
+.ctrl-key.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 30%, var(--border)); }
+.ctrl-key.confirm { background: var(--red); color: var(--on-accent); border-color: var(--red); }
+.digit-key { padding: 14px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 18px; font-family: var(--font-mono); font-weight: 600; cursor: pointer; min-height: 52px; display: flex; align-items: center; justify-content: center; }
+.digit-key:active { background: var(--border); }
+/* One row of nine, so the pad below the keys grid is 44px rather than 164px. */
+#digitsPad .digit-key { min-height: 34px; padding: 6px 0; font-size: 15px; }
+/* y / a / n -- the single-letter form of the three approval answers rendered above them. These
+   carried no CSS at all: three 11x19px native browser buttons with Chrome's own grey, sitting
+   unthemed in the middle of a dark dock. Measured, not guessed; found while shrinking the rest of
+   the pad. Styling them costs the dock 14px while a pane is blocked, and is the difference between
+   three targets a thumb cannot hit and three it can. */
+#actionKeys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+#actionKeys button { min-height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 13px; font-weight: 700; cursor: pointer; }
+#actionKeys .key-green { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, var(--border)); }
+#actionKeys .key-blue { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 40%, var(--border)); }
+#actionKeys .key-red { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--border)); }
+.queue-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: color-mix(in srgb, var(--text) 5%, var(--bg)); font-family: var(--font-mono); font-size: 12px; font-weight: 500; cursor: pointer; }
+.queue-chip:hover { border-color: var(--red); }
+.queue-chip.danger { border-color: color-mix(in srgb, var(--red) 40%, var(--border)); color: var(--red); }
+
+.empty { text-align: center; color: var(--muted); padding: 60px 20px; font-size: 0.85rem; }
+
+/* Desktop */
+@media (min-width: 768px) {
+  body { max-width: 960px; margin: 0 auto; padding: 0 16px; }
+  /* relative, not static: the history panel is absolutely positioned, and a static parent sent it
+     to the viewport instead -- full-bleed and over the app header. */
+  .terminal-view { position: relative; display: none; }
+  .terminal-view.active { display: flex; height: calc(100dvh - 49px); }
+  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .section-header { grid-column: 1 / -1; }
+  .tab-heading, .empty-tab { grid-column: 1 / -1; }
+  .chip-strip { grid-column: 1 / -1; }
+  .term-content { min-height: 400px; }
+}
+@media (min-width: 1200px) {
+  body { max-width: 1100px; }
+  .agents { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+}
+@media (max-width: 380px) {
+  .header { padding: env(safe-area-inset-top, 0px) 10px 0; }
+  .header h1 { font-size: 0.9rem; }
+  .agents { padding: 8px; }
+  .agent { padding: 12px; }
+  /* The narrow phone only needs the horizontal saving now -- the vertical padding is already
+     at 5px for every width. */
+  .term-input { padding: 5px 8px; gap: 4px; }
+  .term-keys { padding: 5px 8px; }
+}
+@media (pointer: fine) {
+  .quick-actions button { flex: none; min-width: auto; padding: 8px 18px; }
+}

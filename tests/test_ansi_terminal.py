@@ -8,6 +8,8 @@ import sys
 import tempfile
 import types
 import unittest
+
+from web_source import web_source
 from contextlib import contextmanager
 from unittest import mock
 import uuid
@@ -98,12 +100,16 @@ class AnsiTransportTests(unittest.TestCase):
     def test_bundled_font_and_renderer_assets_are_present(self):
         font = WEB_DIR / "HackNerdFont-Regular.woff2"
         license_file = WEB_DIR / "HackNerdFont-LICENSE.txt"
-        page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        # The whole app, not just index.html: ansiFragment lives in web/js/mirror.js now,
+        # and reading only the markup would pass this test by looking in the wrong file.
+        page = web_source()
 
         self.assertGreater(font.stat().st_size, 100_000)
         self.assertIn("Hack", license_file.read_text(encoding="utf-8"))
         self.assertIn("HackNerdFont-Regular.woff2", page)
-        self.assertIn("function ansiFragment", page)
+        # With the open paren: without it this also matches `function ansiFragmentX`, so a
+        # rename would slip through the very check meant to pin the renderer down.
+        self.assertIn("function ansiFragment(", page)
         # Whitespace-tolerant: this pins that the mirror asks for colour, not how the request
         # object happens to be laid out.
         self.assertRegex(page, r"format:\s*'ansi'")
