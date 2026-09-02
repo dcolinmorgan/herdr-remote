@@ -34,6 +34,12 @@ steps). `relay/herdr-remote` is the canonical `start/stop/status` wrapper
 and supports both. The relay itself always stays bound to loopback
 (`relay/herdr_relay.py`) regardless of tunnel backend.
 
+In `aws` mode, `relay/aws-fw-heal.sh` finds the tunnel's EC2 instance by
+its CloudFormation tags (`project=herdr-remote`, `Name=herdr-remote-tunnel`)
+rather than a hard-coded instance/security-group id - do the same in any
+future AWS-tunnel tooling. It only ever adds an SSH ingress `/32`, never
+revokes one; see its header comment before changing that.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.

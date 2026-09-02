@@ -121,18 +121,46 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://herdr-remote.example.com/
 ## Updating the SSH-allowed CIDR
 
 Home IPs on residential ISPs are not always static. If `SshAllowedCidr`
-goes stale, the reverse tunnel will fail to connect. Update the security
-group directly rather than re-running the whole stack:
+goes stale, the reverse tunnel will fail to connect - symptoms: `herdr-remote
+status` shows the URL as not reachable, the rendezvous host answers on 443
+(Caddy is up) but port 22 times out or is refused.
+
+**`herdr-remote start` self-heals this automatically** when run in `aws`
+tunnel mode: it determines your current public IP, checks it against the
+security group's port-22 ingress (discovered from the running instance's
+`project=herdr-remote`/`Name=herdr-remote-tunnel` tags, not a hard-coded
+group id), and adds it if missing - see `relay/aws-fw-heal.sh`. It only
+ever *adds* a `/32`; it never revokes or replaces an existing entry, so old
+addresses accumulate rather than getting silently dropped (clean those up
+by hand if you care to). `herdr-remote status` runs the same check
+read-only and names a stale rule as the cause instead of just recommending
+a restart. Both need the AWS CLI with credentials that can read/modify this
+security group - set `HERDR_AWS_PROFILE`/`HERDR_AWS_REGION` in
+`~/.config/herdr-remote/config.env` if the default credential chain isn't
+already pointed at the right account (see `relay/.env.example`). Without
+usable credentials, both commands say so plainly and continue rather than
+pretending the check passed.
+
+To do the same thing by hand instead:
 
 ```bash
-aws ec2 update-security-group-rule-descriptions-ingress ...  # or:
+aws ec2 authorize-security-group-ingress --group-id sg-xxxx \
+  --ip-permissions IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges="[{CidrIp=$(curl -s ifconfig.me)/32}]"
+```
+
+or, to also update the CloudFormation parameter so a future stack recreate
+starts from the current address (this does not touch the security group
+itself beyond what the command above already did - `update-stack` only
+changes the *next* deploy's baseline):
+
+```bash
 aws cloudformation deploy ... --parameter-overrides SshAllowedCidr="$(curl -s ifconfig.me)/32" ...
 ```
 
-The second form is simplest - CloudFormation only touches the changed
-rule. (This works because `SshAllowedCidr` maps to a security-group rule,
-which CloudFormation updates in place. The host-config parameters below do
-**not** behave this way - read on before you change one.)
+(This works because `SshAllowedCidr` maps to a security-group rule, which
+CloudFormation updates in place - including *revoking* the old CIDR, unlike
+the self-heal above. The host-config parameters below do **not** behave
+this way - read on before you change one.)
 
 ## Changing a parameter after first boot (IMPORTANT)
 

@@ -12,6 +12,8 @@
 # Tunnel backend is chosen by HERDR_TUNNEL_MODE in
 # ~/.config/herdr-remote/config.env: "temp"/"named" (Cloudflare, default)
 # or "aws" (reverse SSH tunnel to infra/aws-tunnel/, see that directory).
+# In aws mode, start/status self-heal and diagnose a stale SSH
+# security-group rule - see relay/aws-fw-heal.sh.
 #
 # This is the canonical copy - keep it in the repo, not only in
 # ~/.local/bin, so it's versioned and reviewable like everything else
@@ -200,6 +202,35 @@ url_is_live() {
   curl -fsS -o /dev/null --max-time 15 -H "Authorization: Bearer $(token_value)" "$u" 2>/dev/null
 }
 
+# aws_fw_check/aws_fw_heal run relay/aws-fw-heal.sh and parse its one-line
+# RESULT=... report into the caller's IP/GROUP/RULE/REASON vars. Both set
+# FW_RESULT to one of ok/added/absent/error. See that script's header for
+# the full output contract - this is the one place that parses it, so
+# start and status cannot drift into reading it two different ways.
+aws_fw_run() {
+  local mode=$1 out
+  out=$("$REPO/relay/aws-fw-heal.sh" "$mode" 2>/dev/null)
+  FW_RESULT=$(printf '%s' "$out" | sed -nE 's/^RESULT=([a-z]+).*/\1/p')
+  FW_IP=$(printf '%s' "$out"     | sed -nE 's/.* IP=([^ ]*).*/\1/p')
+  FW_GROUP=$(printf '%s' "$out"  | sed -nE 's/.* GROUP=([^ ]*).*/\1/p')
+  FW_REASON=$(printf '%s' "$out" | sed -nE 's/.*REASON=(.*)$/\1/p')
+  [ -n "$FW_RESULT" ] || FW_RESULT="error"
+}
+
+# Verify the AWS tunnel's SSH security-group rule and add the current IP
+# when it's missing (never remove or replace an existing one). Runs on
+# every `start` in aws mode, including when already running, because a
+# stale rule is exactly what makes "already running" silently unreachable.
+aws_fw_selfheal() {
+  local out rc
+  out=$("$REPO/relay/aws-fw-heal.sh" heal)
+  rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out"
+  if [ "$rc" -eq 20 ] && [ -z "$out" ]; then
+    echo "herdr-remote: could not verify the SSH firewall rule (see: $REPO/relay/aws-fw-heal.sh check)" >&2
+  fi
+}
+
 cmd_start() {
   [ -d "$REPO" ] || die "repo not found at $REPO (set HERDR_REMOTE_REPO)"
   local tok; tok=$(token_value) || tok=""
@@ -211,6 +242,7 @@ cmd_start() {
   the relay grants whoever reaches it full control of your agents. A token is
   mandatory for this path and there is no way to skip it.
   Set HERDR_RELAY_TOKEN in $SECRETS, or re-run relay/install-service.sh."
+    aws_fw_selfheal
   fi
 
   [ -n "$tok" ] || die "no HERDR_RELAY_TOKEN in $SECRETS (or $CONFIG, or the environment)"
@@ -346,7 +378,27 @@ cmd_status() {
       echo "  URL:     $u  (reachable)"
     else
       echo "  URL:     $u  (NOT reachable - stale, or the tunnel dropped)"
-      echo "           Fix with: herdr-remote stop && herdr-remote start"
+      if [ "$(tunnel_mode)" = "aws" ]; then
+        aws_fw_run check
+        case "$FW_RESULT" in
+          absent)
+            echo "           Cause: your current IP ($FW_IP) is not allowed to SSH into"
+            echo "           the tunnel host (security group $FW_GROUP) - the reverse tunnel"
+            echo "           cannot connect, which is why restarting alone will not fix this."
+            echo "           Fix with: herdr-remote start (adds your current IP automatically)"
+            ;;
+          ok)
+            echo "           SSH firewall rule looks fine ($FW_IP is allowed on $FW_GROUP);"
+            echo "           the cause is something else. Fix with: herdr-remote stop && herdr-remote start"
+            ;;
+          *)
+            echo "           Could not check the SSH firewall rule (${FW_REASON:-unknown reason})."
+            echo "           Fix with: herdr-remote stop && herdr-remote start, or check manually."
+            ;;
+        esac
+      else
+        echo "           Fix with: herdr-remote stop && herdr-remote start"
+      fi
     fi
   else
     echo "  URL:     none recorded"
