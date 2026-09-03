@@ -493,6 +493,14 @@ final class RelayConnection {
         ))
     }
 
+    /// Fires a notification down the same path a blocked agent uses, so the Sound toggle can be
+    /// checked without waiting for one. Silence here means the toggle is off, or macOS has the
+    /// sound switched off for Herdi in System Settings; nothing appearing at all means the app
+    /// was never granted notification permission.
+    func sendTestNotification() {
+        sendNotification(agent: "Herdi", project: "notification test")
+    }
+
     private func sendNotification(agent: String, project: String) {
         let center = UNUserNotificationCenter.current()
         let content = UNMutableNotificationContent()

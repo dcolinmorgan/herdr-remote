@@ -142,6 +142,11 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         )
         menu.addItem(soundItem)
 
+        let testItem = NSMenuItem(title: "Test Notification", action: #selector(sendTestNotification), keyEquivalent: "")
+        testItem.target = self
+        testItem.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: nil)
+        menu.addItem(testItem)
+
         let presentItem = NSMenuItem(title: "Presentation Mode", action: #selector(togglePresentationMode), keyEquivalent: "p")
         presentItem.target = self
         presentItem.state = Quiet.presentationMode ? .on : .off
@@ -194,6 +199,10 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func switchToRelay() {
         relay.connectRelay(to: relay.hostAddress)
         rebuildMenu()
+    }
+
+    @objc private func sendTestNotification() {
+        relay.sendTestNotification()
     }
 
     @objc private func toggleSound() {
