@@ -93,6 +93,33 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        // Interruptions
+        let soundItem = NSMenuItem(title: "Sound", action: #selector(toggleSound), keyEquivalent: "")
+        soundItem.target = self
+        soundItem.state = Quiet.soundEnabled ? .on : .off
+        soundItem.image = NSImage(
+            systemSymbolName: Quiet.soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
+            accessibilityDescription: Quiet.soundEnabled ? "Sound on" : "Sound off"
+        )
+        menu.addItem(soundItem)
+
+        let presentItem = NSMenuItem(title: "Presentation Mode", action: #selector(togglePresentationMode), keyEquivalent: "p")
+        presentItem.target = self
+        presentItem.state = Quiet.presentationMode ? .on : .off
+        presentItem.image = NSImage(
+            systemSymbolName: Quiet.presentationMode ? "eye.slash.fill" : "eye",
+            accessibilityDescription: nil
+        )
+        menu.addItem(presentItem)
+
+        if Quiet.presentationMode {
+            let paused = NSMenuItem(title: "Panel stays closed until you open it", action: nil, keyEquivalent: "")
+            paused.isEnabled = false
+            menu.addItem(paused)
+        }
+
+        menu.addItem(.separator())
+
         // Launch at login
         let launchItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         launchItem.target = self
@@ -130,6 +157,16 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func toggleSound() {
+        Quiet.soundEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func togglePresentationMode() {
+        Quiet.presentationMode.toggle()
+        rebuildMenu()
+    }
+
     @objc private func toggleLaunchAtLogin() {
         let current = UserDefaults.standard.bool(forKey: "launchAtLogin")
         let newValue = !current
@@ -164,12 +201,21 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 let blocked = self.relay.agents.filter { $0.status == .blocked }
 
-                // Update status item icon
+                // Update status item icon. Paused and muted are worth seeing without opening the
+                // menu, but a blocked agent still outranks both.
                 if let button = self.statusItem?.button {
                     if !blocked.isEmpty {
                         button.image = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Blocked")
                         button.image?.size = NSSize(width: 16, height: 16)
                         button.contentTintColor = .systemRed
+                    } else if Quiet.presentationMode {
+                        button.image = NSImage(systemSymbolName: "eye.slash.fill", accessibilityDescription: "Presentation mode")
+                        button.image?.size = NSSize(width: 14, height: 14)
+                        button.contentTintColor = .systemGray
+                    } else if !Quiet.soundEnabled {
+                        button.image = NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: "Sound off")
+                        button.image?.size = NSSize(width: 14, height: 14)
+                        button.contentTintColor = nil
                     } else {
                         button.image = NSImage(systemSymbolName: self.relay.isConnected ? "circle.fill" : "circle", accessibilityDescription: "Herdi")
                         button.image?.size = NSSize(width: 14, height: 14)
@@ -201,7 +247,7 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
                     controller.dismissedBlocked.formIntersection(blockedIds)
 
                     // Auto-pop for a blocked agent you have not already waved away.
-                    if controller.surface == .collapsed,
+                    if controller.surface == .collapsed, Quiet.shouldAutoExpand,
                        let agent = blocked.first(where: { !controller.dismissedBlocked.contains($0.id) }) {
                         withAnimation(NotchAnimation.pop) {
                             controller.surface = .approval(agentId: agent.id)

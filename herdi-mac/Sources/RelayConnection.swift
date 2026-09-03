@@ -498,7 +498,7 @@ final class RelayConnection {
         let content = UNMutableNotificationContent()
         content.title = "Agent Blocked"
         content.body = "\(agent) needs input in \(project)"
-        content.sound = .default
+        content.sound = Quiet.shouldPlaySound ? .default : nil
         center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 }
