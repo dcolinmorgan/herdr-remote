@@ -58,7 +58,9 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         } else if Quiet.presentationMode {
             symbol = "circle.dashed"
             label = "Herdi: presentation mode"
-            tint = .systemGray
+            // nil, not a grey: a fixed colour overrides the menu bar's template rendering and
+            // paints dark-on-dark. The dashed ring is the signal; the colour stays the default.
+            tint = nil
             size = 14
         } else if !Quiet.soundEnabled {
             symbol = relay.isConnected ? "circle.slash.fill" : "circle.slash"
