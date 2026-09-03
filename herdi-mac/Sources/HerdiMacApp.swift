@@ -35,11 +35,48 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "Herdi")
-            button.image?.size = NSSize(width: 14, height: 14)
-        }
+        applyStatusIcon(blocked: false)
         rebuildMenu()
+    }
+
+    /// The status glyph stays a circle in every state, because that is how you find Herdi in a
+    /// row of menu bar icons. Muted and presenting vary the circle -- slashed, dashed -- rather
+    /// than swapping in a speaker or an eye, which read as some other app entirely.
+    private func applyStatusIcon(blocked: Bool) {
+        guard let button = statusItem?.button else { return }
+
+        let symbol: String
+        let label: String
+        let tint: NSColor?
+        let size: CGFloat
+
+        if blocked {
+            symbol = "exclamationmark.circle.fill"
+            label = "Herdi: agent blocked"
+            tint = .systemRed
+            size = 16
+        } else if Quiet.presentationMode {
+            symbol = "circle.dashed"
+            label = "Herdi: presentation mode"
+            tint = .systemGray
+            size = 14
+        } else if !Quiet.soundEnabled {
+            symbol = relay.isConnected ? "circle.slash.fill" : "circle.slash"
+            label = "Herdi: sound off"
+            tint = nil
+            size = 14
+        } else {
+            symbol = relay.isConnected ? "circle.fill" : "circle"
+            label = relay.isConnected ? "Herdi: connected" : "Herdi: disconnected"
+            tint = nil
+            size = 14
+        }
+
+        // A missing symbol would leave the menu bar item invisible, so never ship without one.
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+            ?? NSImage(systemSymbolName: "circle.fill", accessibilityDescription: label)
+        button.image?.size = NSSize(width: size, height: size)
+        button.contentTintColor = tint
     }
 
     private func rebuildMenu() {
@@ -159,11 +196,17 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleSound() {
         Quiet.soundEnabled.toggle()
-        rebuildMenu()
+        refreshChrome()
     }
 
     @objc private func togglePresentationMode() {
         Quiet.presentationMode.toggle()
+        refreshChrome()
+    }
+
+    /// Repaint immediately rather than waiting up to a second for the next poll.
+    private func refreshChrome() {
+        applyStatusIcon(blocked: relay.agents.contains { $0.status == .blocked })
         rebuildMenu()
     }
 
@@ -201,27 +244,7 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 let blocked = self.relay.agents.filter { $0.status == .blocked }
 
-                // Update status item icon. Paused and muted are worth seeing without opening the
-                // menu, but a blocked agent still outranks both.
-                if let button = self.statusItem?.button {
-                    if !blocked.isEmpty {
-                        button.image = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Blocked")
-                        button.image?.size = NSSize(width: 16, height: 16)
-                        button.contentTintColor = .systemRed
-                    } else if Quiet.presentationMode {
-                        button.image = NSImage(systemSymbolName: "eye.slash.fill", accessibilityDescription: "Presentation mode")
-                        button.image?.size = NSSize(width: 14, height: 14)
-                        button.contentTintColor = .systemGray
-                    } else if !Quiet.soundEnabled {
-                        button.image = NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: "Sound off")
-                        button.image?.size = NSSize(width: 14, height: 14)
-                        button.contentTintColor = nil
-                    } else {
-                        button.image = NSImage(systemSymbolName: self.relay.isConnected ? "circle.fill" : "circle", accessibilityDescription: "Herdi")
-                        button.image?.size = NSSize(width: 14, height: 14)
-                        button.contentTintColor = nil
-                    }
-                }
+                self.applyStatusIcon(blocked: !blocked.isEmpty)
 
                 if let controller = self.panelController {
                     let blockedIds = Set(blocked.map(\.id))
