@@ -140,19 +140,53 @@ function shellCard(p, scope) {
 // differ by one character and say nothing about what is inside them, with no mark for the pane you
 // were actually in and no way to reach a tab by name. Now it is herdr's own two levels: the tabs of
 // this space, then the panes of this tab, each named by what the pane can still say for itself.
+//
+// This row is rebuilt from EVERY `agents` snapshot -- that is how a terminal appearing beside the
+// open pane shows up without a reopen -- and a rebuild costs it its scroll position: `replaceChildren`
+// empties both groups, the row's scrollWidth collapses with them, and the browser clamps scrollLeft
+// to 0. Then `scrollSibsToOpenPane` pulled the open chip back into view from there. So a reader who
+// scrolled the row sideways to read the name of a pane at the far end was snapped back to their own
+// pane every two seconds, which reads as a row that refuses to be moved.
+//
+// The offset is the reader's, so it survives a rebuild they did not ask for, and the auto-scroll
+// fires only when the row is NEW to this pane. `sibsAnchoredTo` is what tells that apart from a
+// refresh, and it is dropped in the two places that mean "new": openTerminal's real-switch branch
+// (which covers entering a session from the list, since activePane is null there) and the row
+// disappearing entirely. A re-entry -- openTerminal on the pane already in front of you, which
+// every `blocked` event does -- clears nothing, so a question arriving cannot drag the row back.
+let sibsAnchoredTo = null;
+
 function renderSiblings() {
   const me = paneById(activePane);
   // No workspace id means this relay reports no hierarchy at all, and every pane would look like a
   // sibling of every other one. Nothing is better than a wrong neighbourhood.
   const wsKey = me && me.workspace_id ? agentWorkspaceKey(me) : null;
+  const row = document.getElementById('termSibs');
+  // Read BEFORE the rebuild: the two groups are about to be emptied, and the number is gone with
+  // them. 0 while the session view is still display:none, where the assignment below is a no-op
+  // and openTerminal's own call is what places the row.
+  const kept = row ? row.scrollLeft : 0;
   const tabs = renderTabStrip(me, wsKey);
   const panes = renderPaneStrip(me, wsKey);
   // The separator is the boundary between the two levels, so it exists only when both are there --
   // a rule that hangs off what the two strips actually rendered rather than off a second count.
   const sep = document.getElementById('termSibSep');
   if (sep) sep.style.display = tabs && panes ? 'block' : 'none';
-  const row = document.getElementById('termSibs');
   if (row) row.style.display = tabs || panes ? 'flex' : 'none';
+  if (!(tabs || panes)) { sibsAnchoredTo = null; return; }
+  if (!row) return;
+  row.scrollLeft = kept;
+  anchorSibsToOpenPane();
+}
+
+// Places the row on the open pane, ONCE per pane. `sibsAnchoredTo` is what tells entering a session
+// apart from the refresh that follows it every two seconds -- the first is allowed to move the row,
+// the second is the reader's own scroll and is not. A row with no box cannot be measured, so it is
+// left unanchored for the next caller that has one (openTerminal, after the view is displayed).
+function anchorSibsToOpenPane() {
+  const row = document.getElementById('termSibs');
+  if (!row || !row.clientWidth || sibsAnchoredTo === activePane) return;
+  sibsAnchoredTo = activePane;
   scrollSibsToOpenPane();
 }
 
@@ -339,6 +373,9 @@ function openTerminal(paneId) {
   if (activePane !== paneId) {
     hideHistory(); hideSearch(); clearPaneMirror();
     paneLines = PANE_LINES_BASE; paneFollowing = true; userScrolledUp = false;
+    // A real switch is one of the two moments the sibling row may place itself; dropping the anchor
+    // here is what asks for it, and what keeps a re-entry from asking again.
+    sibsAnchoredTo = null;
   }
   activePane = paneId;
   const a = agents.find(x => x.pane_id===paneId);
@@ -357,10 +394,11 @@ function openTerminal(paneId) {
   if (refreshInterval) clearInterval(refreshInterval);
   document.getElementById('terminalView').classList.add('active');
   // AFTER the view is displayed: renderSiblings ran while it was still display:none, where every
-  // rect is zero and no chip can be found to be off screen. A rebuilt strip loses its scroll
-  // position anyway (replaceChildren empties it, and an empty box has nothing to scroll), so this
-  // is a restore rather than a jump -- it does not fight a reader who scrolled the row by hand.
-  scrollSibsToOpenPane();
+  // rect is zero, no chip can be found to be off screen, and scrollLeft cannot be written either --
+  // so it deliberately left the row unanchored for this call to place. Guarded the same way, since
+  // openTerminal is re-entered on every `blocked` event for the pane already in front of you and a
+  // question arriving must not drag the row back under the reader's thumb.
+  anchorSibsToOpenPane();
   navPush('terminal', hideTerminal);
   const qa = document.getElementById('quickActions');
   const ak = document.getElementById('actionKeys');

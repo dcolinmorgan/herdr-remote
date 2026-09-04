@@ -952,5 +952,163 @@ class WebSessionNavTests(unittest.TestCase):
             self.assertTrue(covered, f"{sel} was reachable through the history panel")
 
 
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebStripScrollTests(unittest.TestCase):
+    """A sideways scroll is the reader's, and it survives a rebuild they did not ask for.
+
+    Three rows on this page scroll sideways and are rebuilt from every `agents` snapshot -- the
+    Spaces strip, the Tabs strip and the session's sibling row. `innerHTML` / `replaceChildren`
+    throw away the elements holding the offset (or collapse the scrollWidth under them, which the
+    browser answers by clamping scrollLeft to 0), so all three snapped back to the beginning every
+    two seconds: the space you had scrolled across the strip to reach walked back off the screen
+    under your thumb, and the sibling row then pulled the OPEN pane back into view on top of that.
+
+    Reached through `handleMessage`, not `render()`, because a snapshot is how it happens in the
+    field and the two are only the same until something between them changes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.page = _shared["browser"].new_page(viewport=PHONE)
+        cls.page.goto(PAGE)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.page.close()
+
+    def setUp(self):
+        self.page.evaluate("""s => {
+          activeWorkspace = null; activeTab = null; activePane = null;
+          hideTerminal();
+          handleMessage(s);
+          window.__snap = s;
+        }""", SNAPSHOT)
+
+    # A strip has to OVERFLOW before it can prove anything, so every test says so first.
+    def scroll_to_end(self, sel):
+        moved = self.page.eval_on_selector(sel, """e => {
+          if (e.scrollWidth <= e.clientWidth + 1) return null;
+          e.scrollLeft = e.scrollWidth;          // the browser clamps it to this row's own end
+          return Math.round(e.scrollLeft);
+        }""")
+        self.assertTrue(moved, f"{sel} did not overflow, so nothing would be proved")
+        return moved
+
+    def scroll_left(self, sel):
+        return self.page.eval_on_selector(sel, "e => Math.round(e.scrollLeft)")
+
+    def snapshot(self):
+        """The 2s tick, as it arrives in the field."""
+        self.page.evaluate("() => handleMessage(window.__snap)")
+
+    def widen_spaces(self):
+        """Four more spaces, each with an agent in it: the strip is only up when the panes span more
+        than one space, and four chips fit across a phone."""
+        self.page.evaluate("""s => {
+          const snap = JSON.parse(JSON.stringify(s));
+          ['payments-gateway', 'search-indexer', 'notifications', 'infra-terraform']
+            .forEach((label, i) => {
+              const id = 'wX' + i;
+              snap.spaces.workspaces.push({workspace_id: id, label, number: 90 + i, focused: false,
+                                           tab_count: 1, pane_count: 1, host: 'local'});
+              snap.spaces.tabs.push({tab_id: id + ':t1', workspace_id: id, label: '1', number: 1,
+                                     focused: false, pane_count: 1, host: 'local'});
+              snap.agents.push({...s.agents[0], pane_id: id + ':pH',
+                                workspace_id: id, tab_id: id + ':t1'});
+            });
+          window.__snap = snap;
+          handleMessage(snap);
+        }""", SNAPSHOT)
+
+    # ------------------------------------------------------------- the herd list
+
+    def test_the_spaces_strip_keeps_its_place_across_a_snapshot(self):
+        self.widen_spaces()
+        moved = self.scroll_to_end('#agents [data-strip="spaces"]')
+        self.snapshot()
+        self.assertEqual(self.scroll_left('#agents [data-strip="spaces"]'), moved,
+                         "the Spaces strip walked back to the beginning on its own")
+
+    def test_the_spaces_strip_keeps_its_place_when_the_space_view_redraws_it(self):
+        """Picking a space is exactly when you have just scrolled the strip, and the space view
+        draws its own copy -- so the offset is kept by WHAT the strip is, not by where it sits."""
+        self.widen_spaces()
+        moved = self.scroll_to_end('#agents [data-strip="spaces"]')
+        self.page.evaluate("selectWorkspace('local|wX3')")
+        self.assertEqual(self.scroll_left('#agents [data-strip="spaces"]'), moved)
+
+    def test_the_tabs_strip_keeps_its_place_across_a_snapshot(self):
+        self.page.evaluate("""s => {
+          const snap = JSON.parse(JSON.stringify(s));
+          for (let i = 0; i < 8; i++) {
+            snap.spaces.tabs.push({tab_id: 'wA:tX' + i, workspace_id: 'wA', label: 'deploy-' + i,
+                                   number: 10 + i, focused: false, pane_count: 1, host: 'local'});
+          }
+          window.__snap = snap;
+          handleMessage(snap);
+          selectWorkspace('local|wA');
+        }""", SNAPSHOT)
+        moved = self.scroll_to_end('#agents [data-strip="tabs"]')
+        self.snapshot()
+        self.assertEqual(self.scroll_left('#agents [data-strip="tabs"]'), moved,
+                         "the Tabs strip walked back to the beginning on its own")
+
+    # --------------------------------------------------------- the session view
+
+    def crowd_the_tab(self, pane="wA:pH"):
+        """Enough panes beside the open one that the shared row overflows a phone -- and all of them
+        AFTER it, since the whole question is what happens to an offset that has the open chip off
+        screen. The strip sorts by pane_id, so `q*` puts every new chip past `pH`."""
+        self.page.evaluate("""p => {
+          const snap = JSON.parse(JSON.stringify(window.__snap));
+          snap.panes.push(...['q4', 'q5', 'q6', 'q7'].map(id => ({
+            ...snap.panes[0], pane_id: 'wA:' + id, label: 'a-longer-shell-name-' + id,
+            workspace_id: 'wA', tab_id: 'wA:t1'})));
+          window.__snap = snap;
+          handleMessage(snap);
+          openTerminal(p);
+        }""", pane)
+
+    def open_chip_is_on_screen(self):
+        return self.page.evaluate("""() => {
+          const row = document.getElementById('termSibs');
+          const chip = row.querySelector('#termSiblings [aria-current="true"]');
+          const c = chip.getBoundingClientRect(), b = row.getBoundingClientRect();
+          return c.left >= b.left - 1 && c.right <= b.right + 1;
+        }""")
+
+    def test_the_sibling_row_keeps_its_place_across_a_snapshot(self):
+        """The reported bug: the row is rebuilt from every snapshot, so a reader scrolling it to
+        read the name of a pane at the far end was snapped back to their own pane every two
+        seconds -- first by the clamp, then by scrollSibsToOpenPane on top of it."""
+        self.crowd_the_tab()
+        moved = self.scroll_to_end("#termSibs")
+        self.assertFalse(self.open_chip_is_on_screen(),
+                         "the open chip is still in view, so nothing would pull the row back")
+        self.snapshot()
+        self.assertEqual(self.scroll_left("#termSibs"), moved,
+                         "the sibling row was dragged back to the open pane")
+
+    def test_a_blocked_event_for_the_open_pane_does_not_drag_the_row_back(self):
+        """`blocked` re-enters openTerminal for the pane already in front of you. A question
+        arriving is the moment you are most likely to be reading the row, not the moment to move
+        it."""
+        self.crowd_the_tab()
+        moved = self.scroll_to_end("#termSibs")
+        self.page.evaluate("""() => handleMessage({type: 'blocked', pane_id: 'wA:pH',
+          agent: 'claude', project: 'api', prompt: 'ok?', options: ['Yes', 'No'], update: true})""")
+        self.assertEqual(self.scroll_left("#termSibs"), moved)
+
+    def test_a_real_switch_still_puts_the_pane_you_moved_to_on_the_screen(self):
+        """The guard must not become a way of switching the anchor off: entering a session, and
+        moving to a pane at the other end of the row, are the two moments it MAY move."""
+        self.crowd_the_tab()
+        self.scroll_to_end("#termSibs")
+        self.page.evaluate("openTerminal('wA:p2')")   # the first chip, off screen at that end
+        self.assertTrue(self.open_chip_is_on_screen(),
+                        "the pane you switched to was left off screen")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
