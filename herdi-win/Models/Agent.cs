@@ -9,6 +9,14 @@ public enum AgentStatus
     Working,
     Blocked,
     Idle,
+
+    /// <summary>
+    /// herdr's own fifth state (its pane vocabulary is idle, working, blocked, done,
+    /// unknown): a harness reported the task complete. Deliberately not folded into
+    /// <see cref="Idle"/> — the two mean different things, and a client that merges them
+    /// can never count completions.
+    /// </summary>
+    Done,
     Unknown,
 }
 
@@ -19,6 +27,7 @@ public static class AgentStatusParser
         "working" => AgentStatus.Working,
         "blocked" => AgentStatus.Blocked,
         "idle" => AgentStatus.Idle,
+        "done" => AgentStatus.Done,
         _ => AgentStatus.Unknown,
     };
 }

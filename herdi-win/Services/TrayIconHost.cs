@@ -264,10 +264,11 @@ public sealed class TrayIconHost : IDisposable
     }
 
     /// <summary>
-    /// Paint the icon for the current state: a red count while agents are blocked, a green
-    /// count while they are working, the bare glyph when neither. This is what the tray icon
-    /// is for now that the panel is hidden by default — the icon is the resting state, so it
-    /// has to carry enough that a glance is worth taking, and the number is what makes it
+    /// Paint the icon for the current state: a red count while agents are blocked, an
+    /// orange count while finished ones are waiting to be collected, a green count while
+    /// they are working, the bare glyph when neither. This is what the tray icon is for
+    /// now that the panel is hidden by default — the icon is the resting state, so it has
+    /// to carry enough that a glance is worth taking, and the number is what makes it
     /// worth clicking.
     ///
     /// Supersedes the two-file swap this used to do (herdi.ico ↔ herdi-blocked.ico), which
@@ -279,13 +280,18 @@ public sealed class TrayIconHost : IDisposable
         LoadGlyphs(Forms.SystemInformation.SmallIconSize.Width);
 
         var blocked = _vm.Blocked.Count;
+        var done = _vm.Done.Count;
         var working = _vm.Working.Count;
 
-        // Blocked outranks working: one is a question addressed to the user, the other is
-        // progress they can ignore.
+        // Blocked outranks done outranks working: one is a question addressed to the user,
+        // the next is work that finished while they looked away, the last is progress they
+        // can ignore — the web app's triage order (needs > ready > working). Done is
+        // herdr's own `done`, never idle renamed: an idle agent is resting, not finished.
         var (badge, count) = blocked > 0
             ? (TrayBadge.Blocked, blocked)
-            : working > 0 ? (TrayBadge.Working, working) : (TrayBadge.None, 0);
+            : done > 0 ? (TrayBadge.Done, done)
+            : working > 0 ? (TrayBadge.Working, working)
+            : (TrayBadge.None, 0);
 
         var state = (badge, Math.Min(count, TrayIconRenderer.MaxShownCount + 1), _glyphSize);
         if (state == _iconState) return;
@@ -317,8 +323,9 @@ public sealed class TrayIconHost : IDisposable
         }
         else
         {
-            var parts = new List<string>(3);
+            var parts = new List<string>(4);
             if (_vm.Blocked.Count > 0) parts.Add($"{_vm.Blocked.Count} waiting on you");
+            if (_vm.Done.Count > 0) parts.Add($"{_vm.Done.Count} finished");
             if (_vm.Working.Count > 0) parts.Add($"{_vm.Working.Count} working");
             if (_vm.Idle.Count > 0) parts.Add($"{_vm.Idle.Count} idle");
             detail = parts.Count > 0 ? string.Join(" · ", parts) : "no agents";

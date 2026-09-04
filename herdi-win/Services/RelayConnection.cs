@@ -377,11 +377,14 @@ public sealed class RelayConnection : INotifyPropertyChanged, IDisposable
                 AgentUnblocked?.Invoke(existing);
             }
 
-            // Finished. Strictly Idle, not merely "no longer Working": Unknown is what a
-            // status we could not parse becomes, so treating it as finished would fire a
-            // notification every time a poll came back garbled. Blocked is not finished
-            // either — AgentBlocked already speaks for that one.
-            if (wasWorking && status == AgentStatus.Idle) AgentFinished?.Invoke(existing);
+            // Finished. Strictly Idle or Done, not merely "no longer Working": Unknown is
+            // what a status we could not parse becomes, so treating it as finished would
+            // fire a notification every time a poll came back garbled. Blocked is not
+            // finished either — AgentBlocked already speaks for that one. Done counts as
+            // finished without becoming Idle: the harness said "complete", and the status
+            // stays Done so the completion stays countable.
+            if (wasWorking && status is AgentStatus.Idle or AgentStatus.Done)
+                AgentFinished?.Invoke(existing);
 
             return existing;
         }

@@ -7,8 +7,8 @@ namespace Herdi.Services;
 
 /// <summary>
 /// What the tray icon's corner badge is saying, in priority order: an agent waiting on an
-/// answer outranks one merely working, and neither is worth a badge when there is nothing
-/// to report.
+/// answer outranks one that finished, which outranks one merely working, and none is worth
+/// a badge when there is nothing to report.
 /// </summary>
 public enum TrayBadge
 {
@@ -17,6 +17,12 @@ public enum TrayBadge
 
     /// <summary>Agents are blocked on the user. Red, and the number is the point.</summary>
     Blocked,
+
+    /// <summary>
+    /// Agents finished (herdr's `done` — a harness-reported completion, which is a
+    /// different status from `idle` and is never folded into it). Orange.
+    /// </summary>
+    Done,
 
     /// <summary>Agents are working. Green, informational.</summary>
     Working,
@@ -69,6 +75,15 @@ internal static class TrayIconRenderer
     // keeps green as what "working" is coloured, which a neutral disc would have spent.
     private static readonly Drawing.Color WorkingFill = Drawing.Color.FromArgb(0x1C, 0x1C, 0x1E);
     private static readonly Drawing.Color WorkingInk = Drawing.Color.FromArgb(0x32, 0xD7, 0x4B);
+
+    // Done is the same trick turned the other way round: an orange disc (the web app's
+    // ready colour) carrying the dark ink. The disc itself must be the signal, because at
+    // 16 px a hue change on a 6 px digit is not one a glance can read; and the ink is dark
+    // rather than white because white on this orange measures under 2:1 while the dark
+    // measures over 8:1. White digits stay exclusive to blocked — the one badge that is a
+    // question rather than a report.
+    private static readonly Drawing.Color DoneFill = Drawing.Color.FromArgb(0xFF, 0x9F, 0x0A);
+    private static readonly Drawing.Color DoneInk = Drawing.Color.FromArgb(0x1C, 0x1C, 0x1E);
 
     /// <summary>
     /// Ring between the disc and whatever is behind it, so the red one reads against a light
@@ -127,12 +142,18 @@ internal static class TrayIconRenderer
         }
 
         var blocked = badge == TrayBadge.Blocked;
-        using (var fillBrush = new Drawing.SolidBrush(blocked ? BlockedFill : WorkingFill))
+        var (fill, ink) = badge switch
+        {
+            TrayBadge.Blocked => (BlockedFill, BlockedInk),
+            TrayBadge.Done => (DoneFill, DoneInk),
+            _ => (WorkingFill, WorkingInk),
+        };
+        using (var fillBrush = new Drawing.SolidBrush(fill))
         {
             g.FillEllipse(fillBrush, inner);
         }
 
-        DrawCount(g, count, inner, blocked ? BlockedInk : WorkingInk);
+        DrawCount(g, count, inner, ink);
     }
 
     private static void DrawCount(Drawing.Graphics g, int count, Drawing.RectangleF disc, Drawing.Color ink)

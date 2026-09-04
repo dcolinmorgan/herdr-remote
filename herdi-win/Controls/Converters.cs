@@ -30,11 +30,14 @@ public static class Palette
         return b;
     }
 
-    /// <summary>Row accent per status, matching AgentSessionRow.accentColor on macOS.</summary>
+    /// <summary>Row accent per status, matching AgentSessionRow.accentColor on macOS.
+    /// Done takes the orange the web app's ready bucket uses — a completion is yours to
+    /// collect, which is not the resting grey an idle pane earns.</summary>
     public static SolidColorBrush ForStatus(AgentStatus status) => status switch
     {
         AgentStatus.Blocked => Red,
         AgentStatus.Working => Green,
+        AgentStatus.Done => Orange,
         _ => Gray,
     };
 }

@@ -211,6 +211,24 @@
                               PreviewMouseLeftButtonUp="OnRowClicked" />
             </StackPanel>
 
+            <!-- FINISHED -->
+            <StackPanel Visibility="{Binding HasDone, Converter={StaticResource BoolToVis}}">
+                <Grid Margin="0,4,0,4">
+                    <StackPanel Orientation="Horizontal">
+                        <Border Width="3" Height="10" CornerRadius="1" Margin="0,0,5,0"
+                                Background="{StaticResource Orange}" />
+                        <TextBlock Text="FINISHED" Style="{StaticResource SectionTitle}"
+                                   Foreground="{StaticResource Orange}" Opacity="0.7" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding Done.Count}" HorizontalAlignment="Right"
+                               Style="{StaticResource SectionTitle}" FontWeight="Medium"
+                               Foreground="{StaticResource Text30}" />
+                </Grid>
+                <ItemsControl ItemsSource="{Binding Done}"
+                              ItemTemplate="{StaticResource AgentRowTemplate}"
+                              PreviewMouseLeftButtonUp="OnRowClicked" />
+            </StackPanel>
+
             <!-- WORKING -->
             <StackPanel Visibility="{Binding HasWorking, Converter={StaticResource BoolToVis}}">
                 <Grid Margin="0,4,0,4">

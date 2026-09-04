@@ -114,6 +114,7 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     public ObservableCollection<Agent> Blocked { get; } = new();
     public ObservableCollection<Agent> Working { get; } = new();
+    public ObservableCollection<Agent> Done { get; } = new();
     public ObservableCollection<Agent> Idle { get; } = new();
 
     public bool IsConnected => _relay.IsConnected;
@@ -127,6 +128,7 @@ public sealed class IslandViewModel : INotifyPropertyChanged
     // Rebuild() raises them alongside the grouping itself.
     public bool HasBlocked => Blocked.Count > 0;
     public bool HasWorking => Working.Count > 0;
+    public bool HasDone => Done.Count > 0;
     public bool HasIdle => Idle.Count > 0;
 
     /// <summary>Tray tooltip / menu header text.</summary>
@@ -452,12 +454,17 @@ public sealed class IslandViewModel : INotifyPropertyChanged
     {
         Sync(Blocked, _relay.Agents.Where(a => a.Status == AgentStatus.Blocked));
         Sync(Working, _relay.Agents.Where(a => a.Status == AgentStatus.Working));
+        Sync(Done, _relay.Agents.Where(a => a.Status == AgentStatus.Done));
+        // Unknown stays with Idle: it is the status we could not read, and hiding the row
+        // entirely would look like the pane vanished. Done is NOT here — it is its own
+        // section above, a completion and not a resting pane.
         Sync(Idle, _relay.Agents.Where(a => a.Status is AgentStatus.Idle or AgentStatus.Unknown));
 
         OnPropertyChanged(nameof(AgentCount));
         OnPropertyChanged(nameof(HasNoAgents));
         OnPropertyChanged(nameof(HasBlocked));
         OnPropertyChanged(nameof(HasWorking));
+        OnPropertyChanged(nameof(HasDone));
         OnPropertyChanged(nameof(HasIdle));
         OnPropertyChanged(nameof(StatusSummary));
 
