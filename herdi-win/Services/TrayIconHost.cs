@@ -41,12 +41,16 @@ public sealed class TrayIconHost : IDisposable
     private readonly Forms.ToolStripMenuItem _errorItem = new() { Enabled = false, Available = false };
     private readonly Forms.ToolStripMenuItem _toastErrorItem = new() { Enabled = false, Available = false };
     private readonly Forms.ToolStripMenuItem _remotesItem = new("Remote Hosts") { Available = false };
+    private readonly Forms.ToolStripMenuItem _relaysItem = new("Relays") { Available = false };
     private readonly Forms.ToolStripMenuItem _launchItem = new("Launch at Login");
     private readonly Forms.ToolStripMenuItem _notifyFinishItem = new("Notify When Finished");
     private readonly Forms.ToolStripMenuItem _versionItem = new();
 
     /// <summary>Host list the submenu was last built from, so it is only rebuilt on change.</summary>
     private string _remotesSignature = string.Empty;
+
+    /// <summary>Same, for the relay list — which carries live state, so it changes more often.</summary>
+    private string _relaysSignature = string.Empty;
 
     /// <summary>Pixel size the glyphs were loaded at, i.e. the tray size at that DPI.</summary>
     private int _glyphSize;
@@ -161,6 +165,9 @@ public sealed class TrayIconHost : IDisposable
         menu.Items.Add(_relayItem);
         menu.Items.Add(_errorItem);
         menu.Items.Add(_toastErrorItem);
+        // Relay mode only, and only worth opening with more than one relay: the line above
+        // already names a single one in full.
+        menu.Items.Add(_relaysItem);
         // Direct mode only: in relay mode the SSH targets are the relay's HERDR_REMOTES and
         // nothing on the wire tells us what they are.
         menu.Items.Add(_remotesItem);
@@ -233,6 +240,7 @@ public sealed class TrayIconHost : IDisposable
         _launchItem.Checked = StartupManager.IsEnabled;
         _notifyFinishItem.Checked = _settings.NotifyOnFinish;
         RefreshRemotes();
+        RefreshRelays();
 
         // Reconnects back off to 30s, so a silent "Disconnected" can sit there for a long
         // time with the reason known but unsaid. Show it under the relay URL.
@@ -256,10 +264,11 @@ public sealed class TrayIconHost : IDisposable
     }
 
     /// <summary>
-    /// Paint the icon for the current state: a red count while agents are blocked, a green
-    /// count while they are working, the bare glyph when neither. This is what the tray icon
-    /// is for now that the panel is hidden by default — the icon is the resting state, so it
-    /// has to carry enough that a glance is worth taking, and the number is what makes it
+    /// Paint the icon for the current state: a red count while agents are blocked, an
+    /// orange count while finished ones are waiting to be collected, a green count while
+    /// they are working, the bare glyph when neither. This is what the tray icon is for
+    /// now that the panel is hidden by default — the icon is the resting state, so it has
+    /// to carry enough that a glance is worth taking, and the number is what makes it
     /// worth clicking.
     ///
     /// Supersedes the two-file swap this used to do (herdi.ico ↔ herdi-blocked.ico), which
@@ -271,13 +280,18 @@ public sealed class TrayIconHost : IDisposable
         LoadGlyphs(Forms.SystemInformation.SmallIconSize.Width);
 
         var blocked = _vm.Blocked.Count;
+        var done = _vm.Done.Count;
         var working = _vm.Working.Count;
 
-        // Blocked outranks working: one is a question addressed to the user, the other is
-        // progress they can ignore.
+        // Blocked outranks done outranks working: one is a question addressed to the user,
+        // the next is work that finished while they looked away, the last is progress they
+        // can ignore — the web app's triage order (needs > ready > working). Done is
+        // herdr's own `done`, never idle renamed: an idle agent is resting, not finished.
         var (badge, count) = blocked > 0
             ? (TrayBadge.Blocked, blocked)
-            : working > 0 ? (TrayBadge.Working, working) : (TrayBadge.None, 0);
+            : done > 0 ? (TrayBadge.Done, done)
+            : working > 0 ? (TrayBadge.Working, working)
+            : (TrayBadge.None, 0);
 
         var state = (badge, Math.Min(count, TrayIconRenderer.MaxShownCount + 1), _glyphSize);
         if (state == _iconState) return;
@@ -309,8 +323,9 @@ public sealed class TrayIconHost : IDisposable
         }
         else
         {
-            var parts = new List<string>(3);
+            var parts = new List<string>(4);
             if (_vm.Blocked.Count > 0) parts.Add($"{_vm.Blocked.Count} waiting on you");
+            if (_vm.Done.Count > 0) parts.Add($"{_vm.Done.Count} finished");
             if (_vm.Working.Count > 0) parts.Add($"{_vm.Working.Count} working");
             if (_vm.Idle.Count > 0) parts.Add($"{_vm.Idle.Count} idle");
             detail = parts.Count > 0 ? string.Join(" · ", parts) : "no agents";
@@ -345,6 +360,36 @@ public sealed class TrayIconHost : IDisposable
         foreach (var remote in remotes)
         {
             _remotesItem.DropDownItems.Add(new Forms.ToolStripMenuItem(remote) { Enabled = false });
+        }
+    }
+
+    /// <summary>
+    /// Keep the Relays submenu in step with what each relay is doing. Shown only with two or
+    /// more: with one, the line above it already prints that relay's URL and the status line
+    /// above *that* already says whether it is connected, so a submenu would be a third way
+    /// to read the same fact.
+    ///
+    /// The signature carries the live state as well as the URLs, unlike RefreshRemotes',
+    /// because this list is what says which relay went down — rebuilding only when the
+    /// configuration changed would freeze every dot at whatever it was on the last save.
+    /// </summary>
+    private void RefreshRelays()
+    {
+        var relays = _vm.Relays;
+        _relaysItem.Available = relays.Count > 1;
+        if (!_relaysItem.Available) return;
+
+        var signature = string.Join("\n", relays.Select(r => $"{r.Url}\t{r.IsConnected}"));
+        if (signature == _relaysSignature && _relaysItem.DropDownItems.Count > 0) return;
+        _relaysSignature = signature;
+
+        _relaysItem.DropDownItems.Clear();
+        foreach (var relay in relays)
+        {
+            // The same ●/○ pair the status line uses, so the two read as one vocabulary.
+            var mark = relay.IsConnected ? "●" : "○";
+            _relaysItem.DropDownItems.Add(
+                new Forms.ToolStripMenuItem($"{mark} {relay.Label}") { Enabled = false });
         }
     }
 

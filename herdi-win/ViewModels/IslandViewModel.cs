@@ -50,7 +50,9 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         ShowPaneCommand = new RelayCommand(p => { if (p is Agent a) ShowPane(a); });
         RefreshPaneCommand = new RelayCommand(_ => RefreshPane());
         SendPaneInputCommand = new RelayCommand(_ => SendPaneInput());
-        CopyPaneIdCommand = new RelayCommand(p => { if (p is Agent a) CopyToClipboard(a.Id); });
+        // PaneId, not Id: Id carries the source prefix that keeps two relays' `w1:p1` apart,
+        // and what someone pastes into a herdr command is the pane's own id.
+        CopyPaneIdCommand = new RelayCommand(p => { if (p is Agent a) CopyToClipboard(a.PaneId); });
         DismissCommand = new RelayCommand(_ => ShowSessionList());
         ShowSessionListCommand = new RelayCommand(_ => ShowSessionList());
         RespondCommand = new RelayCommand(p =>
@@ -99,6 +101,11 @@ public sealed class IslandViewModel : INotifyPropertyChanged
             {
                 OnPropertyChanged(nameof(ConnectionError));
             }
+            else if (e.PropertyName is nameof(RelayConnection.HostAddress))
+            {
+                // "2 relays · 1 connected" moves without the connected flag moving with it.
+                OnPropertyChanged(nameof(SourceSummary));
+            }
         };
         Rebuild();
     }
@@ -107,6 +114,7 @@ public sealed class IslandViewModel : INotifyPropertyChanged
 
     public ObservableCollection<Agent> Blocked { get; } = new();
     public ObservableCollection<Agent> Working { get; } = new();
+    public ObservableCollection<Agent> Done { get; } = new();
     public ObservableCollection<Agent> Idle { get; } = new();
 
     public bool IsConnected => _relay.IsConnected;
@@ -120,6 +128,7 @@ public sealed class IslandViewModel : INotifyPropertyChanged
     // Rebuild() raises them alongside the grouping itself.
     public bool HasBlocked => Blocked.Count > 0;
     public bool HasWorking => Working.Count > 0;
+    public bool HasDone => Done.Count > 0;
     public bool HasIdle => Idle.Count > 0;
 
     /// <summary>Tray tooltip / menu header text.</summary>
@@ -136,16 +145,36 @@ public sealed class IslandViewModel : INotifyPropertyChanged
         : _relay.HostAddress;
 
     /// <summary>
-    /// Why the relay is unreachable, for the tray menu; null while connected or when the
-    /// failure is unknown. A token-guarded relay refuses the handshake with a 401 and is
-    /// otherwise indistinguishable from an unreachable one, so that case gets named
-    /// outright instead of showing the bare WebSocket exception.
+    /// Every relay and whether it is answering, for the tray's Relays submenu. Empty in
+    /// direct mode. <see cref="SourceSummary"/> above folds these into one line and
+    /// <see cref="IsConnected"/> into one dot, neither of which can say <em>which</em> of
+    /// three relays is the one that is down.
+    /// </summary>
+    public IReadOnlyList<RelayStatus> Relays => _relay.Relays;
+
+    /// <summary>
+    /// Why the relay is unreachable, for the tray menu; null while everything is answering
+    /// or when the failure is unknown. A token-guarded relay refuses the handshake with a
+    /// 401 and is otherwise indistinguishable from an unreachable one, so that case gets
+    /// named outright instead of showing the bare WebSocket exception.
+    ///
+    /// Connected does not mean healthy once there is more than one relay: IsConnected is
+    /// true while *any* of them answers, which is right for the dot — two thirds of the herd
+    /// is live — and would otherwise mean a relay could stay silently down for the whole
+    /// session with nothing anywhere saying so. Which one it is lives in the Relays submenu.
     /// </summary>
     public string? ConnectionError
     {
         get
         {
-            if (IsConnected) return null;
+            if (IsConnected)
+            {
+                var relays = _relay.Relays;
+                if (relays.Count < 2) return null;
+                var down = relays.Count(r => !r.IsConnected);
+                return down == 0 ? null : $"{down} of {relays.Count} relays unreachable";
+            }
+
             var error = _relay.LastError;
             if (string.IsNullOrWhiteSpace(error)) return null;
             if (error.Contains("401") || error.Contains("403"))
@@ -425,12 +454,17 @@ public sealed class IslandViewModel : INotifyPropertyChanged
     {
         Sync(Blocked, _relay.Agents.Where(a => a.Status == AgentStatus.Blocked));
         Sync(Working, _relay.Agents.Where(a => a.Status == AgentStatus.Working));
+        Sync(Done, _relay.Agents.Where(a => a.Status == AgentStatus.Done));
+        // Unknown stays with Idle: it is the status we could not read, and hiding the row
+        // entirely would look like the pane vanished. Done is NOT here — it is its own
+        // section above, a completion and not a resting pane.
         Sync(Idle, _relay.Agents.Where(a => a.Status is AgentStatus.Idle or AgentStatus.Unknown));
 
         OnPropertyChanged(nameof(AgentCount));
         OnPropertyChanged(nameof(HasNoAgents));
         OnPropertyChanged(nameof(HasBlocked));
         OnPropertyChanged(nameof(HasWorking));
+        OnPropertyChanged(nameof(HasDone));
         OnPropertyChanged(nameof(HasIdle));
         OnPropertyChanged(nameof(StatusSummary));
 

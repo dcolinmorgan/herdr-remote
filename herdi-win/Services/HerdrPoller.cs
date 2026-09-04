@@ -314,13 +314,16 @@ public sealed partial class HerdrPoller : IDisposable
     /// The pane id as its own host knows it, with the host prefix removed. Matched against
     /// the exact host rather than cut at the first colon — herdr pane ids contain colons
     /// themselves, so the mac app's "drop up to the first colon" truncates local ids.
+    ///
+    /// Reads Agent.PaneId, not Agent.Id: Id gained a source prefix when the client learned
+    /// to watch several relays at once, and PaneId is the half a CLI argument wants.
     /// </summary>
     private static string PaneIdOf(Agent agent)
     {
         var prefix = agent.Host + ":";
-        return agent.IsRemote && agent.Id.StartsWith(prefix, StringComparison.Ordinal)
-            ? agent.Id[prefix.Length..]
-            : agent.Id;
+        return agent.IsRemote && agent.PaneId.StartsWith(prefix, StringComparison.Ordinal)
+            ? agent.PaneId[prefix.Length..]
+            : agent.PaneId;
     }
 
     /// <summary>Port of detect_options (herdr_relay.py:281), including its TOOL_OPTIONS fallback.</summary>

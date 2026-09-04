@@ -7,7 +7,15 @@ using System.Text.Json.Serialization;
 namespace Herdi.Services;
 
 /// <summary>
-/// Persisted client settings. Replaces herdi-mac's UserDefaults, and the relay token
+/// One configured relay: where it is, and the secret it needs to get in. <see cref="Token"/>
+/// is empty for a relay that wants none — a relay started without HERDR_RELAY_TOKEN skips the
+/// check entirely (herdr_relay.py:1926), which is the usual case for a loopback one and must
+/// stay a blank field rather than a required one.
+/// </summary>
+public sealed record RelayEndpoint(string Url, string Token);
+
+/// <summary>
+/// Persisted client settings. Replaces herdi-mac's UserDefaults, and each relay's token
 /// takes the place of its Keychain entry — encrypted with DPAPI (CurrentUser scope)
 /// so it is not sitting in plaintext next to the config.
 /// </summary>
@@ -59,10 +67,91 @@ public sealed class SettingsStore
         set { _data.NotifyOnFinish = value; Save(); }
     }
 
-    public string RelayUrl
+    /// <summary>
+    /// Every relay to watch, in the order they were entered, each with its own token.
+    ///
+    /// All of them are connected at once and their panes merged into one list. This was a
+    /// single URL first — a second relay meant editing the first one out, which does not show
+    /// you two herds, it shows you one and forgets the other — and then a list of URLs behind
+    /// one shared token, which covered the common pair (a tokenless loopback relay beside a
+    /// token-guarded tunnel) and nothing past it: two relays each wanting a <em>different</em>
+    /// token could not both be reached.
+    ///
+    /// <b>The token travels beside its relay, never inside the URL.</b> `?token=` on the query
+    /// string does authenticate — the relay reads it (herdr_relay.py:1931) — but it is the
+    /// wrong channel from this client, because the URL is not just an address here: it is the
+    /// source key stamped on every agent (Agent.SourceId), so a token written into it would be
+    /// copied into every toast's launch argument, printed in the tray, and stored in this file
+    /// in the clear beside the DPAPI blob that exists to prevent exactly that. It is accepted
+    /// as <em>input</em> — see <see cref="SplitToken"/>, so a share link can be pasted whole —
+    /// and taken straight back out.
+    ///
+    /// Two older shapes are read once and migrated: RelayUrls behind one RelayTokenProtected,
+    /// and before that a single RelayUrl. Both are nulled on the next save, the same way
+    /// IslandExpandedOpacity is — Save omits nulls, so the file drops them for good.
+    /// </summary>
+    public IReadOnlyList<RelayEndpoint> Relays
     {
-        get => string.IsNullOrWhiteSpace(_data.RelayUrl) ? DefaultRelayUrl : _data.RelayUrl!;
-        set { _data.RelayUrl = value; Save(); }
+        get
+        {
+            if (_data.Relays is { Count: > 0 })
+            {
+                return Normalize(_data.Relays.Select(r =>
+                    new RelayEndpoint(r.Url ?? string.Empty, Unprotect(r.TokenProtected))));
+            }
+
+            var shared = Unprotect(_data.RelayTokenProtected);
+            if (_data.RelayUrls is { Count: > 0 })
+                return Normalize(_data.RelayUrls.Select(url => new RelayEndpoint(url, shared)));
+            if (!string.IsNullOrWhiteSpace(_data.RelayUrl))
+                return Normalize(new[] { new RelayEndpoint(_data.RelayUrl!, shared) });
+            return new[] { new RelayEndpoint(DefaultRelayUrl, shared) };
+        }
+        set
+        {
+            _data.Relays = Normalize(value)
+                .Select(r => new RelayData { Url = r.Url, TokenProtected = Protect(r.Token) })
+                .ToList();
+            _data.RelayUrls = null;
+            _data.RelayUrl = null;
+            _data.RelayTokenProtected = null;
+            Save();
+        }
+    }
+
+    /// <summary>
+    /// Pull a `?token=` off a relay URL: returns the URL without it, and the value it carried
+    /// (empty when there was none). Other query parameters are put back.
+    ///
+    /// Public because the settings dialog does this the moment the URL box loses focus, so a
+    /// pasted share link visibly splits into the two fields rather than being rewritten behind
+    /// the operator's back at save time.
+    ///
+    /// A string that is not a URL at all is handed back untouched. Validating one is the
+    /// dialog's job; silently rewriting a typo here would only make it harder to see.
+    /// </summary>
+    public static (string Url, string Token) SplitToken(string url)
+    {
+        var trimmed = url.Trim();
+        var mark = trimmed.IndexOf('?');
+        if (mark < 0) return (trimmed, string.Empty);
+
+        var token = string.Empty;
+        var others = new List<string>();
+        foreach (var pair in trimmed[(mark + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = pair.IndexOf('=');
+            var key = eq < 0 ? pair : pair[..eq];
+            if (string.Equals(key, "token", StringComparison.OrdinalIgnoreCase))
+            {
+                token = eq < 0 ? string.Empty : Uri.UnescapeDataString(pair[(eq + 1)..]);
+                continue;
+            }
+            others.Add(pair);
+        }
+
+        var rest = others.Count == 0 ? string.Empty : "?" + string.Join("&", others);
+        return (trimmed[..mark] + rest, token);
     }
 
     /// <summary>
@@ -89,13 +178,6 @@ public sealed class SettingsStore
     {
         get => _data.HerdrPath ?? string.Empty;
         set { _data.HerdrPath = value.Trim(); Save(); }
-    }
-
-    /// <summary>Shared secret for relay auth (HERDR_RELAY_TOKEN). Empty when unset.</summary>
-    public string RelayToken
-    {
-        get => Unprotect(_data.RelayTokenProtected);
-        set { _data.RelayTokenProtected = Protect(value); Save(); }
     }
 
     public bool LaunchAtLogin
@@ -136,6 +218,28 @@ public sealed class SettingsStore
     {
         get => _data.ShortcutInstalled;
         set { _data.ShortcutInstalled = value; Save(); }
+    }
+
+    /// <summary>
+    /// Trim, split any `?token=` out of the URL, drop blanks, and keep the first of any
+    /// duplicate URL. Run on the way in <em>and</em> on the way out, so a settings.json edited
+    /// by hand cannot leave a token sitting in a URL that is about to become a source key.
+    ///
+    /// A row's own token wins over one found in its URL: by the time the dialog saves, the
+    /// inline one has already been moved into that field, so a value still in the URL here is
+    /// the older of the two.
+    /// </summary>
+    private static List<RelayEndpoint> Normalize(IEnumerable<RelayEndpoint> relays)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var kept = new List<RelayEndpoint>();
+        foreach (var relay in relays)
+        {
+            var (url, inline) = SplitToken(relay.Url);
+            if (url.Length == 0 || !seen.Add(url)) continue;
+            kept.Add(new RelayEndpoint(url, relay.Token.Length > 0 ? relay.Token : inline));
+        }
+        return kept;
     }
 
     /// <summary>Trim, drop blanks, and keep the first of any duplicate host.</summary>
@@ -224,8 +328,7 @@ public sealed class SettingsStore
     private sealed class Data
     {
         public string? Mode { get; set; }
-        public string? RelayUrl { get; set; }
-        public string? RelayTokenProtected { get; set; }
+        public List<RelayData>? Relays { get; set; }
         public List<string>? Remotes { get; set; }
         public string? HerdrPath { get; set; }
         public bool LaunchAtLogin { get; set; }
@@ -238,5 +341,19 @@ public sealed class SettingsStore
         // Save omits nulls, so the next write drops them from the file for good.
         public double? IslandCollapsedOpacity { get; set; }
         public double? IslandExpandedOpacity { get; set; }
+
+        // Written by the builds that kept relays as a list of URLs behind one shared token,
+        // and by the single-URL builds before them. Read once into Relays and nulled on the
+        // next save, same treatment as the two above.
+        public List<string>? RelayUrls { get; set; }
+        public string? RelayTokenProtected { get; set; }
+        public string? RelayUrl { get; set; }
+    }
+
+    /// <summary>One relay as it sits in the file: the URL in the clear, the token under DPAPI.</summary>
+    private sealed class RelayData
+    {
+        public string? Url { get; set; }
+        public string? TokenProtected { get; set; }
     }
 }

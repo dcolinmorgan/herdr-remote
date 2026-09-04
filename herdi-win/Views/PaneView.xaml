@@ -43,6 +43,8 @@
                            VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis"
                            MaxWidth="220" />
+                <ContentControl Style="{StaticResource SourceTag}"
+                                DataContext="{Binding ActiveAgent}" />
             </StackPanel>
 
             <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" VerticalAlignment="Center">
