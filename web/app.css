@@ -193,29 +193,40 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
    the output. Measured on a real host: at most three tabmates and at most five panes in a
    workspace, so chips are the whole control -- no menu -- and the row is absent for three of ten
    agent panes and for every pane when HERDR_SHELL_PANES is off. */
-/* ONE row for both levels. They were two rows of 33px, 66px of a 390x844 screen, and 4 of the 10
-   agent panes on the measured host paid for both -- for a row that is at most three chips and a row
-   that is at most five. The scroll, the padding and the border live on the outer row now; the two
-   groups inside it are plain flex boxes that keep their own ids, their own aria-labels and their
-   own "hidden when it holds no choice" rule. overscroll-behavior for the reason .term-content has
-   it: at either end of a horizontal drag the chain reaches the document and hands the browser its
-   back gesture, which unloads the app. */
-.term-sibs { display: flex; align-items: center; gap: 8px; overflow-x: auto; overscroll-behavior: contain; padding: 5px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-.term-sibs::-webkit-scrollbar { display: none; }
-.term-siblings { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-/* The only thing separating the two levels now that they share a row -- 1px against the 40px a
-   written label cost, and shape still says the rest: a tab chip is squarer and carries no id tag. */
-.sib-sep { width: 1px; height: 15px; background: var(--border); flex-shrink: 0; }
-/* A tab is squarer than a pane, which -- with the 1px rule between the groups and the id tag a tab
-   has not got -- is what tells the two levels apart now that they share a row and neither carries a
-   written label. Measured at 390x844: a `Tabs` / `Panes` label cost 40px of the row including its
-   gap, and 4 of the 5 rows that scrolled on the real host overflowed by LESS than that -- 3px, 13px,
-   17px, 41px. The name is on each group's aria-label, where it costs nothing and is still announced. */
-.term-sib.sib-tab { border-radius: 6px; }
+/* ONE row, ONE scroller, and the tab's name sticks. They were two rows of 33px, 66px of a 390x844
+   screen, and 4 of the 10 agent panes on the measured host paid for both; then they were one row
+   split into two scrollers, which turned the saving into a width fight -- 2 tabs measure 135px of a
+   370px row and 3 measure 253px, 68%, against a pane chip that can be 178px on its own. One list
+   ends the fight: the panes of tab 1, then the panes of tab 2, each group behind its tab's name,
+   with the whole row's width available to whichever chip needs it.
+   The name is `position: sticky` INSIDE its own group, which is what makes a single scroller safe:
+   held by its containing block, each name is pinned to the left edge only while its own panes are on
+   screen, and the next group pushes it out rather than stacking on top of it. It needs an opaque
+   background for the chips scrolling underneath, and `aria-current`'s fill still wins on specificity.
+   overscroll-behavior for the reason .term-content has it: at either end of a horizontal drag the
+   chain reaches the document and hands the browser its back gesture, which unloads the app. */
+.term-sibs { display: flex; align-items: center; overflow: hidden; padding: 5px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.term-siblings { display: flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.term-siblings::-webkit-scrollbar { display: none; }
+.sib-group { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+/* Where one tab's panes end and the next tab's begin -- 1px, drawn only between groups, so it is
+   never a mark against nothing. It scrolls with the row: it belongs to the boundary, not the edge. */
+.sib-group + .sib-group { margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--border); }
+
+/* A tab is squarer than a pane. With the 1px rule between groups and the id tag a tab has not got,
+   that is what tells a group's name from the panes behind it -- no `Tabs` / `Panes` heading, which
+   measured 40px of the row including its gap at 390x844, more than 4 of the 5 rows that scrolled on
+   the real host overflowed by (3px, 13px, 17px, 41px). What the shape says is announced through the
+   chip's own aria-label, where it costs nothing. */
+/* Squarer, and PINNED: `.term-sib.sib-tab` rather than `.sib-tab` because `.term-sib`'s own
+   `background: none` matches at the same specificity and comes later in the file -- a transparent
+   sticky chip lets the pane chips scroll through it, which renders as two names on top of each
+   other. `aria-current`'s fill still wins over this: same specificity, later rule. */
+.term-sib.sib-tab { border-radius: 6px; position: sticky; left: 0; z-index: 1; background: var(--bg); }
 /* An explicit height rather than padding: a chip naming a pane by its activity title carries CJK,
    whose glyphs are taller than latin at the same font-size, and the row grew 2px whenever one
    showed up. The row's height is set by its tallest chip, so it has to be the chip that is fixed. */
-.term-sib { display: flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px; border-radius: 9999px; border: 1px solid var(--border); background: none; color: var(--text); font-size: 0.7rem; font-family: inherit; white-space: nowrap; cursor: pointer; }
+.term-sib { display: flex; align-items: center; gap: 5px; flex-shrink: 0; height: 22px; padding: 0 9px; border-radius: 9999px; border: 1px solid var(--border); background: none; color: var(--text); font-size: 0.7rem; font-family: inherit; white-space: nowrap; cursor: pointer; }
 /* A title can be a sentence -- `分析主目录文件状态并规划迁移` is one of the two on the measured host, and
    its chip came to 205px of a 390px row -- so one chip is not allowed to become the whole strip.
    32vw bites on those and on nothing else: the longest directory name here, `herdr-remote-dev`,

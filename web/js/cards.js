@@ -132,21 +132,43 @@ function shellCard(p, scope) {
   </div>`;
 }
 
-// The two rows under the session header, both drawn from the snapshot already in hand.
+// The row under the session header: every pane in this space, in herdr's order, grouped by tab.
 //
-// What replaced what: this was one flat row of the OTHER panes in the workspace, tagged `Tab` and
-// `Space`, each chip named `label || pane_id`. On the host this was measured against, 28 of the 30
-// panes carry no operator label -- so that row read `w6:pH  w6:pQ  w6:pR`, three chips whose names
-// differ by one character and say nothing about what is inside them, with no mark for the pane you
-// were actually in and no way to reach a tab by name. Now it is herdr's own two levels: the tabs of
-// this space, then the panes of this tab, each named by what the pane can still say for itself.
+// What replaced what, twice. It was one flat row of the OTHER panes in the workspace, tagged `Tab`
+// and `Space`, each chip named `label || pane_id` -- and on the host this was measured against, 28
+// of the 30 panes carry no operator label, so that row read `w6:pH  w6:pQ  w6:pR`: three chips whose
+// names differ by one character, no mark for the pane you were standing in, and no way to reach a
+// tab by name. That became herdr's own two levels, the tabs of the space beside the panes of the
+// current tab -- which put a WIDTH FIGHT in a 370px row. Two tabs cost 135px of it and three cost
+// 253px, 68%, against a pane chip that can be 178px on its own, so a multi-tab space starved the
+// level the reader actually came for. Splitting the row into two scrollers to keep the tab level
+// from scrolling away only moved the fight; capping the tabs at 45% only rationed it.
 //
-// This row is rebuilt from EVERY `agents` snapshot -- that is how a terminal appearing beside the
-// open pane shows up without a reopen -- and a rebuild costs it its scroll position: `replaceChildren`
-// empties both groups, the row's scrollWidth collapses with them, and the browser clamps scrollLeft
-// to 0. Then `scrollSibsToOpenPane` pulled the open chip back into view from there. So a reader who
-// scrolled the row sideways to read the name of a pane at the far end was snapped back to their own
-// pane every two seconds, which reads as a row that refuses to be moved.
+// So there is ONE list and one scroller, read left to right the way a multiplexer's own status line
+// is: the panes of tab 1, then the panes of tab 2, in tab order, each group led by its tab's name.
+// Every pane in the space is one tap away instead of two (a tab chip, then whatever pane it decided
+// to land you on), and a pane chip gets the whole row's width when it needs it.
+//
+// THE TAB'S NAME IS STICKY, which is what makes one row safe. The names sit inside the flow, so at
+// rest the row simply reads `Tab 1  p1 p2 | ble-dev  p3 p4`; once a group's panes scroll under the
+// left edge its name stays pinned there, and the next group's name replaces it on the way past. That
+// is the bug the two-scroller version existed to fix -- in one shared scroller the scroll that
+// reveals the open pane drove the tab level off the left edge, and at 390px in a 3-tab space what
+// was left standing there was a SIBLING tab, `ble-verify` while you were in `ble-dev`, reading as
+// the breadcrumb of the tab you were in. A pinned name cannot be the wrong one: it belongs to the
+// panes beside it.
+//
+// Colour is deliberately NOT the channel. The dot is the triage bucket (red -> orange -> green ->
+// grey) and a filled chip is the selection, everywhere on this page; a third scale keyed to "which
+// tab" would collide with both. The name says it, the 1px rule between groups says where one ends,
+// and both cost less than a hue.
+//
+// The row is rebuilt from EVERY `agents` snapshot -- that is how a terminal appearing beside the
+// open pane shows up without a reopen -- and a rebuild costs it its scroll position:
+// `replaceChildren` empties it, its scrollWidth collapses, and the browser answers by clamping
+// scrollLeft to 0. Then the auto-scroll pulled the open chip back into view from there. So a reader
+// who scrolled sideways to read the name of a pane at the far end was snapped back to their own pane
+// every two seconds, which reads as a row that refuses to be moved.
 //
 // The offset is the reader's, so it survives a rebuild they did not ask for, and the auto-scroll
 // fires only when the row is NEW to this pane. `sibsAnchoredTo` is what tells that apart from a
@@ -162,27 +184,61 @@ function renderSiblings() {
   // sibling of every other one. Nothing is better than a wrong neighbourhood.
   const wsKey = me && me.workspace_id ? agentWorkspaceKey(me) : null;
   const row = document.getElementById('termSibs');
-  // Read BEFORE the rebuild: the two groups are about to be emptied, and the number is gone with
-  // them. 0 while the session view is still display:none, where the assignment below is a no-op
-  // and openTerminal's own call is what places the row.
-  const kept = row ? row.scrollLeft : 0;
-  const tabs = renderTabStrip(me, wsKey);
-  const panes = renderPaneStrip(me, wsKey);
-  // The separator is the boundary between the two levels, so it exists only when both are there --
-  // a rule that hangs off what the two strips actually rendered rather than off a second count.
-  const sep = document.getElementById('termSibSep');
-  if (sep) sep.style.display = tabs && panes ? 'block' : 'none';
-  if (row) row.style.display = tabs || panes ? 'flex' : 'none';
-  if (!(tabs || panes)) { sibsAnchoredTo = null; return; }
-  if (!row) return;
-  row.scrollLeft = kept;
+  const strip = document.getElementById('termSiblings');
+  // Read BEFORE the rebuild: the strip is about to be emptied and the number goes with it. 0 while
+  // the session view is still display:none, where the assignment below is a no-op and openTerminal's
+  // own call is what places the row.
+  const kept = strip ? strip.scrollLeft : 0;
+  const drew = renderSibStrip(me, wsKey);
+  if (row) row.style.display = drew ? 'flex' : 'none';
+  if (!drew) { sibsAnchoredTo = null; return; }
+  if (!strip) return;
+  strip.scrollLeft = kept;
   anchorSibsToOpenPane();
 }
 
-// Places the row on the open pane, ONCE per pane. `sibsAnchoredTo` is what tells entering a session
-// apart from the refresh that follows it every two seconds -- the first is allowed to move the row,
-// the second is the reader's own scroll and is not. A row with no box cannot be measured, so it is
-// left unanchored for the next caller that has one (openTerminal, after the view is displayed).
+/** Every pane in the space, grouped by tab. Returns whether it drew anything, which is what tells
+ *  the row whether it has to exist at all.
+ *
+ *  Two panes is the threshold, and it is about the SPACE rather than the tab: with one pane in the
+ *  space there is nothing to switch to, and the row would cost the output 33px to say so. A tab with
+ *  no pane this client can name draws no group -- there is no CLI for pointing the web client at an
+ *  empty tab -- which is also what keeps the row honest with HERDR_SHELL_PANES off, where it becomes
+ *  the tabs that hold agents. */
+function renderSibStrip(me, wsKey) {
+  const strip = document.getElementById('termSiblings');
+  if (!strip) return false;
+  strip.replaceChildren();
+  const all = panesInSpace(wsKey);
+  if (all.length < 2) return false;
+  const groups = groupPanesByTab(wsKey).filter(g => g.panes.length);
+  // One tab is not a choice, and 6 of the 10 agent panes measured sit in a single-tab space -- they
+  // would each have paid a chip, and a rule, to be told the name of the only tab there is.
+  if (groups.length < 2) {
+    strip.append(...all.map(p => siblingChip(p, p.pane_id === activePane)));
+    return true;
+  }
+  const mine = me && me.tab_id ? agentTabKey(me) : null;
+  for (const g of groups) strip.append(sibGroup(g, g.key === mine));
+  return true;
+}
+
+// One tab's panes, behind its name. A group is a box of its own so the name can stick INSIDE it: a
+// sticky element is held by its containing block, so each name is pinned only while its own panes
+// are on screen and is pushed out by the next group rather than stacking up at the edge.
+function sibGroup(g, current) {
+  const box = document.createElement('div');
+  box.className = 'sib-group';
+  box.dataset.sibGroup = g.key;
+  box.append(tabChip(g, g.panes, current),
+             ...g.panes.map(p => siblingChip(p, p.pane_id === activePane)));
+  return box;
+}
+
+// Places the row on the pane you are in, ONCE per pane. `sibsAnchoredTo` is what tells entering a
+// session apart from the refresh that follows it every two seconds -- the first is allowed to move
+// the row, the second is the reader's own scroll and is not. A row with no box cannot be measured,
+// so it is left unanchored for the next caller that has one (openTerminal, after the view is shown).
 function anchorSibsToOpenPane() {
   const row = document.getElementById('termSibs');
   if (!row || !row.clientWidth || sibsAnchoredTo === activePane) return;
@@ -190,25 +246,57 @@ function anchorSibsToOpenPane() {
   scrollSibsToOpenPane();
 }
 
-// One row holds both levels now, so it overflows sooner -- and the chip that must not be off screen
-// is the one saying where you are. Computed rather than scrollIntoView(), which on a fixed-position
-// ancestor also scrolls the document and takes the header with it.
+/** Puts the pane you are in on the screen, with its tab's name if the two fit.
+ *
+ *  Computed rather than scrollIntoView(), which on a fixed-position ancestor also scrolls the
+ *  document and takes the header with it. Two things make it more than a reveal:
+ *
+ *  - A stuck name is PAINTED at the left edge rather than where it sits in the row, so its rect is
+ *    no use as a flow position. The group box never sticks, and that is what the arithmetic uses.
+ *  - A pane placed hard against the left edge would sit UNDER the stuck name. So either the group's
+ *    name fits in the flow beside it -- the common case, since a name leads its own tab's panes
+ *    rather than following every tab in the space -- or the pane is placed to the right of the name's
+ *    own width. */
 function scrollSibsToOpenPane() {
-  const row = document.getElementById('termSibs');
-  // The PANE chip, not whichever marked chip comes first: the tab you are in is the leftmost thing
-  // in the row and is never the one off screen, so matching it would report the job already done.
-  const cur = row && (row.querySelector('#termSiblings [aria-current="true"]')
-                      || row.querySelector('[aria-current="true"]'));
-  if (!cur || row.style.display === 'none') return;
-  const chip = cur.getBoundingClientRect(), box = row.getBoundingClientRect();
-  if (chip.left < box.left) row.scrollLeft -= box.left - chip.left + 8;
-  else if (chip.right > box.right) row.scrollLeft += chip.right - box.right + 8;
+  const strip = document.getElementById('termSiblings');
+  if (!strip || !strip.clientWidth) return;
+  const pane = strip.querySelector('[data-sib-id][aria-current="true"]');
+  if (!pane) return;
+  const group = pane.closest('.sib-group');
+  const label = group && group.querySelector('.sib-tab');
+  const box = strip.getBoundingClientRect(), view = strip.clientWidth;
+  const at = el => el.getBoundingClientRect().left - box.left + strip.scrollLeft;
+  const start = at(pane), end = start + pane.getBoundingClientRect().width;
+  const lead = label ? label.getBoundingClientRect().width + 6 : 0;
+  const together = group && end - at(group) <= view;
+  // The window of offsets that satisfies both, and the reader's own offset is left alone inside it.
+  const lo = end - view + 8;
+  const hi = together ? at(group) - 8 : start - lead - 8;
+  strip.scrollLeft = Math.max(0, Math.min(Math.max(strip.scrollLeft, lo), Math.max(lo, hi)));
 }
 
-// Every pane in one space. By pane_id, not by array: the two lists are disjoint in a snapshot, but
-// a `blocked` push can add an agent record for a pane still sitting in shellPanes, and that pane
-// would draw two chips. One order for both strips, and creation order in practice: herdr numbers a
-// pane's suffix p1, p2, ... p9, pA, pB, which sorts lexicographically into the order they opened.
+/** Where a pane sits in herdr's own `pane list`, which is the order it sits in on the screen the
+ *  operator is looking at -- the same split-tree walk `pane layout` returns, top-left first.
+ *
+ * Neither of the two things this page could compute for itself is that order. The relay splits ONE
+ * `pane list` into `agents` and `panes`, so the array a pane arrives in says nothing about where it
+ * is: merging them puts every agent ahead of every terminal, which misplaces the terminal sitting
+ * between two agents. And sorting the ids -- what this did -- is worse, because the suffix is a
+ * creation counter in a base wider than ten: measured live, `w6:t1` reads pH, p15, p12 at the desk
+ * and sorted to p12, p15, pH, while `w6:tC` reads p16, p18, p17 and sorted to p16, p17, p18. Even a
+ * correct creation order would not be it, since `pane swap` and `pane move` exist.
+ *
+ * Missing means last, and the sort is stable: a relay older than `order` sends none at all, so
+ * every pane ties and both strips keep the order the relay sent. The one pane that can lack it on a
+ * relay that does send it is an agent a `blocked` push appended, and the next snapshot -- two
+ * seconds -- puts it back where it belongs. */
+function paneOrder(p) {
+  return typeof p.order === 'number' ? p.order : Number.MAX_SAFE_INTEGER;
+}
+
+// Every pane in one space, in herdr's order. By pane_id, not by array: the two lists are disjoint in
+// a snapshot, but a `blocked` push can add an agent record for a pane still sitting in shellPanes,
+// and that pane would draw two chips.
 function panesInSpace(wsKey) {
   if (!wsKey) return [];
   const seen = new Set(), list = [];
@@ -217,20 +305,7 @@ function panesInSpace(wsKey) {
     seen.add(p.pane_id);
     list.push(p);
   }
-  return list.sort((a, b) => a.pane_id.localeCompare(b.pane_id));
-}
-
-// The same panes, keyed by tab. Panes with no tab id are absent rather than pooled: a relay that
-// reports no tabs has no level here to draw, and the pane row falls back to the whole space.
-function panesByTab(wsKey) {
-  const byTab = new Map();
-  for (const p of panesInSpace(wsKey)) {
-    if (!p.tab_id) continue;
-    const key = agentTabKey(p);
-    if (!byTab.has(key)) byTab.set(key, []);
-    byTab.get(key).push(p);
-  }
-  return byTab;
+  return list.sort((a, b) => paneOrder(a) - paneOrder(b));
 }
 
 // Where a tab chip lands you: the neediest agent in it, and failing that its first terminal. Ranked
@@ -238,32 +313,17 @@ function panesByTab(wsKey) {
 // been highest in the herd list -- if something in there is blocked, that is what you meant.
 function tabLandingPane(list) {
   const rank = p => (p.agent ? TRIAGE_ORDER.indexOf(bucketOf(p)) : TRIAGE_ORDER.length);
-  return [...list].sort((a, b) => rank(a) - rank(b) || a.pane_id.localeCompare(b.pane_id))[0];
-}
-
-// Returns whether it drew anything, which is what tells the shared row whether it has to exist.
-function renderTabStrip(me, wsKey) {
-  const strip = document.getElementById('termTabs');
-  if (!strip) return false;
-  strip.replaceChildren();
-  const byTab = panesByTab(wsKey);
-  // A tab with no pane we can name is not a place we can go -- there is no CLI for switching the
-  // web client to an empty tab, and a chip that does nothing is worse than no chip. This is also
-  // what keeps the row honest with HERDR_SHELL_PANES off: it becomes the tabs holding agents.
-  const rows = tabRows(wsKey).filter(t => (byTab.get(t.key) || []).length);
-  // One tab is not a choice, and 6 of the 10 agent panes measured live in a single-tab space --
-  // they would each have paid a chip to be told the name of the only tab there is.
-  if (rows.length < 2) { strip.style.display = 'none'; return false; }
-  const mine = me && me.tab_id ? agentTabKey(me) : null;
-  strip.append(...rows.map(t => tabChip(t, byTab.get(t.key), t.key === mine)));
-  strip.style.display = 'flex';
-  return true;
+  // Ties go to whichever comes first at the desk, not to whichever id sorts first -- the same
+  // question the strip's own order asks, so the tap lands on the chip a reader would have picked.
+  return [...list].sort((a, b) => rank(a) - rank(b) || paneOrder(a) - paneOrder(b))[0];
 }
 
 function tabChip(row, list, current) {
   const chip = document.createElement('button');
   chip.className = 'term-sib sib-tab';
-  chip.dataset.sibTab = row.id;
+  // Absent rather than the string "undefined" for the trailing `…` group, whose panes name a tab
+  // `tab list` has not caught up with -- the poll race right after a create.
+  if (row.id) chip.dataset.sibTab = row.id;
   if (current) chip.setAttribute('aria-current', 'true');
   // The same dot the space and tab chips in the herd carry, from the same classifier -- so a tab
   // says what is going on inside it before you open it. Null for a tab holding only terminals,
@@ -281,22 +341,6 @@ function tabChip(row, list, current) {
   // re-entering openTerminal and closing the panels you have open.
   if (!current) chip.onclick = () => openTerminal(tabLandingPane(list).pane_id);
   return chip;
-}
-
-function renderPaneStrip(me, wsKey) {
-  const strip = document.getElementById('termSiblings');
-  if (!strip) return false;
-  strip.replaceChildren();
-  // No tab id on the open pane means this relay reports no tabs at all; fall back to the whole
-  // space, which is the set this row used to show and still the only one available.
-  const list = me && me.tab_id ? (panesByTab(wsKey).get(agentTabKey(me)) || [])
-                               : panesInSpace(wsKey);
-  // Nothing to switch to means nothing to anchor either, so the row costs nothing -- 3 of the 10
-  // agent panes measured have no pane beside them.
-  if (list.length < 2) { strip.style.display = 'none'; return false; }
-  strip.append(...list.map(p => siblingChip(p, p.pane_id === activePane)));
-  strip.style.display = 'flex';
-  return true;
 }
 
 /** What a chip is called.

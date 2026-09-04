@@ -176,24 +176,27 @@ function tabHeading(g) {
 
 /** A workspace's panes by tab, in tab order, including empty tabs. Panes whose tab is not in the
  *  tab list yet -- a brief poll race after a create -- fall into a trailing group so they are never
- *  lost -- the list is the panes, and the hierarchy only names and orders them. */
+ *  lost -- the list is the panes, and the hierarchy only names and orders them.
+ *
+ *  Through panesInSpace, so this view and the session strip put two panes of one tab in the same
+ *  order: herdr's own. Merging the two arrays here, which is what this did, put every agent ahead of
+ *  every terminal -- so a terminal split between two agents was drawn last, in a view whose whole
+ *  claim is that it shows what is in a tab. */
 function groupPanesByTab(workspaceKey) {
-  const panes = [], seen = new Set();
-  for (const p of [...agents, ...shellPanes]) {
-    // By pane_id: the two arrays are disjoint in a snapshot, but a `blocked` push can add an agent
-    // record for a pane still sitting in shellPanes.
-    if (seen.has(p.pane_id) || agentWorkspaceKey(p) !== workspaceKey) continue;
-    seen.add(p.pane_id);
-    panes.push(p);
-  }
+  const panes = panesInSpace(workspaceKey);
   const tabs = tabRows(workspaceKey);
   const groups = tabs.map(t => ({
-    key: t.key, name: t.name, focused: t.focused,
+    // `id` is the bare tab id the relay wants, `key` the host-qualified one this page compares on.
+    // The session strip needs both: it marks the group holding the open pane by key and puts the id
+    // on the chip.
+    key: t.key, id: t.id, name: t.name, focused: t.focused,
     panes: panes.filter(p => agentTabKey(p) === t.key),
   }));
   const known = new Set(tabs.map(t => t.key));
   const orphans = panes.filter(p => !known.has(agentTabKey(p)));
-  if (orphans.length) groups.push({key: `${workspaceKey}|other`, name: '…', panes: orphans});
+  if (orphans.length) {
+    groups.push({key: `${workspaceKey}|other`, id: '', name: '…', panes: orphans});
+  }
   return groups;
 }
 

@@ -839,7 +839,7 @@ def pane_session_ref(pane):
     return session
 
 
-def shell_pane_record(pane, host_label, remote):
+def shell_pane_record(pane, host_label, remote, order=0):
     """The payload for a pane with no agent in it.
 
     Deliberately NOT an `agents` entry. Six clients render that array and every one of them
@@ -868,6 +868,7 @@ def shell_pane_record(pane, host_label, remote):
         # there is a real ring to read instead of a TUI to walk.
         "scrollback": scroll.get("max_offset_from_bottom", 0),
         "viewport_rows": scroll.get("viewport_rows", 0),
+        "order": order,
     }
 
 
@@ -876,6 +877,15 @@ def list_panes_from_host(remote=None):
 
     Split here rather than in two functions because the CLI call is the expensive part -- 12ms
     locally, a full SSH round trip remotely -- and the poll runs it every POLL_INTERVAL.
+
+    The split is also what makes `order` necessary. herdr answers `pane list` in the order the
+    operator sees the panes at the desk -- verified against `pane layout` on every tab of this
+    host, it is the same split-tree walk, top-left first -- and that order is not derivable from
+    anything else in the record: `pane swap` and `pane move` exist, and the pane id's suffix is a
+    creation counter (`w6:pH` was opened before `w6:p12`), so neither the layout nor even the
+    creation order survives sorting the ids as strings. Splitting one list in two throws the
+    interleaving away, so each record keeps its index in the list it came from. Per host, since a
+    client only ever compares panes within one tab of one machine.
     """
     raw = run_herdr("pane", "list", remote=remote)
     host_label = remote or "local"
@@ -887,10 +897,10 @@ def list_panes_from_host(remote=None):
         return [], []
 
     agents, shells = [], []
-    for p in panes:
+    for order, p in enumerate(panes):
         if not p.get("agent"):
             if SHELL_PANES and p.get("pane_id"):
-                shells.append(shell_pane_record(p, host_label, remote))
+                shells.append(shell_pane_record(p, host_label, remote, order))
             continue
         session = pane_session_ref(p)
         if session:
@@ -927,6 +937,9 @@ def list_panes_from_host(remote=None):
             "focused": bool(p.get("focused")),
             "scrollback": scroll.get("max_offset_from_bottom", 0),
             "viewport_rows": scroll.get("viewport_rows", 0),
+            # Where this pane sits in herdr's own `pane list` -- see the docstring. A client that
+            # groups panes by tab has no other way back to the order on screen.
+            "order": order,
             # Whether this pane names a transcript at all -- the client's cue for offering a
             # history view. The ref itself stays in pane_session_map.
             "has_session": session is not None,

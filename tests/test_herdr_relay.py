@@ -2706,6 +2706,33 @@ class RelayShellPaneTests(unittest.TestCase):
             for absent in ("agent", "status", "has_session", "title"):
                 self.assertNotIn(absent, first)
 
+    def test_a_pane_keeps_its_place_in_herdrs_own_list(self):
+        """Splitting one `pane list` in two throws away which pane sits where, and nothing else in
+        the record brings it back.
+
+        `pane list` answers in the order the operator sees the panes -- verified against
+        `pane layout` on every tab of this host, the same split-tree walk, top-left first -- and
+        that is not derivable from the ids: `pane swap` and `pane move` rearrange panes, and the id
+        suffix is a creation counter in a base wider than ten, so `w6:t1` reads pH, p15, p12 on
+        screen and sorts to p12, p15, pH. The shell pane in the middle of it is the case the split
+        loses outright, since a client merging the two arrays draws it last.
+        """
+        listing = json.dumps({"result": {"panes": [
+            {"pane_id": "w6:pH", "agent": "claude", "agent_status": "idle", "cwd": "/work/db",
+             "workspace_id": "w6", "tab_id": "w6:t1"},
+            {"pane_id": "w6:p12", "agent_status": "unknown", "cwd": "/work/db",
+             "workspace_id": "w6", "tab_id": "w6:t1"},
+            {"pane_id": "w6:p15", "agent": "claude", "agent_status": "idle", "cwd": "/work/db",
+             "workspace_id": "w6", "tab_id": "w6:t1"},
+        ]}})
+        with loaded_relay(shell_panes="1") as relay:
+            with mock.patch.object(relay, "run_herdr",
+                                   side_effect=lambda *a, remote=None: listing if a[:2] == ("pane", "list") else ""):
+                agents, shells = relay.list_panes_from_host()
+            self.assertEqual([(p["pane_id"], p["order"]) for p in agents],
+                             [("w6:pH", 0), ("w6:p15", 2)])
+            self.assertEqual([(p["pane_id"], p["order"]) for p in shells], [("w6:p12", 1)])
+
     def test_only_one_pane_list_serves_both_kinds(self):
         """The CLI call is the cost -- 12ms locally, an SSH round trip remotely, every poll."""
         with loaded_relay(shell_panes="1") as relay:
