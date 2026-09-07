@@ -2610,7 +2610,11 @@ async def main():
         except OSError:
             log.warning("UDP 8376 in use, plugin push disabled")
         tasks = [asyncio.create_task(poll_loop()), asyncio.create_task(event_push())]
-        server = await serve(handle_client, RELAY_HOST, WS_PORT, process_request=process_request)
+        # ping_timeout defaults to 20s, which a phone cannot meet: Android dozes the radio in a
+        # backgrounded tab and the pong lands late, so the server hangs up on a client that is
+        # fine. Keep pinging (it holds the proxy path open) but give the pong room.
+        server = await serve(handle_client, RELAY_HOST, WS_PORT, process_request=process_request,
+                             ping_interval=20, ping_timeout=90)
         hosts = ["local"] + REMOTES
         log.info("herdr-remote relay on %s:%d (WebSocket + HTTP POST)", RELAY_HOST, WS_PORT)
         log.info("Polling: %s", ", ".join(hosts))
