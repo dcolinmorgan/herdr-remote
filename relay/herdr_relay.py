@@ -1947,6 +1947,17 @@ async def process_request(connection, request):
             _, qs = request.path.split("?", 1) if "?" in request.path else (request.path, "")
             params = urllib.parse.parse_qs(qs)
             token = params.get("token", [None])[0]
+        # And the cookie the index response plants below. A PWA's manifest start_url is a bare
+        # "/", so launching from the home screen arrives with no query token and 401s before a
+        # line of JS runs -- localStorage cannot help, the document fetch precedes it.
+        if not token:
+            for key, value in request.headers.raw_items():
+                if key.lower() != "cookie":
+                    continue
+                for part in value.split(";"):
+                    name, _, val = part.strip().partition("=")
+                    if name == "herdr_token":
+                        token = val
         if token != AUTH_TOKEN:
             headers = Headers([("Content-Type", "text/plain")])
             return Response(401, "Unauthorized", headers, b"Invalid token\n")
@@ -2003,11 +2014,17 @@ async def process_request(connection, request):
         if os.path.isfile(index_path):
             with open(index_path, "rb") as f:
                 body = f.read()
-            headers = Headers([
+            fields = [
                 ("Content-Type", "text/html; charset=utf-8"),
                 ("Cache-Control", "no-cache"),
-            ])
-            return Response(200, "OK", headers, body)
+            ]
+            if AUTH_TOKEN:
+                # Getting here means this request already authenticated, so plant the token for
+                # the tokenless loads that follow -- the PWA launch, and any bare bookmark.
+                fields.append(("Set-Cookie",
+                               f"herdr_token={AUTH_TOKEN}; Path=/; Max-Age=31536000;"
+                               " HttpOnly; SameSite=Lax"))
+            return Response(200, "OK", Headers(fields), body)
 
     # Serve service worker
     if path == "/sw.js":
