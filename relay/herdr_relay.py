@@ -1782,14 +1782,25 @@ async def _poll_once():
                 )
                 previous = last_blocked_prompts.get(pid)
                 if previous != fingerprint:
-                    message["update"] = previous is not None and previous[0] == message["prompt_id"]
+                    # A blocked pane whose TUI animates (spinners, elapsed timers) repaints
+                    # its captured content every poll, so question_prompt_id -- and this
+                    # fingerprint -- churn even though the pane is sitting on one prompt. The
+                    # old `previous[0] == prompt_id` test then read every churn as a brand-new
+                    # prompt (update=False) and re-fired the notification. Any re-broadcast for
+                    # a pane still in the same blocked streak is an update: `previous` is
+                    # cleared the moment the pane leaves `blocked` (see the else branch), so
+                    # `previous is not None` means "already announced this block".
+                    message["update"] = previous is not None
                     last_blocked_prompts[pid] = fingerprint
                     await broadcast(message)
-                    await send_web_push(
-                        title=f"\U0001f411 {a['project']} blocked",
-                        body=content[:120],
-                        url=f"/?pane={pid}",
-                    )
+                    # Clients still need every re-broadcast (the prompt_id they must echo back
+                    # to approve moves with the content), but the notification is one-shot.
+                    if not message["update"]:
+                        await send_web_push(
+                            title=f"\U0001f411 {a['project']} blocked",
+                            body=content[:120],
+                            url=f"/?pane={pid}",
+                        )
                     if gen != POLL_GENERATION:
                         return
             else:

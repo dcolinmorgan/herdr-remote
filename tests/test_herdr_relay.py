@@ -1991,6 +1991,74 @@ class RelayTerminalTitleTests(unittest.TestCase):
             self.assertEqual([a["title"] for a in agents], ["fix the poll", ""])
 
 
+class RelayPollBlockedDedupTests(unittest.IsolatedAsyncioTestCase):
+    BLOCKED_AGENT = {
+        "pane_id": "w1:p1",
+        "agent": "opencode",
+        "status": "blocked",
+        "cwd": "/w",
+        "project": "proj",
+        "host": "local",
+        "remote": None,
+    }
+
+    async def test_animated_blocked_pane_notifies_once_then_marks_resends_as_updates(self):
+        """A pane parked in `blocked` with an animated TUI (spinner/timer) churns
+        its content -- and therefore its prompt_id -- on every 2s poll. Clients
+        still get every re-broadcast (the prompt_id moves with the content), but
+        each carries update=True after the first so downstream notifiers suppress
+        it, and the web push fires only once."""
+        with loaded_relay() as relay:
+            frames = iter([
+                "Rate limit exceeded\n  Build spinner |",
+                "Rate limit exceeded\n  Build spinner /",
+                "Rate limit exceeded\n  Build spinner -",
+            ])
+            broadcasts = []
+
+            async def capture(message):
+                broadcasts.append(message)
+
+            with mock.patch.object(relay, "get_all_panes", return_value=([dict(self.BLOCKED_AGENT)], [])), \
+                 mock.patch.object(relay, "read_pane", side_effect=lambda *a, **k: next(frames)), \
+                 mock.patch.object(relay, "send_web_push", new=mock.AsyncMock()) as web_push, \
+                 mock.patch.object(relay, "broadcast", side_effect=capture):
+                await relay._poll_once()
+                await relay._poll_once()
+                await relay._poll_once()
+
+        blocked = [m for m in broadcasts if m.get("type") == "blocked"]
+        self.assertEqual(len(blocked), 3)
+        self.assertEqual([m["update"] for m in blocked], [False, True, True])
+        self.assertEqual(web_push.await_count, 1)
+
+    async def test_new_block_after_pane_clears_is_not_an_update(self):
+        """When a pane leaves `blocked` and later blocks again, the relay has
+        forgotten the earlier prompt, so the next notification is a fresh block."""
+        with loaded_relay() as relay:
+            statuses = iter(["blocked", "working", "blocked"])
+
+            def snapshot():
+                return ([{**self.BLOCKED_AGENT, "status": next(statuses)}], [])
+
+            broadcasts = []
+
+            async def capture(message):
+                broadcasts.append(message)
+
+            with mock.patch.object(relay, "get_all_panes", side_effect=snapshot), \
+                 mock.patch.object(relay, "read_pane", return_value="Approve this?"), \
+                 mock.patch.object(relay, "send_web_push", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "broadcast", side_effect=capture):
+                await relay._poll_once()
+                await relay._poll_once()
+                await relay._poll_once()
+
+        blocked = [m for m in broadcasts if m.get("type") == "blocked"]
+        self.assertEqual(len(blocked), 2)
+        self.assertEqual([m["update"] for m in blocked], [False, False])
+
+
 class RelaySubprocessConcurrencyTests(unittest.TestCase):
     def test_calls_to_the_same_remote_are_serialized(self):
         with loaded_relay() as relay:
