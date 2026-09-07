@@ -1014,8 +1014,10 @@ if [ -n "$EXISTING_PID" ]; then
         wait_for_label_gone "$LABEL_RELAY" || true
     fi
 
-    # Try graceful shutdown first (SIGTERM)
-    kill "$EXISTING_PID" 2>/dev/null
+    # Try graceful shutdown first (SIGTERM). `|| true` because the bootout above usually already
+    # took this PID down, and under `set -e` a kill that finds nothing aborts the whole install --
+    # after the relay has been stopped, which leaves the machine with no relay at all.
+    kill "$EXISTING_PID" 2>/dev/null || true
     for i in 1 2 3 4 5; do
         if ! kill -0 "$EXISTING_PID" 2>/dev/null; then
             break
