@@ -301,6 +301,22 @@ generate_relay_token() {
     python3 -c 'import secrets; print(secrets.token_hex(32))'
 }
 
+# Private key then public key, one per line, base64url as the relay and the browser want them.
+generate_vapid_keys() {
+    "$UV_PATH" run --quiet --with py-vapid python - <<'VAPID_PY'
+import base64
+from py_vapid import Vapid01
+from cryptography.hazmat.primitives import serialization
+
+v = Vapid01()
+v.generate_keys()
+b64 = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+print(b64(v.private_key.private_numbers().private_value.to_bytes(32, "big")))
+print(b64(v.public_key.public_bytes(serialization.Encoding.X962,
+                                    serialization.PublicFormat.UncompressedPoint)))
+VAPID_PY
+}
+
 UV_PATH="$(find_binary uv)"
 HERDR_PATH="$(find_binary herdr)"
 HERDR_PUSH_PATH="$(find_binary herdr-push)"
@@ -373,6 +389,24 @@ fi
 HERDR_RELAY_TOKEN="$RELAY_TOKEN"
 HERDR_RELAY="ws://127.0.0.1:$WS_PORT"
 [ -n "$HERDR_RELAY_TOKEN" ] && HERDR_RELAY="$HERDR_RELAY?token=$HERDR_RELAY_TOKEN"
+
+# --- Web push signing keys ---
+
+# The relay only ever reads HERDR_VAPID_*; nothing generated them, so every install had web push
+# fail with "VAPID key not configured on relay". Generated once and then carried across re-runs:
+# a new keypair silently invalidates every subscription a browser has already handed out.
+if [ -z "${HERDR_VAPID_PRIVATE:-}" ] || [ -z "${HERDR_VAPID_PUBLIC:-}" ]; then
+    echo ""
+    echo "Web push keys"
+    echo "-------------"
+    if VAPID_KEYS="$(generate_vapid_keys 2>/dev/null)" && [ -n "$VAPID_KEYS" ]; then
+        HERDR_VAPID_PRIVATE="$(printf '%s\n' "$VAPID_KEYS" | sed -n 1p)"
+        HERDR_VAPID_PUBLIC="$(printf '%s\n' "$VAPID_KEYS" | sed -n 2p)"
+        echo "  [ok] Generated VAPID keypair"
+    else
+        echo "  Warning: could not generate a VAPID keypair. Web push stays off; the rest works."
+    fi
+fi
 
 # --- Telegram configuration ---
 
@@ -905,6 +939,8 @@ HERDR_RELAY_TOKEN=${HERDR_RELAY_TOKEN:-}
 HERDR_TG_TOKEN=${HERDR_TG_TOKEN:-}
 HERDR_TG_CHAT_ID=${HERDR_TG_CHAT_ID:-}
 HERDR_RELAY=$HERDR_RELAY
+HERDR_VAPID_PUBLIC=${HERDR_VAPID_PUBLIC:-}
+HERDR_VAPID_PRIVATE=${HERDR_VAPID_PRIVATE:-}
 EOF
 )
 chmod 600 "$SECRETS_TMP"
@@ -978,8 +1014,10 @@ if [ -n "$EXISTING_PID" ]; then
         wait_for_label_gone "$LABEL_RELAY" || true
     fi
 
-    # Try graceful shutdown first (SIGTERM)
-    kill "$EXISTING_PID" 2>/dev/null
+    # Try graceful shutdown first (SIGTERM). `|| true` because the bootout above usually already
+    # took this PID down, and under `set -e` a kill that finds nothing aborts the whole install --
+    # after the relay has been stopped, which leaves the machine with no relay at all.
+    kill "$EXISTING_PID" 2>/dev/null || true
     for i in 1 2 3 4 5; do
         if ! kill -0 "$EXISTING_PID" 2>/dev/null; then
             break
