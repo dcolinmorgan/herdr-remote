@@ -297,6 +297,13 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 3000);
 }
 
+// A backgrounded tab gets frozen on Android: the reconnect timer above never fires, so the page
+// comes back reading offline until something pokes it. Poke it on the way in, but only when the
+// socket is actually gone -- CONNECTING and OPEN are left alone so this cannot cut a live one.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && (!ws || ws.readyState > WebSocket.OPEN)) connect();
+});
+
 function setStatus(s) {
   const dot = document.getElementById('statusDot');
   const label = document.getElementById('connLabel');
