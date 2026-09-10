@@ -37,6 +37,16 @@
   /* The mirror is dark under BOTH themes: ANSI_COLORS is VS Code's Dark+ set, authored for a dark
      ground, and it sits beside truecolor an agent emits that no palette can re-theme. */
   --term-bg: #0a0a0a; --term-text: #fafafa;
+  /* Depth and motion, added as tokens so the whole surface moves together and both themes get a
+     shadow tuned to their own ground -- one rgba literal cannot serve a #fff card and a #171717
+     one. Light gets a soft cool drop; dark leans on a lifted surface + hairline highlight rather
+     than a shadow that would vanish on near-black. --ease is one snappy curve every transition
+     shares, so hover/press feel like one material. */
+  --shadow-sm: light-dark(0 1px 2px rgba(16,24,40,0.06), 0 1px 2px rgba(0,0,0,0.4));
+  --shadow-md: light-dark(0 6px 20px -4px rgba(16,24,40,0.12), 0 8px 24px -6px rgba(0,0,0,0.6));
+  --surface-hi: light-dark(rgba(255,255,255,0.7), rgba(255,255,255,0.04));
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --header-bg: light-dark(rgba(245,245,245,0.72), rgba(10,10,10,0.72));
   /* Monospace, the whole app -- this is a window onto a terminal, and a proportional UI wrapped
      around a monospace pane read as two programs sharing a screen. The bundled Hack Nerd Font is
      deliberately NOT in this stack: it is 982KB, and today nothing fetches it until a session
@@ -59,7 +69,14 @@
 html { background: var(--bg); }
 body { font-family: var(--font-mono); background: var(--bg); color: var(--text); min-height: 100dvh; min-height: -webkit-fill-available; display: flex; flex-direction: column; width: 100%; overflow-x: hidden; padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); }
 
-.header { height: calc(var(--header-h) + env(safe-area-inset-top, 0px)); padding: env(safe-area-inset-top, 0px) 14px 0; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; position: relative; }
+/* Translucent + blurred, pinned above the scroll: the herd list slides UNDER it instead of butting
+   against a flat bar, which is the single change that most reads as "native app" rather than
+   "web page". Falls back to the opaque --bg where backdrop-filter is unsupported. sticky, not
+   fixed, so it costs no layout offset the way .terminal-view's fixed top does. */
+.header { height: calc(var(--header-h) + env(safe-area-inset-top, 0px)); padding: env(safe-area-inset-top, 0px) 14px 0; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; position: sticky; top: 0; z-index: 20; background: var(--bg); }
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .header { background: var(--header-bg); -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px); }
+}
 .header h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
 /* 44px square was the whole of the header's height and then some. The hit target keeps its width
    -- a thumb misses sideways on this row, where the two buttons sit next to each other, far more
@@ -68,11 +85,18 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
 .header button:hover { color: var(--text); background: var(--border); }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .dot.pulse { animation: pulse 2s infinite; }
+/* A soft glow ring on the live states, so a working or blocked dot reads as lit rather than just
+   coloured. currentColor picks up the dot's status hue set inline as color, so the ring costs no
+   extra token. */
+.dot.pulse { box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 22%, transparent); }
 /* A terminal has no status to colour -- herdr reports agent_status "unknown" for every pane
    without an agent -- so its dot is hollow rather than a fourth shade of grey competing with
    Done and Idle. Same size and position, so the rows still line up down the left edge. */
 .dot-hollow { background: none; border: 1.5px solid var(--muted); opacity: 0.7; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+/* Opacity AND the glow ring breathe together, so a pulsing dot dims and its halo contracts in one
+   motion rather than the ring sitting static while only the fill fades. */
+@keyframes pulse { 0%,100% { opacity: 1; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 22%, transparent); } 50% { opacity: 0.5; box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 6%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .dot.pulse { animation: none; } .agent, .chip { transition: none; } }
 
 .view { flex: 1; overflow-y: auto; }
 
@@ -85,7 +109,9 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
 .setting-group input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
 .setting-group select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
 .setting-group .hint { font-size: 0.65rem; color: var(--muted); margin-top: 4px; }
-.setting-group button { margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--green); color: var(--on-accent); font-weight: 600; font-size: 13px; cursor: pointer; }
+.setting-group button { margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--green); color: var(--on-accent); font-weight: 600; font-size: 13px; cursor: pointer; box-shadow: 0 1px 6px -1px color-mix(in srgb, var(--green) 45%, transparent); transition: transform 0.12s var(--ease), box-shadow 0.18s var(--ease), filter 0.18s var(--ease); }
+.setting-group button:hover { filter: brightness(1.06); box-shadow: 0 2px 10px -1px color-mix(in srgb, var(--green) 55%, transparent); }
+.setting-group button:active { transform: scale(0.97); box-shadow: none; }
 /* Appearance: one row, three exclusive choices, so a `radiogroup` rather than three `aria-pressed`
    toggles -- which would announce three independent switches, one of which happens to be on. The
    selected one fills with the INVERTED NEUTRAL, the same pair every toggle in the session view uses
@@ -100,18 +126,27 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
 /* Agent list */
 .agents { padding: 12px; }
 .section-header { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin: 16px 0 8px; display: flex; align-items: center; gap: 5px; }
-.agent { background: var(--surface); border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; cursor: pointer; border: 1px solid var(--border); transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
-.agent:hover { border-color: color-mix(in srgb, var(--text) 20%, transparent); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-.agent:active { transform: scale(0.99); box-shadow: none; }
+.agent { background: var(--surface); border-radius: 14px; padding: 14px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; cursor: pointer; border: 1px solid var(--border); box-shadow: var(--shadow-sm); background-image: linear-gradient(var(--surface-hi), transparent 40%); transition: transform 0.22s var(--ease), box-shadow 0.22s var(--ease), border-color 0.22s var(--ease); }
+/* The gradient above is a hairline top-highlight -- a lit edge without a second border, the trick
+   that separates a "panel" from a flat div. Kept faint (--surface-hi) so it never competes with a
+   status colour. */
+.agent:hover { border-color: color-mix(in srgb, var(--text) 22%, transparent); transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.agent:active { transform: scale(0.985) translateY(0); box-shadow: var(--shadow-sm); }
 .agent .dot { width: 10px; height: 10px; }
-.agent.blocked { border-color: var(--red); background: color-mix(in srgb, var(--red) 5%, var(--surface)); }
+/* Blocked wants to pull the eye: a red-tinted ground plus a soft outward glow, so a waiting agent
+   is legible at a glance down a long list rather than just a differently-coloured border. */
+.agent.blocked { border-color: var(--red); background: color-mix(in srgb, var(--red) 6%, var(--surface)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 30%, transparent), 0 6px 20px -6px color-mix(in srgb, var(--red) 45%, transparent); }
+.agent.blocked:hover { box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 45%, transparent), 0 10px 26px -6px color-mix(in srgb, var(--red) 55%, transparent); }
 .workspace-card { border-color: color-mix(in srgb, var(--text) 10%, transparent); }
 .count-pill { display: inline-block; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--text) 8%, transparent); font-size: 0.65rem; }
 .chip-strip { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 8px 12px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .chip-strip::-webkit-scrollbar { display: none; }
 .chip-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); white-space: nowrap; }
-.chip { padding: 6px 14px; border-radius: 9999px; border: none; font-size: 0.8rem; font-weight: 500; white-space: nowrap; cursor: pointer; position: relative; transition: all 0.15s; background: var(--border); color: var(--muted); }
-.chip.active { background: var(--blue); color: var(--on-accent); }
+.chip { padding: 6px 14px; border-radius: 9999px; border: none; font-size: 0.8rem; font-weight: 500; white-space: nowrap; cursor: pointer; position: relative; transition: background 0.18s var(--ease), color 0.18s var(--ease), box-shadow 0.18s var(--ease), transform 0.12s var(--ease); background: var(--border); color: var(--muted); }
+.chip:hover { color: var(--text); }
+/* Active carries a soft glow in its own hue rather than only a fill swap, so the selected space/tab
+   reads as lit and lifts off the strip. */
+.chip.active { background: var(--blue); color: var(--on-accent); box-shadow: 0 2px 10px -2px color-mix(in srgb, var(--blue) 55%, transparent); }
 .chip.alert::after { content: ''; position: absolute; top: -2px; right: -2px; width: 8px; height: 8px; border-radius: 50%; background: var(--red); border: 2px solid var(--bg); }
 .chip:active { transform: scale(0.95); }
 .chip-add { border: 2px dashed var(--border); background: transparent; color: var(--muted); font-size: 1rem; padding: 4px 12px; }
@@ -364,7 +399,9 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
 .term-input { border-top: 1px solid var(--border); padding: 5px 10px; display: flex; gap: 5px; background: var(--surface); flex-shrink: 0; }
 .term-input input { flex: 1; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: var(--font-term); min-width: 0; }
 .term-cmd { padding: 6px 11px; border-radius: 6px; border: 1px solid var(--blue); background: var(--bg); color: var(--blue); font-weight: 700; font-size: 14px; flex-shrink: 0; cursor: pointer; }
-.term-send { padding: 6px 13px; border-radius: 6px; border: none; background: var(--blue); color: var(--on-accent); flex-shrink: 0; cursor: pointer; display: flex; align-items: center; }
+.term-send { padding: 6px 13px; border-radius: 6px; border: none; background: var(--blue); color: var(--on-accent); flex-shrink: 0; cursor: pointer; display: flex; align-items: center; box-shadow: 0 1px 6px -1px color-mix(in srgb, var(--blue) 50%, transparent); transition: transform 0.12s var(--ease), box-shadow 0.18s var(--ease), filter 0.18s var(--ease); }
+.term-send:hover { filter: brightness(1.08); box-shadow: 0 2px 10px -1px color-mix(in srgb, var(--blue) 60%, transparent); }
+.term-send:active { transform: scale(0.94); box-shadow: none; }
 /* The keys and quick-action docks are toggles too, and they were the worst of the set: pixel
    identical before and after a dock slid up right behind them. Same filled-chip vocabulary as the
    header, so "lit" means the same thing everywhere in the session view. The per-button colour has
