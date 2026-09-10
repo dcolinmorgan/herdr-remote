@@ -745,5 +745,40 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1-10000", message.replies[0][0])
 
 
+
+class NumberedMenuKeyboardTests(unittest.TestCase):
+    """A Claude-style numbered menu becomes one button per option, each pressing its number."""
+
+    OPTIONS = [
+        "Yes",
+        "Yes, and always allow access to /tmp from this project",
+        "Yes, and switch to auto mode · auto mode handles these prompts for you",
+        "No",
+    ]
+
+    def test_buttons_press_their_option_number(self):
+        markup = tg.make_keyboard("pane-1", self.OPTIONS, interaction="numbered")
+        rows = markup.inline_keyboard
+        self.assertEqual(len(rows), 5)  # four options + "Open output & reply"
+        keys = [json.loads(row[0].callback_data)["k"] for row in rows[:4]]
+        self.assertEqual(keys, ["1", "2", "3", "4"])
+        self.assertEqual(rows[4][0].text, "Open output & reply")
+
+    def test_labels_keep_number_drop_hint_and_fit_a_phone(self):
+        markup = tg.make_keyboard("pane-1", self.OPTIONS, interaction="numbered")
+        labels = [row[0].text for row in markup.inline_keyboard[:4]]
+        self.assertEqual(labels[0], "1. Yes")
+        self.assertEqual(labels[3], "4. No")
+        self.assertTrue(labels[2].startswith("3. Yes, and switch to auto mode"))
+        self.assertNotIn("·", labels[2])
+        self.assertTrue(all(len(label) <= tg.NUMBERED_LABEL_MAX for label in labels))
+        self.assertTrue(labels[1].endswith("…"))
+
+    def test_plain_prompt_without_numbered_interaction_is_unchanged(self):
+        markup = tg.make_keyboard("pane-1", ["Yes", "No"])
+        labels = [row[0].text for row in markup.inline_keyboard[:2]]
+        self.assertEqual(labels, ["Yes", "No"])
+
+
 if __name__ == "__main__":
     unittest.main()

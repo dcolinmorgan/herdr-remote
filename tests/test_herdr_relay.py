@@ -2976,5 +2976,85 @@ class RelaySshMultiplexingTests(unittest.TestCase):
             self.assertEqual(args[:4], ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"])
 
 
+
+CLAUDE_MENU = """\
+● Creating empty test file
+  ⎿  $ touch /tmp/herdr-perm-test.txt
+────────────────────────────────────────────────────────────────────
+ Bash command
+   touch /tmp/herdr-perm-test.txt
+   Create empty test file
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /tmp from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts
+      for you
+   4. No
+ Esc to cancel · Tab to amend
+"""
+
+
+class ClaudeNumberedMenuTests(unittest.TestCase):
+    """Claude Code approval/question menus carry no Codex wording; they are 1..N key menus."""
+
+    def test_detects_menu_and_joins_wrapped_option(self):
+        with loaded_relay() as relay:
+            self.assertEqual(relay.detect_numbered_options(CLAUDE_MENU), [
+                "Yes",
+                "Yes, and always allow access to /tmp from this project",
+                "Yes, and switch to auto mode · auto mode handles these prompts for you",
+                "No",
+            ])
+
+    def test_footer_is_not_glued_onto_last_option(self):
+        with loaded_relay() as relay:
+            self.assertEqual(relay.detect_numbered_options(CLAUDE_MENU)[-1], "No")
+
+    def test_single_item_broken_sequence_and_plain_text_are_not_menus(self):
+        with loaded_relay() as relay:
+            self.assertEqual(relay.detect_numbered_options("1. only one\n Esc to cancel"), [])
+            self.assertEqual(relay.detect_numbered_options("1. a\n3. c"), [])
+            self.assertEqual(relay.detect_numbered_options("plain output\nno menu here"), [])
+
+    def test_earlier_numbered_list_in_output_does_not_shadow_the_menu(self):
+        screen = "Steps:\n1. clone\n2. build\n3. run\n\n" + CLAUDE_MENU
+        with loaded_relay() as relay:
+            options = relay.detect_numbered_options(screen)
+            self.assertEqual(len(options), 4)
+            self.assertEqual(options[0], "Yes")
+
+    def test_option_key_accepts_number_or_label(self):
+        with loaded_relay() as relay:
+            options = relay.detect_numbered_options(CLAUDE_MENU)
+            self.assertEqual(relay.numbered_option_key("1", options), "1")
+            self.assertEqual(relay.numbered_option_key("4", options), "4")
+            self.assertEqual(relay.numbered_option_key("yes", options), "1")
+            self.assertEqual(relay.numbered_option_key("No", options), "4")
+            self.assertIsNone(relay.numbered_option_key("5", options))
+            self.assertIsNone(relay.numbered_option_key("0", options))
+            self.assertIsNone(relay.numbered_option_key("maybe", options))
+            self.assertIsNone(relay.numbered_option_key("1", []))
+
+    def test_blocked_message_marks_claude_menu_as_numbered(self):
+        with loaded_relay() as relay:
+            message = relay.blocked_message("pane-1", "claude", "project", "local", CLAUDE_MENU)
+            self.assertEqual(message["interaction"], "numbered")
+            self.assertEqual(len(message["options"]), 4)
+            self.assertEqual(message["options"][3], "No")
+            self.assertEqual(message["multi_options"], [])
+
+    def test_codex_wording_still_wins_over_numbered_fallback(self):
+        screen = "1. yes, single permission\n2. trust, always allow\n3. no (tab to edit)"
+        with loaded_relay() as relay:
+            message = relay.blocked_message("pane-1", "codex", "project", "local", screen)
+            self.assertEqual(message["interaction"], "prompt")
+            self.assertEqual(message["options"], relay.TOOL_OPTIONS)
+
+    def test_omp_never_falls_back_to_numbered(self):
+        with loaded_relay() as relay:
+            message = relay.blocked_message("pane-1", "omp", "project", "local", CLAUDE_MENU)
+            self.assertNotEqual(message["interaction"], "numbered")
+
+
 if __name__ == "__main__":
     unittest.main()

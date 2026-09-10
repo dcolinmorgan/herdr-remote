@@ -799,6 +799,22 @@ SUBAGENT_BUTTONS = [
 ]
 
 
+NUMBERED_LABEL_MAX = 40
+
+
+def numbered_button_label(number: int, option: str) -> str:
+    """Button text for option N of a Claude-style numbered menu.
+
+    The number is kept because it is literally the key the button presses. Claude appends
+    hints after " · " ("switch to auto mode · auto mode handles these prompts for you"); the
+    hint does not fit a phone-width button, the choice does.
+    """
+    text = f"{number}. {option.split(' · ')[0].strip()}"
+    if len(text) > NUMBERED_LABEL_MAX:
+        text = text[:NUMBERED_LABEL_MAX - 1] + "…"
+    return text
+
+
 def make_keyboard(
     pane_id: str,
     options: list[str] | None,
@@ -809,6 +825,9 @@ def make_keyboard(
         return interaction_keyboard(pane_id)
     if interaction == "omp_question":
         buttons = [(opt, opt) for opt in options]
+    elif interaction == "numbered":
+        # Claude Code's 1..N menu: one button per option, pressing that option's number.
+        buttons = [(numbered_button_label(i, opt), opt) for i, opt in enumerate(options, start=1)]
     elif "trust" in " ".join(options).lower():
         buttons = TOOL_BUTTONS
     elif "approve all" in " ".join(options).lower():
