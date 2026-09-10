@@ -1645,6 +1645,19 @@ def custom_editor_active(text):
 def question_prompt_id(pane_id, content):
     question = detect_question(content)
     if not question:
+        numbered = detect_numbered_options(content)
+        if numbered:
+            # A Claude approval/question menu sits inside a live status region -- an elapsed
+            # timer ("· 5s"), a token counter ("↑ 21 tokens"), a "Unfurling…" spinner, a usage-
+            # percent line -- that repaints every second while the menu itself does not change.
+            # Hashing the whole screen (the else branch) made the id churn once or twice per
+            # poll, so the prompt_id a client echoed back with its tap was already stale and the
+            # tap was refused as "prompt changed". Hash only the option labels: stable while
+            # the same menu is up, and still different for a menu with different options (the
+            # stale-prompt guard the id exists for). The omp branch below hashes its labels for
+            # the same reason.
+            signature = json.dumps({"pane_id": pane_id, "numbered": numbered}, sort_keys=True)
+            return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:20]
         normalized = " ".join(content.split())
         return hashlib.sha256(f"{pane_id}\n{normalized}".encode("utf-8")).hexdigest()[:20]
     labels = [
@@ -2466,8 +2479,13 @@ async def handle_client(ws):
                 remote = pane_remote_map.get(pane_id)
                 content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 menu = detect_approval_options(content) or detect_numbered_options(content)
-                if menu and any(key.isdigit() for key in keys):
-                    if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
+                digits = any(key.isdigit() for key in keys)
+                if digits and (menu or msg.get("prompt_id") is not None):
+                    # A digit aimed at a menu must echo the prompt_id of the menu on screen.
+                    # If the client echoes one but no menu is visible any more, the menu was
+                    # already answered (typically by the first of two taps) and the digit
+                    # would land in the agent's input line instead -- refuse it the same way.
+                    if not menu or question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
                         await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
                         continue
                 log.info("Keys from %s (%s): pane=%s keys=%s", ip, device, pane_id, keys)

@@ -3056,5 +3056,104 @@ class ClaudeNumberedMenuTests(unittest.TestCase):
             self.assertNotEqual(message["interaction"], "numbered")
 
 
+
+class AnswerKeyAfterMenuGoneTests(unittest.TestCase):
+    """A digit that echoes a prompt_id is an answer to that menu -- never plain typing."""
+
+    ANSWERED_SCREEN = "● Done.\n✻ Crunched for 4s\n❯ "
+
+    def _send_keys(self, relay, keys, prompt_id=None, screen=CLAUDE_MENU):
+        pane_id = "pane-1"
+        relay.known_panes.add(pane_id)
+        message = {"type": "send_keys", "pane_id": pane_id, "keys": keys}
+        if prompt_id is not None:
+            message["prompt_id"] = prompt_id
+        ws = _FakeWebSocket([json.dumps(message)])
+        with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+             mock.patch.object(relay, "read_pane", return_value=screen), \
+             mock.patch.object(relay, "run_herdr_result") as run:
+            run.return_value.returncode = 0
+            asyncio.run(relay.handle_client(ws))
+        return run, json.loads(ws.sent[-1])
+
+    def test_answer_key_is_refused_once_the_menu_is_gone(self):
+        with loaded_relay() as relay:
+            stale = relay.question_prompt_id("pane-1", CLAUDE_MENU)
+            run, reply = self._send_keys(relay, ["1"], prompt_id=stale, screen=self.ANSWERED_SCREEN)
+            run.assert_not_called()
+            self.assertIn("prompt changed", reply["message"])
+
+    def test_answer_key_is_delivered_while_the_menu_matches(self):
+        with loaded_relay() as relay:
+            current = relay.question_prompt_id("pane-1", CLAUDE_MENU)
+            run, reply = self._send_keys(relay, ["4"], prompt_id=current)
+            self.assertEqual(run.call_args[0][:4], ("pane", "send-keys", "pane-1", "4"))
+            self.assertTrue(reply.get("ok"))
+
+    def test_menu_on_screen_still_demands_a_prompt_echo(self):
+        with loaded_relay() as relay:
+            run, reply = self._send_keys(relay, ["1"])
+            run.assert_not_called()
+            self.assertIn("prompt changed", reply["message"])
+
+    def test_plain_digit_without_prompt_echo_types_into_an_idle_agent(self):
+        with loaded_relay() as relay:
+            run, reply = self._send_keys(relay, ["1"], screen=self.ANSWERED_SCREEN)
+            self.assertEqual(run.call_args[0][:4], ("pane", "send-keys", "pane-1", "1"))
+            self.assertTrue(reply.get("ok"))
+
+
+class NumberedMenuPromptIdStabilityTests(unittest.TestCase):
+    """The prompt_id of a Claude menu must survive the live status region churning around it."""
+
+    MENU = "\n".join([
+        " Bash command",
+        "   touch /tmp/herdr-diff.txt",
+        "   Create empty file in /tmp",
+        " Do you want to proceed?",
+        " \u276f 1. Yes",
+        "   2. Yes, and always allow access to /tmp from this project",
+        "   3. Yes, and switch to auto mode",
+        "   4. No",
+        " Esc to cancel \u00b7 Tab to amend",
+    ])
+
+    def _with_status(self, tail):
+        # the volatile region herdr also captures a few lines above/below the menu
+        return "\u2733 Working\u2026 (%s)\n" % tail + self.MENU
+
+    def test_id_is_identical_as_the_timer_ticks(self):
+        with loaded_relay() as relay:
+            a = relay.question_prompt_id("pane-1", self._with_status("3s \u00b7 \u2191 21 tokens"))
+            b = relay.question_prompt_id("pane-1", self._with_status("6s \u00b7 \u2191 48 tokens"))
+            c = relay.question_prompt_id("pane-1", self._with_status("11s \u00b7 \u2191 90 tokens"))
+            self.assertEqual(a, b)
+            self.assertEqual(b, c)
+
+    def test_id_differs_for_a_menu_with_different_options(self):
+        other = self.MENU.replace(
+            "2. Yes, and always allow access to /tmp from this project",
+            "2. Yes, and always allow access to /etc from this project",
+        )
+        with loaded_relay() as relay:
+            self.assertNotEqual(
+                relay.question_prompt_id("pane-1", self.MENU),
+                relay.question_prompt_id("pane-1", other),
+            )
+
+    def test_id_is_pane_scoped(self):
+        with loaded_relay() as relay:
+            self.assertNotEqual(
+                relay.question_prompt_id("pane-1", self.MENU),
+                relay.question_prompt_id("pane-2", self.MENU),
+            )
+
+    def test_non_menu_screen_still_hashes_full_content(self):
+        with loaded_relay() as relay:
+            a = relay.question_prompt_id("pane-1", "just some output\nworking 3s")
+            b = relay.question_prompt_id("pane-1", "just some output\nworking 6s")
+            self.assertNotEqual(a, b)  # no menu -> old full-content behaviour, still churns
+
+
 if __name__ == "__main__":
     unittest.main()
