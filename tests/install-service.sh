@@ -18,6 +18,14 @@ cat > "$MOCK_BIN/herdr" <<'EOF'
 #!/bin/sh
 if [ "$1" = "pane" ] && [ "$2" = "list" ]; then
     printf '%s\n' '{"result":{"panes":[]}}'
+    printf 'herdr pane list HERDR_SESSION=%s\n' "${HERDR_SESSION-<unset>}" >> "$HERDR_TEST_CALLS"
+fi
+if [ "$1" = "session" ] && [ "$2" = "list" ]; then
+    if [ -n "${HERDR_TEST_SESSIONS:-}" ]; then
+        printf '%s\n' "$HERDR_TEST_SESSIONS"
+    else
+        printf '%s\n' '{"sessions":[]}'
+    fi
 fi
 exit 0
 EOF
@@ -143,6 +151,8 @@ run_install() {
         HERDR_TG_ENABLED= \
         HERDR_TG_TOKEN= \
         HERDR_TG_USERNAME= \
+        HERDR_SESSION="${HERDR_TEST_ENV_SESSION:-}" \
+        HERDR_TEST_SESSIONS="${HERDR_TEST_SESSIONS:-}" \
         HERDR_TEST_NONROOT_UID="${HERDR_TEST_NONROOT_UID:-501}" \
         HERDR_TEST_PGREP="${HERDR_TEST_PGREP:-0}" \
         HERDR_TEST_ROOT="${HERDR_TEST_ROOT:-0}" \
@@ -344,5 +354,38 @@ assert_contains "$TMP/calls.log" 'launchctl bootout gui/501/com.herdr-remote.tun
 assert_contains "$TMP/calls.log" 'systemctl --user enable herdr-telegram.service'
 assert_contains "$TMP/calls.log" 'systemctl --user disable herdr-tunnel.service'
 assert_not_contains "$TMP/calls.log" '123456:ABC_def'
+
+# The relay polls one herdr session and reads it from HERDR_SESSION in its own
+# environment. A managed service inherits nothing from the installing shell, so
+# config.env has to carry it or the relay polls the default session's socket and
+# reports no agents.
+SESSION_ONE_HOME="$TMP/session-one-home"
+HERDR_TEST_SESSIONS='{"sessions":[{"name":"default","running":false,"default":true},{"name":"main","running":true,"default":false}]}' \
+    run_install linux "$SESSION_ONE_HOME" $'y\nn\n' > "$TMP/session-one.log"
+assert_contains "$SESSION_ONE_HOME/.config/herdr-remote/config.env" '^HERDR_SESSION=main$'
+assert_contains "$TMP/session-one.log" 'the only named session running'
+assert_contains "$CALLS" 'herdr pane list HERDR_SESSION=main'
+
+# No named session running: leave it unset. The default session's socket sits at
+# the config root rather than under sessions/<name>/, so pinning it by name would
+# point the relay at a path that does not exist.
+SESSION_NONE_HOME="$TMP/session-none-home"
+HERDR_TEST_SESSIONS='{"sessions":[{"name":"default","running":true,"default":true}]}' \
+    run_install linux "$SESSION_NONE_HOME" $'y\nn\n' > "$TMP/session-none.log"
+assert_contains "$SESSION_NONE_HOME/.config/herdr-remote/config.env" '^HERDR_SESSION=$'
+
+# An installer run from inside a session pins that one without asking.
+SESSION_ENV_HOME="$TMP/session-env-home"
+HERDR_TEST_ENV_SESSION=work \
+HERDR_TEST_SESSIONS='{"sessions":[{"name":"work","running":true,"default":false},{"name":"other","running":true,"default":false}]}' \
+    run_install linux "$SESSION_ENV_HOME" $'y\nn\n' > "$TMP/session-env.log"
+assert_contains "$SESSION_ENV_HOME/.config/herdr-remote/config.env" '^HERDR_SESSION=work$'
+assert_contains "$TMP/session-env.log" 'inherited from this shell'
+
+# Several named sessions and nothing inherited: the operator picks one.
+SESSION_PICK_HOME="$TMP/session-pick-home"
+HERDR_TEST_SESSIONS='{"sessions":[{"name":"alpha","running":true,"default":false},{"name":"beta","running":true,"default":false}]}' \
+    run_install linux "$SESSION_PICK_HOME" $'y2\nnn' > "$TMP/session-pick.log"
+assert_contains "$SESSION_PICK_HOME/.config/herdr-remote/config.env" '^HERDR_SESSION=beta$'
 
 echo "installer service tests passed"
