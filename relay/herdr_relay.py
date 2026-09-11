@@ -124,6 +124,16 @@ def _herdr_env(session):
 VAPID_PUBLIC_KEY = os.environ.get("HERDR_VAPID_PUBLIC", "")
 VAPID_PRIVATE_KEY = os.environ.get("HERDR_VAPID_PRIVATE", "")
 VAPID_SUBJECT = os.environ.get("HERDR_VAPID_SUBJECT", "mailto:herdr@localhost")
+# Apple validates the VAPID `sub` claim and rejects anything that is not a real mailto: address
+# or https: URL. "localhost" is not a domain, so the default above earns a blanket 403
+# BadJwtToken from web.push.apple.com -- while FCM and Mozilla accept it without comment. Push
+# therefore works everywhere EXCEPT iOS, which is the platform most likely to be the reason
+# somebody installed the PWA in the first place.
+#
+# Nothing about the failure is visible from the app: subscribing succeeds, the toggle turns
+# green, push_subs.json fills in, and the handset simply never buzzes. Worth saying out loud at
+# startup and again on the first 403, because the alternative is guessing.
+VAPID_SUBJECT_IS_DEFAULT = "HERDR_VAPID_SUBJECT" not in os.environ
 push_subscriptions = []  # list of PushSubscription dicts
 PUSH_SUBS_FILE = os.path.join(LOG_DIR, "push_subs.json")
 ACTIVE_SESSIONS_FILE = os.path.join(LOG_DIR, "active_sessions.json")
@@ -643,6 +653,7 @@ def _deliver_push(payload, headers):
         log.warning("pywebpush not installed, skipping push")
         return
     dead = []
+    sent = 0
     for sub in list(push_subscriptions):
         try:
             webpush(
@@ -652,8 +663,15 @@ def _deliver_push(payload, headers):
                 vapid_claims={"sub": VAPID_SUBJECT},
                 headers=headers,
             )
+            sent += 1
         except Exception as e:
             log.warning("Push failed for %.60s: %s", (sub or {}).get("endpoint", "?"), e)
+            if "403" in str(e) and VAPID_SUBJECT_IS_DEFAULT:
+                log.warning(
+                    "  hint: HERDR_VAPID_SUBJECT is unset and Apple rejects the default %r. "
+                    "This is the usual cause of a 403 on an apple.com endpoint.",
+                    VAPID_SUBJECT,
+                )
             # 404/410 is the push service saying this subscription is retired, not a transient
             # failure -- anything else keeps its subscription for the next notification.
             if "410" in str(e) or "404" in str(e):
@@ -665,6 +683,13 @@ def _deliver_push(payload, headers):
             pass
     if dead:
         _save_push_subs()
+    # Only failures were logged, which makes "my phone never buzzed" unfalsifiable from the
+    # server side: a push that was never ATTEMPTED and one the push service accepted and the
+    # handset then declined to show leave behind exactly the same thing -- nothing. One line per
+    # delivery separates those two cases, and it is the only way to tell a relay-side bug from an
+    # OS-side one without a Mac and a cable.
+    if sent:
+        log.info("Push delivered to %d subscription(s)", sent)
 
 
 async def send_web_push(title: str, body: str, url: str = "/", clear: bool = False):
@@ -2645,6 +2670,13 @@ async def main():
                              ping_interval=20, ping_timeout=90)
         hosts = ["local"] + REMOTES
         log.info("herdr-remote relay on %s:%d (WebSocket + HTTP POST)", RELAY_HOST, WS_PORT)
+        if VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY and VAPID_SUBJECT_IS_DEFAULT:
+            log.warning(
+                "HERDR_VAPID_SUBJECT is unset. Apple Web Push rejects the default %r with "
+                "403 BadJwtToken, so iOS devices will subscribe successfully and then never "
+                "receive a notification. Set it to a real mailto: address or https: URL.",
+                VAPID_SUBJECT,
+            )
         log.info("Polling: %s", ", ".join(hosts))
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
