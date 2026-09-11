@@ -49,9 +49,14 @@ function paneParts(p) {
   // exists to untangle (several agents in ONE project) the cwd is identical on every row, so it
   // discriminates nothing.
   const tabCount = tabCountBySpace.get(agentWorkspaceKey(p)) || 0;
+  // The agent's own name beats the tab's. Both answer "which of this space's rows is this one",
+  // but the name says it: a herd of `dre-exec` / `dre-rev-1` / `dre-rev-2` all sit in one tab, so
+  // the tab label separated none of them and rendered as the bare tab number -- `DRE · 1` three
+  // times. The tab label stays as the fallback for a pane with no agent name.
+  const label = (p.label || '').trim();
   return {
     project,
-    tab: meaningfulTabLabel(tabLabelByKey.get(agentTabKey(p)), tabCount),
+    tab: label || meaningfulTabLabel(tabLabelByKey.get(agentTabKey(p)), tabCount),
     secondary: herdSecondary(p, project),
   };
 }
@@ -66,7 +71,10 @@ function paneTitleInTab(p) {
  *  label, their tab and their cwd are all empty or identical and the row would read
  *  `tuyaos-ai-qemu` three times. */
 function herdSecondary(p, project) {
-  return (p.label || p.title || '') || informativeCwd(p, project) || p.pane_id;
+  // The label is deliberately NOT first any more: paneParts() now puts it in the title, and
+  // repeating it here cost the row its only live field -- `DRE · dre-exec` over `claude ·
+  // dre-exec`, where line two used to carry what the agent was actually doing.
+  return (p.title || '') || informativeCwd(p, project) || p.pane_id;
 }
 
 /** Line one, as spans. See paneParts for why it is not a string. */

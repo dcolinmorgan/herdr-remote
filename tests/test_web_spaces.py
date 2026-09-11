@@ -462,13 +462,21 @@ class WebPaneNamingTests(unittest.TestCase, _Page):
         }""")
         self.assertEqual(self.card("wA:pH")["meta"], "claude · worktrees/hotfix")
 
-    def test_a_hand_set_name_beats_the_cwd_and_the_title(self):
+    def test_a_name_leads_the_title_and_leaves_line_two_to_the_activity(self):
+        """The name still beats the cwd and the title -- it just does so from line one.
+
+        It used to lead line two, which put it on the same row as the harness and left the title
+        (`billing · 1`) saying nothing a sibling did not also say. Moving it up is what lets three
+        agents in one tab be told apart, and gives line two back to what the agent is doing.
+        """
         self.page.evaluate("""() => {
           Object.assign(agents.find(a => a.pane_id === 'wA:pH'),
                         {label: 'ingest rework', title: 'running tests'});
           render();
         }""")
-        self.assertEqual(self.card("wA:pH")["meta"], "claude · ingest rework")
+        card = self.card("wA:pH")
+        self.assertEqual(card["title"][-1], "ingest rework")
+        self.assertEqual(card["meta"], "claude · running tests")
 
     def test_what_a_pane_is_called_never_depends_on_scope(self):
         """`data-agent-name` prefills the rename dialog, so it carries the real thing in both views

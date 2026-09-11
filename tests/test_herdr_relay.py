@@ -440,12 +440,17 @@ class RelayActivityPersistenceTests(unittest.TestCase):
             "result": {"workspaces": [{"workspace_id": "w1", "label": label}]}
         })
 
+    @staticmethod
+    def _agent_list(name=None):
+        agents = [] if name is None else [{"pane_id": "w1:p1", "name": name}]
+        return json.dumps({"result": {"agents": agents}})
+
     def test_workspace_name_is_exposed_to_clients(self):
         with loaded_relay() as relay:
             with mock.patch.object(
                 relay,
                 "run_herdr",
-                side_effect=[self._pane_list(), self._workspace_list()],
+                side_effect=[self._pane_list(), self._workspace_list(), self._agent_list()],
             ):
                 agents = relay.get_agents_from_host()
 
@@ -457,7 +462,8 @@ class RelayActivityPersistenceTests(unittest.TestCase):
             with mock.patch.object(
                 relay,
                 "run_herdr",
-                side_effect=[self._pane_list(label="pane name"), self._workspace_list()],
+                side_effect=[self._pane_list(label="pane name"), self._workspace_list(),
+                             self._agent_list()],
             ):
                 agents = relay.get_agents_from_host()
 
@@ -470,11 +476,58 @@ class RelayActivityPersistenceTests(unittest.TestCase):
             with mock.patch.object(
                 relay,
                 "run_herdr",
-                side_effect=[self._pane_list(), self._workspace_list()],
+                side_effect=[self._pane_list(), self._workspace_list(), self._agent_list()],
             ):
                 agents = relay.get_agents_from_host()
 
             self.assertEqual(agents[0]["label"], "")
+
+    def test_the_agent_name_becomes_the_label(self):
+        """The name herdr knows the agent by is what every client renders.
+
+        `pane list` carries the pane's label and never the agent's name, and nothing sets a pane
+        label by default -- so without this lookup an agent started as `mfc-exec` reaches the
+        clients with an empty label and is drawn as its pane id.
+        """
+        with loaded_relay() as relay:
+            with mock.patch.object(
+                relay,
+                "run_herdr",
+                side_effect=[self._pane_list(), self._workspace_list(),
+                             self._agent_list("mfc-exec")],
+            ):
+                agents = relay.get_agents_from_host()
+
+            self.assertEqual(agents[0]["label"], "mfc-exec")
+
+    def test_the_agent_name_wins_over_a_pane_label(self):
+        """Both can be set; the name is the one the operator addresses the agent by, and the one
+        `herdr agent rename` writes."""
+        with loaded_relay() as relay:
+            with mock.patch.object(
+                relay,
+                "run_herdr",
+                side_effect=[self._pane_list(label="pane name"), self._workspace_list(),
+                             self._agent_list("mfc-exec")],
+            ):
+                agents = relay.get_agents_from_host()
+
+            self.assertEqual(agents[0]["label"], "mfc-exec")
+
+    def test_unusable_agent_list_falls_back_to_the_pane_label(self):
+        """A broken `agent list` must not cost the clients the label they had before."""
+        for raw in ("", "not json", json.dumps({"result": {}})):
+            with self.subTest(raw=raw):
+                with loaded_relay() as relay:
+                    with mock.patch.object(
+                        relay,
+                        "run_herdr",
+                        side_effect=[self._pane_list(label="pane name"),
+                                     self._workspace_list(), raw],
+                    ):
+                        agents = relay.get_agents_from_host()
+
+                    self.assertEqual(agents[0]["label"], "pane name")
 
     def test_unusable_workspace_list_leaves_workspace_label_empty(self):
         for raw in ("", "not json", json.dumps({"result": {}})):
@@ -483,7 +536,7 @@ class RelayActivityPersistenceTests(unittest.TestCase):
                     with mock.patch.object(
                         relay,
                         "run_herdr",
-                        side_effect=[self._pane_list(), raw],
+                        side_effect=[self._pane_list(), raw, self._agent_list()],
                     ):
                         agents = relay.get_agents_from_host()
 
