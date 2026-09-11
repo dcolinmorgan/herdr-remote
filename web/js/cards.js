@@ -1,3 +1,11 @@
+// The approval options whose labels were designed to be cut at the first comma. They mirror
+// TOOL_OPTIONS and SUBAGENT_OPTIONS in herdr_relay.py -- keep the two lists in step. Every other
+// option (notably Claude's numbered permission menu) keeps its full label; see the render below.
+const SHORT_LABEL_OPTIONS = new Set([
+  'yes, single permission', 'trust, always allow', 'no (tab to edit)',
+  'approve all pending', 'configure individually', 'exit (cancel subagents)',
+]);
+
 // ---- What a pane row is CALLED ---------------------------------------------
 //
 // Two questions, not one, so two functions and an explicit scope rather than one function guessing
@@ -456,7 +464,12 @@ function openTerminal(paneId) {
       const button = document.createElement('button');
       const lower = option.toLowerCase();
       button.className = lower.includes('yes')||lower.includes('approve')?'btn-yes':lower.includes('trust')?'btn-trust':'btn-no';
-      button.textContent = option.split(',')[0];
+      // Codex's fixed option set reads well cut at the first comma ("yes, single permission" ->
+      // "yes"). Claude's numbered menu is all "Yes, and ..." variants, so the same cut collapsed
+      // every option to Yes/Yes/Yes/No and the menu became unusable. Only the options the cut was
+      // designed for get it; anything else keeps its full label and wraps onto its own row.
+      button.textContent = SHORT_LABEL_OPTIONS.has(lower) ? option.split(',')[0] : option;
+      if (button.textContent.length > 18) button.classList.add('opt-long');
       if (a.interaction==='omp_question'&&a.multi) {
         button.dataset.selected=String((a.selected_options||[]).includes(option));
         button.classList.toggle('selected',button.dataset.selected==='true');
@@ -467,7 +480,7 @@ function openTerminal(paneId) {
           ws.send(JSON.stringify({type:'question_toggle',pane_id:activePane,prompt_id:a.prompt_id,option}));
         });
       } else {
-        button.addEventListener('click',()=>respond(option));
+        button.addEventListener('click',()=>respond(option, a.prompt_id));
       }
       qa.appendChild(button);
     }
@@ -486,7 +499,7 @@ function openTerminal(paneId) {
         const button = document.createElement('button');
         button.className = cls;
         button.textContent = label;
-        button.addEventListener('click',()=>respond(response));
+        button.addEventListener('click',()=>respond(response, a.prompt_id));
         ak.appendChild(button);
       }
     }

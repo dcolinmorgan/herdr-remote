@@ -32,8 +32,11 @@ function handleMessage(msg) {
   }
   if (msg.type === 'error') {
     // A rejected session_switch must not leave the UI stuck on
-    // "switching…" forever. Minimum handling only: no toast UI, since
-    // nothing else in this file renders errors.
+    // "switching…" forever. Still no toast UI, but silence was its own bug: a refused respond
+    // cleared the buttons and looked exactly like an accepted one, so a rejection has to be
+    // perceptible at least as a cue. The buttons themselves come back on the next blocked
+    // broadcast, since the pane is still blocked.
+    if (window.cue) cue('error');
     switchingSession = false;
     render();
     return;

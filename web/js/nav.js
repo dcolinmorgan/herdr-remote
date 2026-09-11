@@ -147,7 +147,18 @@ function pressCtrl(label) {
 
 function toggleArrows(){}
 function hideArrows(){}
-function respond(t){if(!ws||!activePane)return;if(window.cue)cue('success');ws.send(JSON.stringify({type:'respond',pane_id:activePane,text:t}));document.getElementById('quickActions').innerHTML='';setTimeout(refreshPane,500);}
+// The relay refuses any respond whose prompt_id does not match what is on the pane right now
+// (herdr_relay.py, "prompt changed; refresh and try again"). This path sent none at all, so every
+// quick-action button was rejected server-side while the UI cleared itself and looked like nothing
+// had happened -- the pane stayed blocked and the buttons reappeared on the next broadcast. The
+// caller passes the prompt_id of the agent card it drew the button from; mirror.js already did.
+function respond(t, promptId){
+  if(!ws||!activePane)return;
+  if(window.cue)cue('success');
+  ws.send(JSON.stringify({type:'respond',pane_id:activePane,prompt_id:promptId||'',text:t}));
+  document.getElementById('quickActions').innerHTML='';
+  setTimeout(refreshPane,500);
+}
 let imeComposing = false, imeEndedAt = 0;
 {
   const ti = document.getElementById('termInput');
