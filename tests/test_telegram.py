@@ -399,7 +399,9 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
             await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
 
         self.assertIn("failed", callback.message.replies[0][0].lower())
-        self.assertEqual(callback.edit_calls, 0)
+        # Buttons come off on the tap and go back on failure: two edits, original markup restored.
+        self.assertEqual(callback.edit_calls, 2)
+        self.assertIs(callback.edited_markup, markup)
         self.assertIn("w0:p1", tg.approval_tokens)
 
     async def test_approval_sends_key_and_removes_controls_on_success(self):
@@ -743,6 +745,132 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         await tg.handle_text(make_update(message=message), SimpleNamespace())
 
         self.assertIn("1-10000", message.replies[0][0])
+
+
+
+class NumberedMenuKeyboardTests(unittest.TestCase):
+    """A Claude-style numbered menu becomes one button per option, each pressing its number."""
+
+    OPTIONS = [
+        "Yes",
+        "Yes, and always allow access to /tmp from this project",
+        "Yes, and switch to auto mode · auto mode handles these prompts for you",
+        "No",
+    ]
+
+    def test_buttons_press_their_option_number(self):
+        markup = tg.make_keyboard("pane-1", self.OPTIONS, interaction="numbered")
+        rows = markup.inline_keyboard
+        self.assertEqual(len(rows), 5)  # four options + "Open output & reply"
+        keys = [json.loads(row[0].callback_data)["k"] for row in rows[:4]]
+        self.assertEqual(keys, ["1", "2", "3", "4"])
+        self.assertEqual(rows[4][0].text, "Open output & reply")
+
+    def test_labels_keep_number_drop_hint_and_fit_a_phone(self):
+        markup = tg.make_keyboard("pane-1", self.OPTIONS, interaction="numbered")
+        labels = [row[0].text for row in markup.inline_keyboard[:4]]
+        self.assertEqual(labels[0], "1. Yes")
+        self.assertEqual(labels[3], "4. No")
+        self.assertTrue(labels[2].startswith("3. Yes, and switch to auto mode"))
+        self.assertNotIn("·", labels[2])
+        self.assertTrue(all(len(label) <= tg.NUMBERED_LABEL_MAX for label in labels))
+        self.assertTrue(labels[1].endswith("…"))
+
+    def test_plain_prompt_without_numbered_interaction_is_unchanged(self):
+        markup = tg.make_keyboard("pane-1", ["Yes", "No"])
+        labels = [row[0].text for row in markup.inline_keyboard[:2]]
+        self.assertEqual(labels, ["Yes", "No"])
+
+
+
+class ApprovalDoubleTapTests(unittest.IsolatedAsyncioTestCase):
+    """A tap is acknowledged at once, delivered once, and never duplicated by a second tap."""
+
+    def setUp(self):
+        self.old_chat_id = tg.CHAT_ID
+        tg.CHAT_ID = "42"
+        tg.relay_connected = True
+        tg.agents = make_agents(1, status="blocked")
+        tg.pending.clear()
+        tg.approval_tokens.clear()
+        tg.blocked_prompt_ids.clear()
+        tg.approval_in_flight.clear()
+
+    def tearDown(self):
+        tg.CHAT_ID = self.old_chat_id
+        tg.approval_in_flight.clear()
+
+    def _tap(self, markup):
+        callback = FakeCallback(markup.inline_keyboard[0][0].callback_data)
+        callback.message.reply_markup = markup
+        return callback
+
+    async def test_buttons_come_off_before_delivery(self):
+        callback = self._tap(make_active_approval_keyboard("w0:p1", ["yes", "no"]))
+        seen = {}
+
+        async def deliver(*args, **kwargs):
+            seen["edits"] = callback.edit_calls
+            seen["markup"] = callback.edited_markup
+
+        with patch.object(tg, "send_keys_to_relay", AsyncMock(side_effect=deliver)):
+            await tg.handle_callback(make_update(callback=callback), SimpleNamespace())
+
+        self.assertEqual(seen["edits"], 1)
+        self.assertIsNone(seen["markup"])
+        self.assertEqual(callback.edit_calls, 1)
+        self.assertIn("Sent: yes", callback.message.replies[0][0])
+        self.assertNotIn("w0:p1", tg.approval_tokens)
+        self.assertNotIn("w0:p1", tg.approval_in_flight)
+
+    async def test_second_tap_during_delivery_is_refused_not_resent(self):
+        markup = make_active_approval_keyboard("w0:p1", ["yes", "no"])
+        first_tap, second_tap = self._tap(markup), self._tap(markup)
+        gate = asyncio.Event()
+
+        async def deliver(*args, **kwargs):
+            await gate.wait()
+
+        send_keys = AsyncMock(side_effect=deliver)
+        with patch.object(tg, "send_keys_to_relay", send_keys):
+            first = asyncio.create_task(
+                tg.handle_callback(make_update(callback=first_tap), SimpleNamespace())
+            )
+            await asyncio.sleep(0)  # first tap reaches the relay call and parks on the gate
+            await tg.handle_callback(make_update(callback=second_tap), SimpleNamespace())
+            gate.set()
+            await first
+
+        self.assertEqual(send_keys.await_count, 1)
+        self.assertIn("wait", second_tap.message.replies[0][0].lower())
+        self.assertEqual(second_tap.edit_calls, 0)
+        self.assertIn("Sent: yes", first_tap.message.replies[0][0])
+        self.assertNotIn("w0:p1", tg.approval_in_flight)
+
+    async def test_tap_after_success_hits_the_older_prompt_guard(self):
+        markup = make_active_approval_keyboard("w0:p1", ["yes", "no"])
+        first_tap, second_tap = self._tap(markup), self._tap(markup)
+        with patch.object(tg, "send_keys_to_relay", AsyncMock()) as send_keys:
+            await tg.handle_callback(make_update(callback=first_tap), SimpleNamespace())
+            await tg.handle_callback(make_update(callback=second_tap), SimpleNamespace())
+
+        self.assertEqual(send_keys.await_count, 1)
+        self.assertIn("older prompt", second_tap.message.replies[0][0].lower())
+
+    async def test_blocked_update_refreshes_prompt_id_without_renotifying(self):
+        tg.blocked_prompt_ids["w0:p1"] = "old"
+        app = SimpleNamespace(bot=FakeBot())
+
+        await tg.notify_blocked_safely(
+            app, {"type": "blocked", "pane_id": "w0:p1", "prompt_id": "new", "update": True}
+        )
+        await tg.notify_blocked_safely(
+            app, {"type": "blocked", "pane_id": "w0:p2", "prompt_id": "x", "update": True}
+        )
+
+        self.assertEqual(tg.blocked_prompt_ids["w0:p1"], "new")
+        self.assertNotIn("w0:p2", tg.blocked_prompt_ids)  # never announced: nothing to refresh
+        self.assertEqual(app.bot.sent, [])
 
 
 if __name__ == "__main__":

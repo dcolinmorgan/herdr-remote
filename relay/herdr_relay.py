@@ -1570,6 +1570,84 @@ def detect_approval_options(text):
     return []
 
 
+# Claude Code draws every approval and question as a numbered menu:
+#
+#    Do you want to proceed?
+#    ❯ 1. Yes
+#      2. Yes, and always allow access to /tmp from this project
+#      3. Yes, and switch to auto mode · auto mode handles these prompts
+#         for you
+#      4. No
+#    Esc to cancel · Tab to amend
+#
+# None of that says "yes, single permission", so detect_approval_options() above finds nothing
+# and every client shows a blocked Claude with no way to answer it. The menu is driven by real
+# number keys -- exactly what `send_keys` delivers -- so the labels are harvested here and
+# clients bind key N to option N.
+NUMBERED_OPTION_RE = re.compile(r"^(\s*(?:[❯>›»▶]\s*)?)(\d{1,2})[.)]\s+(\S.*?)\s*$")
+
+
+def detect_numbered_options(text):
+    """Labels of the last `1.`..`N.` menu on screen, in order, or [] when there is none.
+
+    A run starts at `1.`, must count up by one per line, and ends at the first line that is
+    neither the next number nor a deeper-indented continuation of the previous label (Claude
+    wraps long options onto indented lines; the dialog's own footer is indented less than the
+    numbers, so it terminates the run instead of being glued onto the last option). Two options
+    are the minimum, so a stray "1." in ordinary output is not mistaken for a menu. The LAST
+    complete run wins because a blocked pane draws its menu under whatever the agent printed
+    earlier, and that earlier output may itself contain a numbered list.
+    """
+    best = []
+    current = []
+    number_col = None
+    for line in text.splitlines():
+        match = NUMBERED_OPTION_RE.match(line)
+        if match:
+            number = int(match.group(2))
+            if number == 1:
+                current = [match.group(3)]
+                number_col = len(match.group(1))
+            elif current and number == len(current) + 1:
+                current.append(match.group(3))
+            else:
+                current = []
+                number_col = None
+            if len(current) >= 2:
+                best = list(current)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if current and number_col is not None and indent > number_col:
+            current[-1] = f"{current[-1]} {stripped}"
+            if len(current) >= 2:
+                best = list(current)
+            continue
+        current = []
+        number_col = None
+    return best
+
+
+def numbered_option_key(text, options):
+    """The key that picks `text` from a numbered menu, or None when nothing matches.
+
+    Accepts the bare number ("2") or an option's label, case-insensitively, either in full or
+    up to its first comma -- so "yes" picks "Yes" and "no" picks "No" even when the fuller
+    labels are "Yes, and always allow ..." / "No, and tell Claude ...". The first match wins.
+    """
+    if not options:
+        return None
+    if text.isdigit() and 1 <= int(text) <= len(options):
+        return text
+    wanted = text.casefold()
+    for index, label in enumerate(options, start=1):
+        if wanted in {label.casefold(), label.split(",")[0].strip().casefold()}:
+            return str(index)
+    return None
+
+
 def detect_options(text):
     approval_options = detect_approval_options(text)
     if approval_options:
@@ -1592,6 +1670,19 @@ def custom_editor_active(text):
 def question_prompt_id(pane_id, content):
     question = detect_question(content)
     if not question:
+        numbered = detect_numbered_options(content)
+        if numbered:
+            # A Claude approval/question menu sits inside a live status region -- an elapsed
+            # timer ("· 5s"), a token counter ("↑ 21 tokens"), a "Unfurling…" spinner, a usage-
+            # percent line -- that repaints every second while the menu itself does not change.
+            # Hashing the whole screen (the else branch) made the id churn once or twice per
+            # poll, so the prompt_id a client echoed back with its tap was already stale and the
+            # tap was refused as "prompt changed". Hash only the option labels: stable while
+            # the same menu is up, and still different for a menu with different options (the
+            # stale-prompt guard the id exists for). The omp branch below hashes its labels for
+            # the same reason.
+            signature = json.dumps({"pane_id": pane_id, "numbered": numbered}, sort_keys=True)
+            return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:20]
         normalized = " ".join(content.split())
         return hashlib.sha256(f"{pane_id}\n{normalized}".encode("utf-8")).hexdigest()[:20]
     labels = [
@@ -1619,6 +1710,10 @@ def prompt_matches(pane_id, prompt_id, remote=None):
 def blocked_message(pane_id, agent, project, host, content):
     question = detect_question(content) if agent == "omp" else None
     options = detect_options(content) if agent == "omp" else detect_approval_options(content)
+    # omp has its own question grammar; everything else falls back to a Claude-style 1..N menu.
+    numbered = agent != "omp" and not options and detect_numbered_options(content)
+    if numbered:
+        options = numbered
     return {
         "type": "blocked",
         "pane_id": pane_id,
@@ -1634,7 +1729,7 @@ def blocked_message(pane_id, agent, project, host, content):
             if option["multi"] and option["label"] != QUESTION_OTHER
             and "Done selecting" not in option["label"] and option["checked"]
         ] if question else [],
-        "interaction": "omp_question" if question else "prompt",
+        "interaction": "omp_question" if question else ("numbered" if numbered else "prompt"),
         "multi": bool(question and question["multi"]),
         "update": False,
     }
@@ -2227,11 +2322,21 @@ async def handle_client(ws):
                     if await asyncio.to_thread(pane_is_omp, pane_id, remote=remote)
                     else None
                 )
+                menu_key = None if question else numbered_option_key(
+                    text, detect_numbered_options(content)
+                )
                 log.info("Response from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("respond", ip, device, pane_id, f"text={text!r}")
                 if question:
                     delivered = await asyncio.to_thread(
                         respond_to_question, pane_id, text, question, remote=remote
+                    )
+                elif menu_key and not custom_editor_active(content):
+                    # A numbered menu takes a real key press. Pasting "1" (or "no") through the
+                    # send-text branch below would not select anything -- the trailing Enter
+                    # lands on whichever option is highlighted, which is "Yes".
+                    delivered = await asyncio.to_thread(
+                        _mutate_herdr, "pane", "send-keys", pane_id, menu_key, remote=remote
                     )
                 elif custom_editor_active(content) or text.lower() in SAFE_RESPONSES:
                     delivered = await asyncio.to_thread(
@@ -2398,8 +2503,14 @@ async def handle_client(ws):
                     continue
                 remote = pane_remote_map.get(pane_id)
                 content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
-                if detect_approval_options(content) and any(key.isdigit() for key in keys):
-                    if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
+                menu = detect_approval_options(content) or detect_numbered_options(content)
+                digits = any(key.isdigit() for key in keys)
+                if digits and (menu or msg.get("prompt_id") is not None):
+                    # A digit aimed at a menu must echo the prompt_id of the menu on screen.
+                    # If the client echoes one but no menu is visible any more, the menu was
+                    # already answered (typically by the first of two taps) and the digit
+                    # would land in the agent's input line instead -- refuse it the same way.
+                    if not menu or question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
                         await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
                         continue
                 log.info("Keys from %s (%s): pane=%s keys=%s", ip, device, pane_id, keys)

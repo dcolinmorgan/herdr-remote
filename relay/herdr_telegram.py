@@ -44,6 +44,7 @@ if not TOKEN:
 pending: OrderedDict[tuple[int, int], str] = OrderedDict()  # (chat_id, message_id) -> pane_id
 approval_tokens: dict[str, str] = {}  # pane_id -> current blocked-notification generation
 blocked_prompt_ids: dict[str, str] = {}  # pane_id -> current relay prompt identity
+approval_in_flight: set[str] = set()  # panes whose tapped choice is still being delivered
 agents: list[dict] = []       # current agent list from relay
 prev_statuses: dict[str, str] = {}  # pane_id -> last known status
 relay_connected = False
@@ -596,6 +597,44 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # --- Callback handler (buttons) ---
 
+async def deliver_choice(query, pane_id: str, label: str, deliver) -> bool:
+    """Acknowledge a tapped choice at once, deliver it exactly once, then confirm or roll back.
+
+    Telegram shows nothing for a tap until the bot edits or replies, and the relay plus two
+    Telegram round trips take a second or two -- long enough to tap again. A second tap used
+    to reach the relay while the first was in flight; by then the dialog had closed, so the
+    duplicate "1" was typed into the agent's input line instead. So: the buttons come off the
+    message BEFORE delivery (that is the feedback), a second tap during delivery is refused,
+    and a failed delivery puts the buttons back so the user can retry. Returns True on
+    success.
+    """
+    if pane_id in approval_in_flight:
+        await query.message.reply_text(
+            f"Still sending your previous choice -- wait for \"Sent\" before tapping again."
+        )
+        return False
+    approval_in_flight.add(pane_id)
+    previous_markup = query.message.reply_markup
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    try:
+        await deliver()
+        approval_tokens.pop(pane_id, None)
+    except Exception as e:
+        try:
+            await query.edit_message_reply_markup(reply_markup=previous_markup)
+        except Exception:
+            pass
+        await query.message.reply_text(f"Failed: {scrub(e)}")
+        return False
+    finally:
+        approval_in_flight.discard(pane_id)
+    await query.message.reply_text(f"Sent: {label}")
+    return True
+
+
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
     query = update.callback_query
@@ -715,14 +754,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not label:
             await query.message.reply_text("That approval action is no longer supported. Use the latest notification.")
             return
-        try:
-            await send_to_relay(pane_id, label, prompt_id=prompt_id)
-        except Exception as e:
-            await query.message.reply_text(f"Failed: {scrub(e)}")
-            return
-        approval_tokens.pop(pane_id, None)
-        await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(f"Sent: {label}")
+        await deliver_choice(
+            query, pane_id, label, lambda: send_to_relay(pane_id, label, prompt_id=prompt_id)
+        )
         return
 
     # Confirm a blocked agent's prompt by pressing the option number.
@@ -744,14 +778,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         label = btn.text
                 except (ValueError, TypeError):
                     pass
-    try:
-        await send_keys_to_relay(pane_id, [key], prompt_id=prompt_id)
-    except Exception as e:
-        await query.message.reply_text(f"Failed: {scrub(e)}")
-        return
-    approval_tokens.pop(pane_id, None)
-    await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(f"Sent: {label}")
+    await deliver_choice(
+        query, pane_id, label, lambda: send_keys_to_relay(pane_id, [key], prompt_id=prompt_id)
+    )
 
 
 # --- Free text reply ---
@@ -799,6 +828,22 @@ SUBAGENT_BUTTONS = [
 ]
 
 
+NUMBERED_LABEL_MAX = 40
+
+
+def numbered_button_label(number: int, option: str) -> str:
+    """Button text for option N of a Claude-style numbered menu.
+
+    The number is kept because it is literally the key the button presses. Claude appends
+    hints after " · " ("switch to auto mode · auto mode handles these prompts for you"); the
+    hint does not fit a phone-width button, the choice does.
+    """
+    text = f"{number}. {option.split(' · ')[0].strip()}"
+    if len(text) > NUMBERED_LABEL_MAX:
+        text = text[:NUMBERED_LABEL_MAX - 1] + "…"
+    return text
+
+
 def make_keyboard(
     pane_id: str,
     options: list[str] | None,
@@ -809,6 +854,9 @@ def make_keyboard(
         return interaction_keyboard(pane_id)
     if interaction == "omp_question":
         buttons = [(opt, opt) for opt in options]
+    elif interaction == "numbered":
+        # Claude Code's 1..N menu: one button per option, pressing that option's number.
+        buttons = [(numbered_button_label(i, opt), opt) for i, opt in enumerate(options, start=1)]
     elif "trust" in " ".join(options).lower():
         buttons = TOOL_BUTTONS
     elif "approve all" in " ".join(options).lower():
@@ -892,6 +940,10 @@ async def notify_blocked(
 
 async def notify_blocked_safely(app: Application, msg: dict):
     if msg.get("update"):
+        # Same blocked streak, re-hashed content: the prompt_id the relay will demand has
+        # moved, so keep ours current or every tap after the redraw fails as "prompt changed".
+        if msg.get("pane_id") in blocked_prompt_ids and msg.get("prompt_id"):
+            blocked_prompt_ids[msg["pane_id"]] = msg["prompt_id"]
         return
     try:
         await notify_blocked(
