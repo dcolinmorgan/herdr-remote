@@ -800,6 +800,34 @@ def get_workspace_labels(remote=None):
         return {}
 
 
+def get_agent_names(remote=None):
+    """Map pane_id to the agent's own name in herdr ("mfc-exec", "dre-rev-1").
+
+    This is a second CLI call on a hot path, which the module otherwise avoids -- but the name
+    lives nowhere else. `pane list` carries the harness kind (`agent: "claude"`) and the pane's
+    own label, never the agent's name, so an agent started as `mfc-exec` reaches every client as
+    an empty label and is rendered as `w5:pH`.
+
+    It also makes `rename_agent` mean something. That handler shells out to `herdr agent rename`,
+    which sets exactly this field -- so before this map existed, renaming from the app wrote a
+    name that no client could ever read back.
+
+    Shaped like get_workspace_labels() and called on the same condition (only when there are
+    panes), so an idle host adds no round trips.
+    """
+    raw = run_herdr("agent", "list", remote=remote)
+    try:
+        data = json.loads(raw)
+        agents = data.get("result", {}).get("agents", [])
+        return {
+            a["pane_id"]: a["name"]
+            for a in agents
+            if a.get("pane_id") and a.get("name")
+        }
+    except (json.JSONDecodeError, KeyError):
+        return {}
+
+
 def activity_title(title, agent):
     """The terminal title, but only when it carries something the cwd does not.
 
@@ -893,6 +921,7 @@ def list_panes_from_host(remote=None):
         data = json.loads(raw)
         panes = data.get("result", {}).get("panes", [])
         workspace_labels = get_workspace_labels(remote=remote) if panes else {}
+        agent_names = get_agent_names(remote=remote) if panes else {}
     except (json.JSONDecodeError, KeyError):
         return [], []
 
@@ -916,7 +945,10 @@ def list_panes_from_host(remote=None):
         agents.append({
             "pane_id": p["pane_id"],
             "agent": p.get("agent", ""),
-            "label": p.get("label", ""),
+            # The agent's name first, the pane's label second. herdr keeps the two apart and
+            # `pane list` only carries the latter, which nothing sets by default -- so this field
+            # was empty for every agent on the host and clients fell back to the pane id.
+            "label": agent_names.get(p["pane_id"]) or p.get("label", ""),
             # Names the space, and stands in for panes that have no label.
             "workspace_label": workspace_labels.get(p.get("workspace_id", ""), ""),
             "status": p.get("agent_status", "unknown"),
