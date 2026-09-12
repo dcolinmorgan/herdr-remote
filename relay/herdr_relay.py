@@ -1619,6 +1619,11 @@ def detect_approval_options(text):
 NUMBERED_OPTION_RE = re.compile(r"^(\s*(?:[❯>›»▶]\s*)?)(\d{1,2})[.)]\s+(\S.*?)\s*$")
 
 
+# A horizontal rule: box-drawing or ASCII dashes only, at least three of them. Used by
+# detect_numbered_options to step over a divider drawn inside a menu.
+MENU_RULE_RE = re.compile(r"^[\u2500-\u257f\u2014\u2013\-=_]{3,}$")
+
+
 def detect_numbered_options(text):
     """Labels of the last `1.`..`N.` menu on screen, in order, or [] when there is none.
 
@@ -1650,6 +1655,14 @@ def detect_numbered_options(text):
             continue
         stripped = line.strip()
         if not stripped:
+            continue
+        if current and MENU_RULE_RE.match(stripped):
+            # Claude draws a rule between the answers it was given and the two it always adds
+            # ("Type something.", "Chat about this"). The rule sits at column 0, so it is neither
+            # the next number nor a deeper-indented continuation and it ended the run -- losing
+            # every option below it. On a question menu that is the LAST option, which no client
+            # could then reach. It carries no label, so skipping it cannot invent one, and a run
+            # still ends at the first line that is genuinely neither.
             continue
         indent = len(line) - len(line.lstrip())
         if current and number_col is not None and indent > number_col:
@@ -1695,8 +1708,26 @@ def detect_options(text):
 
 
 def custom_editor_active(text):
-    return "Enter your response:" in text or (
-        "Custom answer:" in text and "submit" in text.lower()
+    """True when a free-text field on the pane has focus, so typed text must be sent AS TEXT.
+
+    Claude's "Type something." is not a second screen. Choosing it leaves the whole numbered
+    menu on display and turns that one row into an inline input -- so the option list still
+    parses, the relay still read it as a menu, and everything a reader typed was matched against
+    the labels and sent as a KEY PRESS. A digit landed in the field as a character ("3", then
+    "33" on the second try), a sentence that happened to equal a label pressed that label's
+    number, and anything else was refused outright as "free-text response requires a detected
+    question". The menu never closed, because nothing had been selected.
+
+    The one thing that changes between the two states is the dialog's own footer: it gains
+    "ctrl+g to edit in <editor>" exactly while the field has focus. The editor name is the
+    reader's $EDITOR, so only the invariant half is matched. Verified against captures of all
+    four states -- cursor on an ordinary option (absent), cursor on the field (present), and the
+    field holding one and two typed characters (present).
+    """
+    return (
+        "Enter your response:" in text
+        or ("Custom answer:" in text and "submit" in text.lower())
+        or "ctrl+g to edit in" in text.lower()
     )
 
 def question_prompt_id(pane_id, content):
@@ -1762,6 +1793,13 @@ def blocked_message(pane_id, agent, project, host, content):
             and "Done selecting" not in option["label"] and option["checked"]
         ] if question else [],
         "interaction": "omp_question" if question else ("numbered" if numbered else "prompt"),
+        # A text field on the pane has focus. The menu is still drawn and still parses -- Claude's
+        # "Type something." turns one of its own rows into an input rather than opening a second
+        # screen -- so nothing else in this message distinguishes the two states, and a client
+        # that draws option buttons here draws buttons that cannot work: the field takes every
+        # digit as a character, and the arrow keys are the only way back to the list. Clients
+        # older than this field ignore it and behave exactly as they did.
+        "text_field": custom_editor_active(content),
         "multi": bool(question and question["multi"]),
         "update": False,
     }
@@ -1944,6 +1982,7 @@ async def _poll_once():
                     # `previous is not None` means "already announced this block".
                     message["update"] = previous is not None
                     last_blocked_prompts[pid] = fingerprint
+                    log.info("Blocked (poll) pane=%s update=%s", pid, message["update"])
                     await broadcast(message)
                     # Clients still need every re-broadcast (the prompt_id they must echo back
                     # to approve moves with the content), but the notification is one-shot.
@@ -1956,10 +1995,20 @@ async def _poll_once():
                     if gen != POLL_GENERATION:
                         return
             else:
-                if last_statuses.get(pid) == "blocked":
-                    await send_web_push("", "", clear=True)
-                    if gen != POLL_GENERATION:
-                        return
+                # No clear push. A subscription is taken out with userVisibleOnly: true, which
+                # is a contract: every push it carries must end in a notification the reader can
+                # see. A clear deliberately shows nothing -- it closes the stale prompt and
+                # returns -- so each one is a broken promise, and Safari answers a run of them by
+                # retiring the subscription outright. Which is invisible from here: the browser's
+                # own getSubscription() starts returning null (the toggle reads Disabled) while
+                # APNs goes on answering 201 for the retired token, so the relay logs deliveries
+                # to a handset that is no longer listening. Measured on this host: four silent
+                # clears, then every later push -- notifications included -- stopped waking the
+                # service worker, with 201 on every one.
+                #
+                # The stale notification is not left forever. It carries tag "herdr-blocked", so
+                # the next block replaces it in place, and tapping it closes it. That is a far
+                # smaller cost than losing the channel.
                 last_blocked_prompts.pop(pid, None)
             last_statuses[pid] = status
 async def event_push():
@@ -2024,12 +2073,29 @@ async def event_push():
             # that inserts an await between this check and the writes below.
             if gen != POLL_GENERATION:
                 continue        # a switch landed; this event is stale
+            # A block announced here is a block the poll will never announce. This path claims
+            # last_blocked_prompts, and _poll_once reads that same dict to decide whether a
+            # blocked pane is new -- so once the event has landed, the poll sees `previous is
+            # not None`, calls it an update and skips the notification, while an unchanged
+            # fingerprint stops it before even that. Either way send_web_push never ran, and
+            # since the plugin's event beats the poll whenever it fires at all, the
+            # notification was lost exactly when the fast path worked. Push here, on the same
+            # one-shot rule the poll uses: announce a new block, stay quiet for a re-broadcast.
+            previous = last_blocked_prompts.get(pane_id)
+            message["update"] = previous is not None
             last_blocked_prompts[pane_id] = (
                 message["prompt_id"],
                 tuple(message["selected_options"]),
                 message["prompt"],
             )
+            log.info("Blocked (event) pane=%s update=%s", pane_id, message["update"])
             await broadcast(message)
+            if not message["update"]:
+                await send_web_push(
+                    title=f"\U0001f411 {agent_data.get('project', '')} blocked",
+                    body=(content or agent_data.get("prompt", ""))[:120],
+                    url=f"/?pane={pane_id}",
+                )
 
 
 WEB_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web"))
@@ -2347,6 +2413,8 @@ async def handle_client(ws):
                     continue
                 content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
+                    log.warning("Response refused (stale prompt_id) from %s: pane=%s text=%r",
+                                ip, pane_id, text)
                     await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
                     continue
                 question = (
@@ -2357,7 +2425,13 @@ async def handle_client(ws):
                 menu_key = None if question else numbered_option_key(
                     text, detect_numbered_options(content)
                 )
-                log.info("Response from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
+                log.info("Response from %s (%s): pane=%s text=%r route=%s", ip, device,
+                         pane_id, text,
+                         "question" if question else
+                         ("menu:" + menu_key) if menu_key and not custom_editor_active(content)
+                         else "text" if (custom_editor_active(content)
+                                         or text.lower() in SAFE_RESPONSES)
+                         else "refused")
                 audit("respond", ip, device, pane_id, f"text={text!r}")
                 if question:
                     delivered = await asyncio.to_thread(
@@ -2377,11 +2451,21 @@ async def handle_client(ws):
                         _mutate_herdr, "pane", "send-keys", pane_id, "Enter", remote=remote
                     )
                 else:
+                    # The one branch that silently drops a reader's typed text. Saying so out
+                    # loud is the difference between "the relay refused this" and "my message
+                    # vanished": the client shows a toast the reader has usually scrolled past.
+                    log.warning(
+                        "Response refused (no question detected) from %s: pane=%s text=%r "
+                        "numbered=%d editor=%s",
+                        ip, pane_id, text, len(detect_numbered_options(content)),
+                        custom_editor_active(content),
+                    )
                     await ws.send(json.dumps({
                         **command_error("free-text response requires a detected question"),
                     }))
                     continue
                 if not delivered:
+                    log.warning("Response delivery failed from %s: pane=%s text=%r", ip, pane_id, text)
                     await ws.send(json.dumps(command_error("response delivery failed")))
                     continue
                 response = {"type": "command_result", "command": "respond", "ok": True}

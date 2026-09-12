@@ -818,26 +818,32 @@ class RelaySessionSwitchTests(unittest.TestCase):
             # The switch must stop the poll before it re-seeds a second pane.
             self.assertEqual(relay.last_blocked_prompts, {})
 
-    def test_stale_poll_bails_after_clear_push_without_restoring_status(self):
-        # last_statuses[pid] == "blocked" pre-set so the poll takes the
-        # clear-push branch; the switch lands during send_web_push. Without
-        # the post-push generation check, the trailing `last_statuses[pid] =
-        # status` line would restore an entry the reset just cleared.
+    def test_leaving_blocked_sends_no_push(self):
+        # A subscription is taken out with userVisibleOnly: true, which is a contract: every
+        # push it carries has to end in a notification the reader can see. The clear push
+        # deliberately showed nothing -- it closed the stale prompt and returned -- so each one
+        # was a broken promise, and Safari answers a run of them by retiring the subscription.
+        # Nothing about that is visible from the relay: getSubscription() starts returning null
+        # on the handset while APNs goes on answering 201, so the log records deliveries to a
+        # device that is no longer listening. Leaving blocked must therefore be silent on the
+        # push channel; the stale notification is replaced in place by the next block, which
+        # shares its tag.
         with loaded_relay() as relay:
             relay.last_statuses["w1:p1"] = "blocked"
+            relay.last_blocked_prompts["w1:p1"] = ("p1", (), "Deploy?")
             agents = [{"pane_id": "w1:p1", "agent": "claude", "status": "idle",
                        "cwd": "/tmp/x", "project": "x", "host": "local", "remote": None}]
 
-            async def switch_mid_clear_push(*args, **kwargs):
-                relay.reset_pane_state()          # simulates a switch landing
-
+            push = mock.AsyncMock()
             with mock.patch.object(relay, "get_all_panes", return_value=(agents, [])), \
                  mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
-                 mock.patch.object(relay, "send_web_push", side_effect=switch_mid_clear_push):
+                 mock.patch.object(relay, "send_web_push", new=push):
                 asyncio.run(relay._poll_once())
 
-            # The switch must stop the poll from restoring last_statuses.
-            self.assertEqual(relay.last_statuses, {})
+            push.assert_not_awaited()
+            # The prompt is still forgotten, so the next block counts as new and does notify.
+            self.assertNotIn("w1:p1", relay.last_blocked_prompts)
+            self.assertEqual(relay.last_statuses, {"w1:p1": "idle"})
 
     def test_stale_event_does_not_reseed_blocked_prompt_after_switch(self):
         # A queued agent_event that is already in hand (past reset's queue
@@ -877,6 +883,48 @@ class RelaySessionSwitchTests(unittest.TestCase):
             asyncio.run(run_one_event())
 
             self.assertEqual(relay.last_blocked_prompts, {})
+
+    def test_event_path_notifies_a_new_block_once(self):
+        # The plugin's event beats the poll whenever it fires at all, and this path claims
+        # last_blocked_prompts -- which is the same dict _poll_once reads to decide whether a
+        # blocked pane is new. So a block announced here was a block the poll then called an
+        # update and skipped the notification for, or skipped entirely on an unchanged
+        # fingerprint: send_web_push never ran, and the notification was lost exactly when the
+        # fast path worked. It must notify here, on the poll's own one-shot rule.
+        with loaded_relay() as relay:
+            event = {
+                "type": "agent_event",
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "blocked",
+                "cwd": "/tmp/x",
+                "project": "x",
+                "host": "local",
+            }
+            push = mock.AsyncMock()
+
+            async def run_events(count):
+                with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+                     mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
+                     mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
+                     mock.patch.object(relay, "send_web_push", new=push):
+                    task = asyncio.create_task(relay.event_push())
+                    try:
+                        for _ in range(count):
+                            await relay.event_queue.put(dict(event))
+                            # event_push never calls task_done(), so the queue cannot be
+                            # joined; give the task a turn to drain instead.
+                            await asyncio.sleep(0.05)
+                    finally:
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+
+            asyncio.run(run_events(2))
+
+            # One notification for the block; the re-broadcast is an update and stays quiet.
+            self.assertEqual(push.await_count, 1)
+            self.assertIn("w1:p1", relay.last_blocked_prompts)
 
     def test_reset_pane_state_drains_queued_events(self):
         # An event queued before a switch (never dequeued by event_push)
@@ -1987,6 +2035,7 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                             "multi_options": [],
                             "selected_options": [],
                             "interaction": "prompt",
+                            "text_field": False,
                             "multi": False,
                             "update": False,
                         },
@@ -3047,8 +3096,84 @@ CLAUDE_MENU = """\
 """
 
 
+# A question menu, as Claude draws one: each answer's description on its own indented line,
+# and a rule between the answers it was given and the two it always appends.
+CLAUDE_QUESTION_MENU = """\
+ Which way?
+
+ ❯ 1. First
+     the first one
+   2. Second
+     the second one
+   3. Type something.
+────────────────────────────────────────
+   4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+# The same screen with "Type something." chosen. Nothing moves except the cursor and the footer:
+# the menu is still there, still parses, and the chosen row is now an inline input.
+CLAUDE_QUESTION_FIELD = CLAUDE_QUESTION_MENU.replace(
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Nvim · Esc to cancel",
+)
+
+
 class ClaudeNumberedMenuTests(unittest.TestCase):
     """Claude Code approval/question menus carry no Codex wording; they are 1..N key menus."""
+
+    def test_a_rule_between_options_does_not_end_the_menu(self):
+        # Claude puts one between the answers it was given and the two it always appends, at
+        # column 0 -- neither the next number nor a deeper-indented continuation, so it ended the
+        # run and took every option below it with it. On a question menu that is the last option,
+        # which no client could then reach.
+        with loaded_relay() as relay:
+            options = relay.detect_numbered_options(CLAUDE_QUESTION_MENU)
+            self.assertEqual(len(options), 4)
+            self.assertEqual(options[-1], "Chat about this")
+            self.assertEqual(relay.numbered_option_key("Chat about this", options), "4")
+
+    def test_the_inline_text_field_is_detected_from_the_footer(self):
+        # "Type something." is not a second screen: the menu stays on display and that row
+        # becomes an input, so the option list parses identically either way. The footer is the
+        # only thing that differs.
+        with loaded_relay() as relay:
+            self.assertFalse(relay.custom_editor_active(CLAUDE_QUESTION_MENU))
+            self.assertTrue(relay.custom_editor_active(CLAUDE_QUESTION_FIELD))
+            self.assertEqual(
+                relay.detect_numbered_options(CLAUDE_QUESTION_FIELD),
+                relay.detect_numbered_options(CLAUDE_QUESTION_MENU),
+            )
+
+    def test_text_typed_into_a_focused_field_still_matches_an_option(self):
+        # Which is exactly why the key press has to be gated on the field NOT having focus: a
+        # digit matches its own option, and a sentence matches an option whose label it equals.
+        # Sent as keys, both land in the field as characters and the menu never closes -- "3"
+        # then "33" on the second attempt.
+        with loaded_relay() as relay:
+            options = relay.detect_numbered_options(CLAUDE_QUESTION_FIELD)
+            self.assertEqual(relay.numbered_option_key("3", options), "3")
+            self.assertEqual(relay.numbered_option_key("Second the second one", options), "2")
+            self.assertTrue(relay.custom_editor_active(CLAUDE_QUESTION_FIELD))
+
+    def test_blocked_message_reports_a_focused_text_field(self):
+        # Nothing else in the message distinguishes the two states: the menu is still drawn and
+        # still parses, so a client has no way to know its option buttons have stopped working.
+        with loaded_relay() as relay:
+            menu = relay.blocked_message("w1:p1", "claude", "x", "local", CLAUDE_QUESTION_MENU)
+            field = relay.blocked_message("w1:p1", "claude", "x", "local", CLAUDE_QUESTION_FIELD)
+            self.assertFalse(menu["text_field"])
+            self.assertTrue(field["text_field"])
+            # ...and the options are identical either way, which is the point.
+            self.assertEqual(menu["options"], field["options"])
+
+    def test_a_rule_does_not_glue_unrelated_numbering_together(self):
+        # The skip only steps over the divider; a run still ends at the first line that is
+        # genuinely neither the next number nor a continuation.
+        with loaded_relay() as relay:
+            screen = "1. a\n2. b\n\u2500\u2500\u2500\u2500\u2500\u2500\nnot a menu line\n4. d\n"
+            self.assertEqual(relay.detect_numbered_options(screen), ["a", "b"])
 
     def test_detects_menu_and_joins_wrapped_option(self):
         with loaded_relay() as relay:

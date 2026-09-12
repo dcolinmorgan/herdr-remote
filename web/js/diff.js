@@ -64,6 +64,7 @@ function handleMessage(msg) {
         options: previous.options,
         multi_options: previous.multi_options,
         interaction: previous.interaction,
+        text_field: previous.text_field,
         multi: previous.multi,
         prompt_id: previous.prompt_id,
         selected_options: previous.selected_options,
@@ -95,6 +96,7 @@ function handleMessage(msg) {
       a.selected_options=msg.selected_options||[];
       a.multi_options=msg.multi_options||[];
       a.interaction=msg.interaction;
+      a.text_field=!!msg.text_field;
       a.multi=msg.multi;
     }
     else agents.push({...msg, status:'blocked'});
