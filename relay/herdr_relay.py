@@ -1793,6 +1793,13 @@ def blocked_message(pane_id, agent, project, host, content):
             and "Done selecting" not in option["label"] and option["checked"]
         ] if question else [],
         "interaction": "omp_question" if question else ("numbered" if numbered else "prompt"),
+        # A text field on the pane has focus. The menu is still drawn and still parses -- Claude's
+        # "Type something." turns one of its own rows into an input rather than opening a second
+        # screen -- so nothing else in this message distinguishes the two states, and a client
+        # that draws option buttons here draws buttons that cannot work: the field takes every
+        # digit as a character, and the arrow keys are the only way back to the list. Clients
+        # older than this field ignore it and behave exactly as they did.
+        "text_field": custom_editor_active(content),
         "multi": bool(question and question["multi"]),
         "update": False,
     }

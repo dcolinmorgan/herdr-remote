@@ -464,7 +464,19 @@ function openTerminal(paneId) {
   const ak = document.getElementById('actionKeys');
   qa.replaceChildren();
   ak.replaceChildren();
-  if (a&&a.status==='blocked') {
+  if (a&&a.status==='blocked'&&a.text_field) {
+    // A text field on the pane has focus, which the relay reports because nothing else in the
+    // message says so: Claude's "Type something." turns one of the menu's own rows into an input
+    // rather than opening a second screen, so the option list is still there and still parses.
+    // Buttons drawn from it cannot work -- the field takes a digit as a character, and the arrow
+    // keys are the only way back to the list -- so say what is wanted instead of offering taps
+    // that would type their own label into the box. No focus() here: this card is rebuilt from
+    // every snapshot, and pulling up the keyboard twice a second is worse than not pulling it up.
+    const hint = document.createElement('div');
+    hint.className = 'qa-hint';
+    hint.textContent = 'Waiting for text \u2014 type your answer below';
+    qa.appendChild(hint);
+  } else if (a&&a.status==='blocked') {
     const opts = a.interaction==='omp_question'&&a.multi
       ? (Array.isArray(a.multi_options)?a.multi_options:[])
       : (Array.isArray(a.options)?a.options:[]);

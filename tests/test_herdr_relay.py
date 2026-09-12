@@ -2035,6 +2035,7 @@ class RelayEventPushTests(unittest.IsolatedAsyncioTestCase):
                             "multi_options": [],
                             "selected_options": [],
                             "interaction": "prompt",
+                            "text_field": False,
                             "multi": False,
                             "update": False,
                         },
@@ -3155,6 +3156,17 @@ class ClaudeNumberedMenuTests(unittest.TestCase):
             self.assertEqual(relay.numbered_option_key("3", options), "3")
             self.assertEqual(relay.numbered_option_key("Second the second one", options), "2")
             self.assertTrue(relay.custom_editor_active(CLAUDE_QUESTION_FIELD))
+
+    def test_blocked_message_reports_a_focused_text_field(self):
+        # Nothing else in the message distinguishes the two states: the menu is still drawn and
+        # still parses, so a client has no way to know its option buttons have stopped working.
+        with loaded_relay() as relay:
+            menu = relay.blocked_message("w1:p1", "claude", "x", "local", CLAUDE_QUESTION_MENU)
+            field = relay.blocked_message("w1:p1", "claude", "x", "local", CLAUDE_QUESTION_FIELD)
+            self.assertFalse(menu["text_field"])
+            self.assertTrue(field["text_field"])
+            # ...and the options are identical either way, which is the point.
+            self.assertEqual(menu["options"], field["options"])
 
     def test_a_rule_does_not_glue_unrelated_numbering_together(self):
         # The skip only steps over the divider; a run still ends at the first line that is

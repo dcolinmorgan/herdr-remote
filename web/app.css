@@ -399,6 +399,9 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
    its kind: at flex:1 each gets a quarter of a phone's width and wraps into an unreadable stack.
    Long ones take the whole row and read as a list, which is what a numbered menu actually is. */
 .quick-actions button.opt-long { flex: 1 1 100%; white-space: normal; text-align: center; line-height: 1.3; }
+/* Not a button: the pane is waiting for typed text, and the only thing to do is type. It sits
+   in the row the option buttons would have filled, so the card does not change height. */
+.qa-hint { flex: 1 1 100%; padding: 8px 12px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; text-align: center; color: var(--muted); border: 1px dashed var(--border); }
 .btn-yes { background: var(--green); color: var(--on-accent); } .btn-trust { background: var(--blue); color: var(--on-accent); } .btn-no { background: var(--red); color: var(--on-accent); }
 .term-input { border-top: 1px solid var(--border); padding: 5px 10px; display: flex; gap: 5px; background: var(--surface); flex-shrink: 0; }
 .term-input input { flex: 1; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; font-family: var(--font-term); min-width: 0; }
