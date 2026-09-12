@@ -16,6 +16,28 @@ async function initPush() {
   }
 }
 
+// The relay only ever hears about a subscription when somebody taps the toggle, so its copy is a
+// snapshot of that one moment -- while the browser hands out a new endpoint of its own accord (a
+// reinstall, a long idle, a subscription it decided to retire). Nothing reports that: the toggle
+// reads Enabled because it asks the BROWSER, and the relay goes on pushing to the old endpoint,
+// which APNs answers 201 for whether or not anything is behind it. Re-sending the live
+// subscription on every connect closes that: the relay dedupes by value, so an unchanged one
+// costs a few hundred bytes and a rotated one is registered before the next block -- and the
+// relay's "Push subscription added" line then says, in the log, that a rotation is what happened.
+async function resyncPushSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && await reg.pushManager.getSubscription();
+    if (!sub) return;
+    pushSubscription = sub;
+    updatePushUI();
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({type: 'push_subscribe', subscription: sub.toJSON()}));
+    }
+  } catch (e) {}
+}
+
 function updatePushUI() {
   const btn = document.getElementById('pushToggle');
   const status = document.getElementById('pushStatus');
