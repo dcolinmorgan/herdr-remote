@@ -818,26 +818,32 @@ class RelaySessionSwitchTests(unittest.TestCase):
             # The switch must stop the poll before it re-seeds a second pane.
             self.assertEqual(relay.last_blocked_prompts, {})
 
-    def test_stale_poll_bails_after_clear_push_without_restoring_status(self):
-        # last_statuses[pid] == "blocked" pre-set so the poll takes the
-        # clear-push branch; the switch lands during send_web_push. Without
-        # the post-push generation check, the trailing `last_statuses[pid] =
-        # status` line would restore an entry the reset just cleared.
+    def test_leaving_blocked_sends_no_push(self):
+        # A subscription is taken out with userVisibleOnly: true, which is a contract: every
+        # push it carries has to end in a notification the reader can see. The clear push
+        # deliberately showed nothing -- it closed the stale prompt and returned -- so each one
+        # was a broken promise, and Safari answers a run of them by retiring the subscription.
+        # Nothing about that is visible from the relay: getSubscription() starts returning null
+        # on the handset while APNs goes on answering 201, so the log records deliveries to a
+        # device that is no longer listening. Leaving blocked must therefore be silent on the
+        # push channel; the stale notification is replaced in place by the next block, which
+        # shares its tag.
         with loaded_relay() as relay:
             relay.last_statuses["w1:p1"] = "blocked"
+            relay.last_blocked_prompts["w1:p1"] = ("p1", (), "Deploy?")
             agents = [{"pane_id": "w1:p1", "agent": "claude", "status": "idle",
                        "cwd": "/tmp/x", "project": "x", "host": "local", "remote": None}]
 
-            async def switch_mid_clear_push(*args, **kwargs):
-                relay.reset_pane_state()          # simulates a switch landing
-
+            push = mock.AsyncMock()
             with mock.patch.object(relay, "get_all_panes", return_value=(agents, [])), \
                  mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
-                 mock.patch.object(relay, "send_web_push", side_effect=switch_mid_clear_push):
+                 mock.patch.object(relay, "send_web_push", new=push):
                 asyncio.run(relay._poll_once())
 
-            # The switch must stop the poll from restoring last_statuses.
-            self.assertEqual(relay.last_statuses, {})
+            push.assert_not_awaited()
+            # The prompt is still forgotten, so the next block counts as new and does notify.
+            self.assertNotIn("w1:p1", relay.last_blocked_prompts)
+            self.assertEqual(relay.last_statuses, {"w1:p1": "idle"})
 
     def test_stale_event_does_not_reseed_blocked_prompt_after_switch(self):
         # A queued agent_event that is already in hand (past reset's queue

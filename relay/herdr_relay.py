@@ -1957,10 +1957,20 @@ async def _poll_once():
                     if gen != POLL_GENERATION:
                         return
             else:
-                if last_statuses.get(pid) == "blocked":
-                    await send_web_push("", "", clear=True)
-                    if gen != POLL_GENERATION:
-                        return
+                # No clear push. A subscription is taken out with userVisibleOnly: true, which
+                # is a contract: every push it carries must end in a notification the reader can
+                # see. A clear deliberately shows nothing -- it closes the stale prompt and
+                # returns -- so each one is a broken promise, and Safari answers a run of them by
+                # retiring the subscription outright. Which is invisible from here: the browser's
+                # own getSubscription() starts returning null (the toggle reads Disabled) while
+                # APNs goes on answering 201 for the retired token, so the relay logs deliveries
+                # to a handset that is no longer listening. Measured on this host: four silent
+                # clears, then every later push -- notifications included -- stopped waking the
+                # service worker, with 201 on every one.
+                #
+                # The stale notification is not left forever. It carries tag "herdr-blocked", so
+                # the next block replaces it in place, and tapping it closes it. That is a far
+                # smaller cost than losing the channel.
                 last_blocked_prompts.pop(pid, None)
             last_statuses[pid] = status
 async def event_push():
