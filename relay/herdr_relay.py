@@ -2375,6 +2375,8 @@ async def handle_client(ws):
                     continue
                 content = await asyncio.to_thread(read_pane, pane_id, remote=remote)
                 if question_prompt_id(pane_id, content) != msg.get("prompt_id", ""):
+                    log.warning("Response refused (stale prompt_id) from %s: pane=%s text=%r",
+                                ip, pane_id, text)
                     await ws.send(json.dumps(command_error("prompt changed; refresh and try again")))
                     continue
                 question = (
@@ -2385,7 +2387,13 @@ async def handle_client(ws):
                 menu_key = None if question else numbered_option_key(
                     text, detect_numbered_options(content)
                 )
-                log.info("Response from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
+                log.info("Response from %s (%s): pane=%s text=%r route=%s", ip, device,
+                         pane_id, text,
+                         "question" if question else
+                         ("menu:" + menu_key) if menu_key and not custom_editor_active(content)
+                         else "text" if (custom_editor_active(content)
+                                         or text.lower() in SAFE_RESPONSES)
+                         else "refused")
                 audit("respond", ip, device, pane_id, f"text={text!r}")
                 if question:
                     delivered = await asyncio.to_thread(
@@ -2405,11 +2413,21 @@ async def handle_client(ws):
                         _mutate_herdr, "pane", "send-keys", pane_id, "Enter", remote=remote
                     )
                 else:
+                    # The one branch that silently drops a reader's typed text. Saying so out
+                    # loud is the difference between "the relay refused this" and "my message
+                    # vanished": the client shows a toast the reader has usually scrolled past.
+                    log.warning(
+                        "Response refused (no question detected) from %s: pane=%s text=%r "
+                        "numbered=%d editor=%s",
+                        ip, pane_id, text, len(detect_numbered_options(content)),
+                        custom_editor_active(content),
+                    )
                     await ws.send(json.dumps({
                         **command_error("free-text response requires a detected question"),
                     }))
                     continue
                 if not delivered:
+                    log.warning("Response delivery failed from %s: pane=%s text=%r", ip, pane_id, text)
                     await ws.send(json.dumps(command_error("response delivery failed")))
                     continue
                 response = {"type": "command_result", "command": "respond", "ok": True}
