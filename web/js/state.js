@@ -286,7 +286,9 @@ function connect() {
   if (token) wsUrl += (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
   const sock = new WebSocket(wsUrl);
   ws = sock;
-  sock.onopen = () => { if (ws !== sock) return; setStatus('connected'); if(window.cue) cue('ready'); };
+  sock.onopen = () => { if (ws !== sock) return; setStatus('connected'); if(window.cue) cue('ready');
+    // Push: the relay's copy of this device's subscription can be stale (see push.js).
+    if (typeof resyncPushSubscription === 'function') resyncPushSubscription(); };
   sock.onclose = () => { if (ws !== sock) return; setStatus('disconnected'); scheduleReconnect(); };
   sock.onerror = () => { if (ws !== sock) return; setStatus('disconnected'); };
   sock.onmessage = (e) => { if (ws !== sock) return; handleMessage(JSON.parse(e.data)); };
