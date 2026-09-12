@@ -3122,6 +3122,17 @@ CLAUDE_QUESTION_FIELD = CLAUDE_QUESTION_MENU.replace(
 class ClaudeNumberedMenuTests(unittest.TestCase):
     """Claude Code approval/question menus carry no Codex wording; they are 1..N key menus."""
 
+    def test_a_rule_between_options_does_not_end_the_menu(self):
+        # Claude puts one between the answers it was given and the two it always appends, at
+        # column 0 -- neither the next number nor a deeper-indented continuation, so it ended the
+        # run and took every option below it with it. On a question menu that is the last option,
+        # which no client could then reach.
+        with loaded_relay() as relay:
+            options = relay.detect_numbered_options(CLAUDE_QUESTION_MENU)
+            self.assertEqual(len(options), 4)
+            self.assertEqual(options[-1], "Chat about this")
+            self.assertEqual(relay.numbered_option_key("Chat about this", options), "4")
+
     def test_the_inline_text_field_is_detected_from_the_footer(self):
         # "Type something." is not a second screen: the menu stays on display and that row
         # becomes an input, so the option list parses identically either way. The footer is the
@@ -3144,6 +3155,13 @@ class ClaudeNumberedMenuTests(unittest.TestCase):
             self.assertEqual(relay.numbered_option_key("3", options), "3")
             self.assertEqual(relay.numbered_option_key("Second the second one", options), "2")
             self.assertTrue(relay.custom_editor_active(CLAUDE_QUESTION_FIELD))
+
+    def test_a_rule_does_not_glue_unrelated_numbering_together(self):
+        # The skip only steps over the divider; a run still ends at the first line that is
+        # genuinely neither the next number nor a continuation.
+        with loaded_relay() as relay:
+            screen = "1. a\n2. b\n\u2500\u2500\u2500\u2500\u2500\u2500\nnot a menu line\n4. d\n"
+            self.assertEqual(relay.detect_numbered_options(screen), ["a", "b"])
 
     def test_detects_menu_and_joins_wrapped_option(self):
         with loaded_relay() as relay:

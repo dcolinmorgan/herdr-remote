@@ -1619,6 +1619,11 @@ def detect_approval_options(text):
 NUMBERED_OPTION_RE = re.compile(r"^(\s*(?:[❯>›»▶]\s*)?)(\d{1,2})[.)]\s+(\S.*?)\s*$")
 
 
+# A horizontal rule: box-drawing or ASCII dashes only, at least three of them. Used by
+# detect_numbered_options to step over a divider drawn inside a menu.
+MENU_RULE_RE = re.compile(r"^[\u2500-\u257f\u2014\u2013\-=_]{3,}$")
+
+
 def detect_numbered_options(text):
     """Labels of the last `1.`..`N.` menu on screen, in order, or [] when there is none.
 
@@ -1650,6 +1655,14 @@ def detect_numbered_options(text):
             continue
         stripped = line.strip()
         if not stripped:
+            continue
+        if current and MENU_RULE_RE.match(stripped):
+            # Claude draws a rule between the answers it was given and the two it always adds
+            # ("Type something.", "Chat about this"). The rule sits at column 0, so it is neither
+            # the next number nor a deeper-indented continuation and it ended the run -- losing
+            # every option below it. On a question menu that is the LAST option, which no client
+            # could then reach. It carries no label, so skipping it cannot invent one, and a run
+            # still ends at the first line that is genuinely neither.
             continue
         indent = len(line) - len(line.lstrip())
         if current and number_col is not None and indent > number_col:
