@@ -878,6 +878,48 @@ class RelaySessionSwitchTests(unittest.TestCase):
 
             self.assertEqual(relay.last_blocked_prompts, {})
 
+    def test_event_path_notifies_a_new_block_once(self):
+        # The plugin's event beats the poll whenever it fires at all, and this path claims
+        # last_blocked_prompts -- which is the same dict _poll_once reads to decide whether a
+        # blocked pane is new. So a block announced here was a block the poll then called an
+        # update and skipped the notification for, or skipped entirely on an unchanged
+        # fingerprint: send_web_push never ran, and the notification was lost exactly when the
+        # fast path worked. It must notify here, on the poll's own one-shot rule.
+        with loaded_relay() as relay:
+            event = {
+                "type": "agent_event",
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "blocked",
+                "cwd": "/tmp/x",
+                "project": "x",
+                "host": "local",
+            }
+            push = mock.AsyncMock()
+
+            async def run_events(count):
+                with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+                     mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
+                     mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
+                     mock.patch.object(relay, "send_web_push", new=push):
+                    task = asyncio.create_task(relay.event_push())
+                    try:
+                        for _ in range(count):
+                            await relay.event_queue.put(dict(event))
+                            # event_push never calls task_done(), so the queue cannot be
+                            # joined; give the task a turn to drain instead.
+                            await asyncio.sleep(0.05)
+                    finally:
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+
+            asyncio.run(run_events(2))
+
+            # One notification for the block; the re-broadcast is an update and stays quiet.
+            self.assertEqual(push.await_count, 1)
+            self.assertIn("w1:p1", relay.last_blocked_prompts)
+
     def test_reset_pane_state_drains_queued_events(self):
         # An event queued before a switch (never dequeued by event_push)
         # must not survive the switch to be processed afterward.

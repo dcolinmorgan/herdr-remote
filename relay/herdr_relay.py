@@ -1944,6 +1944,7 @@ async def _poll_once():
                     # `previous is not None` means "already announced this block".
                     message["update"] = previous is not None
                     last_blocked_prompts[pid] = fingerprint
+                    log.info("Blocked (poll) pane=%s update=%s", pid, message["update"])
                     await broadcast(message)
                     # Clients still need every re-broadcast (the prompt_id they must echo back
                     # to approve moves with the content), but the notification is one-shot.
@@ -2024,12 +2025,29 @@ async def event_push():
             # that inserts an await between this check and the writes below.
             if gen != POLL_GENERATION:
                 continue        # a switch landed; this event is stale
+            # A block announced here is a block the poll will never announce. This path claims
+            # last_blocked_prompts, and _poll_once reads that same dict to decide whether a
+            # blocked pane is new -- so once the event has landed, the poll sees `previous is
+            # not None`, calls it an update and skips the notification, while an unchanged
+            # fingerprint stops it before even that. Either way send_web_push never ran, and
+            # since the plugin's event beats the poll whenever it fires at all, the
+            # notification was lost exactly when the fast path worked. Push here, on the same
+            # one-shot rule the poll uses: announce a new block, stay quiet for a re-broadcast.
+            previous = last_blocked_prompts.get(pane_id)
+            message["update"] = previous is not None
             last_blocked_prompts[pane_id] = (
                 message["prompt_id"],
                 tuple(message["selected_options"]),
                 message["prompt"],
             )
+            log.info("Blocked (event) pane=%s update=%s", pane_id, message["update"])
             await broadcast(message)
+            if not message["update"]:
+                await send_web_push(
+                    title=f"\U0001f411 {agent_data.get('project', '')} blocked",
+                    body=(content or agent_data.get("prompt", ""))[:120],
+                    url=f"/?pane={pane_id}",
+                )
 
 
 WEB_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web"))
