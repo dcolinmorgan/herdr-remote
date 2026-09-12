@@ -1695,8 +1695,26 @@ def detect_options(text):
 
 
 def custom_editor_active(text):
-    return "Enter your response:" in text or (
-        "Custom answer:" in text and "submit" in text.lower()
+    """True when a free-text field on the pane has focus, so typed text must be sent AS TEXT.
+
+    Claude's "Type something." is not a second screen. Choosing it leaves the whole numbered
+    menu on display and turns that one row into an inline input -- so the option list still
+    parses, the relay still read it as a menu, and everything a reader typed was matched against
+    the labels and sent as a KEY PRESS. A digit landed in the field as a character ("3", then
+    "33" on the second try), a sentence that happened to equal a label pressed that label's
+    number, and anything else was refused outright as "free-text response requires a detected
+    question". The menu never closed, because nothing had been selected.
+
+    The one thing that changes between the two states is the dialog's own footer: it gains
+    "ctrl+g to edit in <editor>" exactly while the field has focus. The editor name is the
+    reader's $EDITOR, so only the invariant half is matched. Verified against captures of all
+    four states -- cursor on an ordinary option (absent), cursor on the field (present), and the
+    field holding one and two typed characters (present).
+    """
+    return (
+        "Enter your response:" in text
+        or ("Custom answer:" in text and "submit" in text.lower())
+        or "ctrl+g to edit in" in text.lower()
     )
 
 def question_prompt_id(pane_id, content):

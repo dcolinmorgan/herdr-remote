@@ -3095,8 +3095,55 @@ CLAUDE_MENU = """\
 """
 
 
+# A question menu, as Claude draws one: each answer's description on its own indented line,
+# and a rule between the answers it was given and the two it always appends.
+CLAUDE_QUESTION_MENU = """\
+ Which way?
+
+ ❯ 1. First
+     the first one
+   2. Second
+     the second one
+   3. Type something.
+────────────────────────────────────────
+   4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
+# The same screen with "Type something." chosen. Nothing moves except the cursor and the footer:
+# the menu is still there, still parses, and the chosen row is now an inline input.
+CLAUDE_QUESTION_FIELD = CLAUDE_QUESTION_MENU.replace(
+    "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    "Enter to select · ↑/↓ to navigate · ctrl+g to edit in Nvim · Esc to cancel",
+)
+
+
 class ClaudeNumberedMenuTests(unittest.TestCase):
     """Claude Code approval/question menus carry no Codex wording; they are 1..N key menus."""
+
+    def test_the_inline_text_field_is_detected_from_the_footer(self):
+        # "Type something." is not a second screen: the menu stays on display and that row
+        # becomes an input, so the option list parses identically either way. The footer is the
+        # only thing that differs.
+        with loaded_relay() as relay:
+            self.assertFalse(relay.custom_editor_active(CLAUDE_QUESTION_MENU))
+            self.assertTrue(relay.custom_editor_active(CLAUDE_QUESTION_FIELD))
+            self.assertEqual(
+                relay.detect_numbered_options(CLAUDE_QUESTION_FIELD),
+                relay.detect_numbered_options(CLAUDE_QUESTION_MENU),
+            )
+
+    def test_text_typed_into_a_focused_field_still_matches_an_option(self):
+        # Which is exactly why the key press has to be gated on the field NOT having focus: a
+        # digit matches its own option, and a sentence matches an option whose label it equals.
+        # Sent as keys, both land in the field as characters and the menu never closes -- "3"
+        # then "33" on the second attempt.
+        with loaded_relay() as relay:
+            options = relay.detect_numbered_options(CLAUDE_QUESTION_FIELD)
+            self.assertEqual(relay.numbered_option_key("3", options), "3")
+            self.assertEqual(relay.numbered_option_key("Second the second one", options), "2")
+            self.assertTrue(relay.custom_editor_active(CLAUDE_QUESTION_FIELD))
 
     def test_detects_menu_and_joins_wrapped_option(self):
         with loaded_relay() as relay:
