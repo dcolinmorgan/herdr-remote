@@ -489,8 +489,14 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
   body { max-width: 960px; margin: 0 auto; padding: 0 16px; }
   /* relative, not static: the history panel is absolutely positioned, and a static parent sent it
      to the viewport instead -- full-bleed and over the app header. */
-  .terminal-view { position: relative; display: none; }
-  .terminal-view.active { display: flex; height: calc(100dvh - 49px); }
+  .terminal-view { position: relative; display: none; top: auto; }
+  .terminal-view.active { display: flex; height: calc(100dvh - var(--header-h) - env(safe-area-inset-top, 0px)); }
+  /* The list views stay in the flow beside a relative .terminal-view, and a flex item's
+     min-height keeps them from shrinking to zero -- so header + list + terminal exceeded the
+     viewport and the input row sat below the fold, unreachable. On the phone the view is a
+     fixed overlay and needs no such thing. :has() costs nothing here: the app already leans
+     on light-dark(), which is years newer. */
+  body:has(.terminal-view.active) > .view { display: none; }
   .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
   .section-header { grid-column: 1 / -1; }
   .tab-heading, .empty-tab { grid-column: 1 / -1; }
