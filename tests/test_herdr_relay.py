@@ -3129,6 +3129,46 @@ class RelaySshMultiplexingTests(unittest.TestCase):
             # Options first, then the target, then the remote binary -- callers index on that.
             self.assertEqual(args[:4], ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"])
 
+    def test_every_remote_argument_is_shell_quoted(self):
+        """ssh(1): "the arguments will be appended to the command, separated by spaces, before it is
+        sent to the server to be executed" -- so the remote SHELL receives one string and an
+        unquoted argument becomes remote shell words. Client text reaches this argv through
+        agent_prompt, respond, send_text, every rename and create_tab --label. transcript_ssh
+        already quotes; this is the same treatment for the CLI path.
+        """
+        with mock.patch.dict(os.environ, {"HERDR_REMOTES": "build-box"}), loaded_relay() as relay:
+            relay.ACTIVE_SESSIONS["build-box"] = "personal"
+            payload = "note; touch /tmp/should-not-run #"
+            with mock.patch.object(relay.subprocess, "run",
+                                   return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:
+                relay._invoke_herdr("agent", "prompt", "w1:p1", payload, remote="build-box")
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[0], "ssh")
+            self.assertEqual(argv[-1], relay.shlex.quote(payload))
+            # What the remote shell is handed, once ssh has joined the argv with spaces.
+            remote_line = " ".join(argv[argv.index("build-box") + 1:])
+            self.assertTrue(remote_line.endswith(
+                f"agent prompt w1:p1 {relay.shlex.quote(payload)}"), remote_line)
+            self.assertNotIn("; touch /tmp/should-not-run #", relay.shlex.split(remote_line))
+            # One word, not three: the payload survives as a single argument to herdr.
+            self.assertEqual(relay.shlex.split(remote_line)[-1], payload)
+
+    def test_quoting_leaves_an_ordinary_argument_alone(self):
+        """shlex.quote only quotes what needs quoting, so every ordinary argument (pane, send-keys,
+        w1:p1, Enter, --lines, 100) comes out byte-identical.
+        """
+        with mock.patch.dict(os.environ, {"HERDR_REMOTES": "build-box"}), loaded_relay() as relay:
+            with mock.patch.object(relay.subprocess, "run",
+                                   return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:
+                relay._invoke_herdr("pane", "send-keys", "w1:p1", "Enter", remote="build-box")
+            argv = run.call_args.args[0]
+            # The argv tail after the remote hostname is exactly what _invoke_herdr was called with.
+            remote_idx = argv.index("build-box")
+            # REMOTE_HERDR + args
+            tail = argv[remote_idx + 1:]
+            # Ordinary arguments quote to themselves.
+            self.assertEqual(tail, [relay.REMOTE_HERDR, "pane", "send-keys", "w1:p1", "Enter"])
+
 
 
 CLAUDE_MENU = """\

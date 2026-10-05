@@ -796,8 +796,8 @@ def _invoke_herdr(*args, remote=None):
         cmd = ["ssh", *SSH_BASE_ARGS, remote]
         if session:
             # An env= would not survive ssh; the remote shell applies this.
-            cmd.append(f"HERDR_SESSION={session}")
-        cmd += [REMOTE_HERDR, *args]
+            cmd.append(f"HERDR_SESSION={shlex.quote(session)}")
+        cmd += [REMOTE_HERDR, *(shlex.quote(str(arg)) for arg in args)]
         with _remote_lock(remote):
             return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
 
