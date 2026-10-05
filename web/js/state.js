@@ -6,6 +6,10 @@ let ws = null, agents = [], activePane = null, refreshInterval = null, userScrol
 // QUESTION_ERROR_MS, then it ages out on its own -- no clearing to forget.
 let questionError = null;
 const QUESTION_ERROR_MS = 8000;
+// The text the input box last handed to the relay, as {pane_id, text}. The box is cleared on send,
+// so a refusal (a blocked pane whose menu the relay cannot read, a send herdr never delivered)
+// used to take the reader's words with it; the error handler puts them back from here.
+let lastSent = null;
 // The pane whose free-text row we have already pulled the keyboard up for. The dock is rebuilt
 // from every blocked broadcast, so focusing on each rebuild would re-open the keyboard under the
 // reader's thumb; focusing on the TRANSITION into typing gives them the one they asked for.

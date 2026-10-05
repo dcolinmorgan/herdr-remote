@@ -817,7 +817,12 @@ function setupLongPress(el, type, id, name) {
 function sendText() {
   if(imeComposing)return;
   const i=document.getElementById('termInput');
-  if(!i.value||!ws||!activePane)return;
+  if(!i.value||!activePane)return;
+  // send() on a socket that is not OPEN is dropped without a word, and a phone's socket is
+  // closed every time the page sleeps -- so keep the text rather than clearing it into nothing.
+  if(!ws||ws.readyState!==WebSocket.OPEN){showSendError('Not connected. Your text is still here.');return;}
+  hideSendError();
+  lastSent={pane_id:activePane,text:i.value};
   const agent=agents.find(a=>a.pane_id===activePane);
   if (!agent && shellPane(activePane)) {
     // One message rather than send_text + Enter: the relay runs both halves and audits it as
@@ -834,6 +839,26 @@ function sendText() {
     ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:['Enter']}));
   }
   i.value=''; setTimeout(refreshPane,500);
+}
+// A one-line notice above the input for text that did not reach the pane. Cleared by typing,
+// by the next send, and by switching panes.
+function showSendError(message){
+  if(window.cue)cue('error');
+  const el=document.getElementById('sendError');
+  el.textContent='\u26a0 '+message;
+  el.hidden=false;
+}
+function hideSendError(){document.getElementById('sendError').hidden=true;}
+// The relay refused or failed the text the box last sent: put it back, unless the reader has
+// already started typing something else, and say why.
+function restoreUnsentText(msg){
+  if(!lastSent||lastSent.pane_id!==msg.pane_id||activePane!==msg.pane_id)return;
+  const i=document.getElementById('termInput');
+  if(!i.value)i.value=lastSent.text;
+  lastSent=null;
+  showSendError(/detected question/.test(msg.message||'')
+    ? 'The agent is showing a menu this app cannot read. Answer it with the keys, then send again.'
+    : 'Not delivered: '+(msg.message||'unknown error')+'. Your text is back in the box.');
 }
 function sendKey(k){if(!ws||!activePane)return;ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:[k]}));setTimeout(refreshPane,300);}
 function sendKeys(k){if(!ws||!activePane)return;ws.send(JSON.stringify({type:'send_keys',pane_id:activePane,keys:k}));setTimeout(refreshPane,300);}

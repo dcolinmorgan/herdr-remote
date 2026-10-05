@@ -47,6 +47,9 @@ blocked_prompt_ids: dict[str, str] = {}  # pane_id -> current relay prompt ident
 approval_in_flight: set[str] = set()  # panes whose tapped choice is still being delivered
 agents: list[dict] = []       # current agent list from relay
 prev_statuses: dict[str, str] = {}  # pane_id -> last known status
+# One live-view message per pane, edited in place on every /read so repeated reads refresh a
+# single message instead of stacking a wall of them. (chat_id, pane_id) -> message_id.
+read_views: dict[tuple[int, str], int] = {}
 relay_connected = False
 daily_stats: dict[str, dict] = {}  # pane_id -> {agent, project, blocked_count, working_mins, last_change}
 
@@ -184,6 +187,57 @@ def register_pending(chat_id: int, message_id: int, pane_id: str):
 
 def pending_pane(chat_id: int, message_id: int) -> str | None:
     return pending.get((int(chat_id), int(message_id)))
+
+
+READ_VIEW_MAX = 3500
+
+
+def _code_block(content: str) -> str:
+    # MarkdownV2 fenced block: inside ```...``` only backslash and backtick need escaping.
+    escaped = content.replace("\\", "\\\\").replace("`", "\\`")
+    return f"```\n{escaped}\n```"
+
+
+_MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
+
+
+def _md_escape(text: str) -> str:
+    # Every MarkdownV2 special outside a code block must be backslash-escaped, or a project name
+    # with a `-` or `.` in it breaks the whole message's parsing.
+    return "".join("\\" + c if c in _MDV2_SPECIAL else c for c in text)
+
+
+async def show_pane_view(bot, chat_id: int, message, pane_id: str, header: str, content: str):
+    """One live-view message per pane, edited in place on every read.
+
+    Repeated /read of the same agent used to post a fresh message each time, so a few commands
+    buried the chat in output to scroll past. Editing the previous view instead keeps one message
+    that refreshes -- closer to watching a terminal than reading a log. A monospace block also
+    stops wide output wrapping into an unreadable stack. Falls back to a new message if the old
+    one is gone (deleted, or too old for Telegram to edit).
+    """
+    if len(content) > READ_VIEW_MAX:
+        content = content[-READ_VIEW_MAX:]
+    text = f"*{_md_escape(header)}*\n{_code_block(content)}"
+    key = (int(chat_id), pane_id)
+    existing = read_views.get(key)
+    if existing is not None:
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=existing, text=text,
+                                        parse_mode="MarkdownV2")
+            return existing
+        except Exception as e:
+            # Identical output -> "message is not modified": nothing to do, keep the view as is
+            # rather than posting a duplicate. Any other failure means the message is unusable
+            # (deleted, or too old to edit), so fall through and post a fresh one.
+            if "not modified" in str(e).lower():
+                return existing
+            read_views.pop(key, None)
+    sent = await message.reply_text(text, parse_mode="MarkdownV2")
+    read_views[key] = sent.message_id
+    register_pending(chat_id, sent.message_id, pane_id)
+    return sent.message_id
+
 
 
 def find_agent(pane_id: str) -> dict | None:
@@ -453,10 +507,8 @@ async def cmd_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     content = await read_pane(match["pane_id"])
-    if len(content) > 3500:
-        content = content[-3500:]
-    msg = await update.message.reply_text(f"{match['project']}:\n\n{content}")
-    register_pending(update.effective_chat.id, msg.message_id, match["pane_id"])
+    await show_pane_view(ctx.bot, update.effective_chat.id, update.message,
+                         match["pane_id"], match["project"], content)
 
 
 async def cmd_interrupt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -676,10 +728,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "read":
         content = await read_pane(data["pane_id"])
-        if len(content) > 3500:
-            content = content[-3500:]
-        msg = await query.message.reply_text(f"{content}")
-        register_pending(update.effective_chat.id, msg.message_id, data["pane_id"])
+        await show_pane_view(ctx.bot, update.effective_chat.id, query.message,
+                             data["pane_id"], selected_agent.get("project", ""), content)
         return
 
     if action == "interrupt":

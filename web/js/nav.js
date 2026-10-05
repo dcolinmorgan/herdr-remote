@@ -164,6 +164,7 @@ let imeComposing = false, imeEndedAt = 0;
   const ti = document.getElementById('termInput');
   ti.addEventListener('compositionstart',()=>{imeComposing=true;});
   ti.addEventListener('compositionend',()=>{imeComposing=false;imeEndedAt=Date.now();});
+  ti.addEventListener('input',()=>{if(!document.getElementById('sendError').hidden)hideSendError();});
   ti.addEventListener('keydown',e=>{
     if(e.key!=='Enter')return;
     // Enter belongs to the IME while composing - intercepting it drops the preedit

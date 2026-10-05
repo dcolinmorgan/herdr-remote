@@ -1428,6 +1428,57 @@ class RelayResponseTests(unittest.TestCase):
 
 
 
+    def _send_text(self, relay, returncode, stderr=""):
+        pane_id = "pane-1"
+        relay.known_panes.add(pane_id)
+        ws = _FakeWebSocket([json.dumps({
+            "type": "send_text", "pane_id": pane_id, "text": "hello", "request_id": "r1",
+        })])
+        result = subprocess.CompletedProcess([], returncode, stdout="", stderr=stderr)
+        with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+             mock.patch.object(relay.subprocess, "run", return_value=result):
+            asyncio.run(relay.handle_client(ws))
+        return [json.loads(m) for m in ws.sent]
+
+    def test_send_text_acknowledges_a_delivered_text(self):
+        with loaded_relay() as relay:
+            self.assertIn(
+                {"type": "command_result", "command": "send_text", "ok": True, "request_id": "r1"},
+                self._send_text(relay, 0),
+            )
+
+    def test_send_text_reports_a_text_herdr_did_not_deliver(self):
+        # A failed send used to be dropped silently: the client had already cleared its box.
+        with loaded_relay() as relay:
+            sent = self._send_text(relay, 1, stderr="herdr: send-text failed")
+            self.assertIn(
+                {"type": "error", "message": "text was not delivered", "scope": "send_text",
+                 "pane_id": "pane-1", "request_id": "r1"},
+                sent,
+            )
+            self.assertFalse(any(m.get("type") == "command_result" for m in sent))
+
+    def test_a_refused_respond_names_its_scope_and_pane(self):
+        # Free text to a blocked pane whose menu the relay cannot read is refused; the client
+        # needs to know it was THIS text, for THIS pane, to put it back in the box.
+        with loaded_relay() as relay:
+            pane_id = "pane-1"
+            relay.known_panes.add(pane_id)
+            content = "some menu the relay cannot parse"
+            ws = _FakeWebSocket([json.dumps({
+                "type": "respond", "pane_id": pane_id, "text": "please look again",
+                "prompt_id": relay.question_prompt_id(pane_id, content),
+            })])
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "read_pane", return_value=content), \
+                 mock.patch.object(relay, "pane_is_omp", return_value=False):
+                asyncio.run(relay.handle_client(ws))
+            errors = [json.loads(m) for m in ws.sent if json.loads(m).get("type") == "error"]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["scope"], "respond")
+            self.assertEqual(errors[0]["pane_id"], pane_id)
+
+
 class RelayQuestionTests(unittest.TestCase):
     ASK_SCREEN = """
 ╭─ Ask ─╮

@@ -192,5 +192,87 @@ class WebConnectionTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate("() => __conn()"), "live")
 
 
+
+@unittest.skipIf(sync_playwright is None, "playwright is not installed")
+@unittest.skipIf(_chrome() is None, "no chromium build available")
+class WebUndeliveredTextTests(unittest.TestCase):
+    """The input box is cleared on send, so text the relay did not deliver must come back."""
+
+    def setUp(self):
+        self.page = _shared["browser"].new_page(viewport=PHONE)
+        self.page.add_init_script(_seed(RELAY_A, [{"name": "A", "url": RELAY_A}]))
+        self.page.add_init_script(FAKE_SOCKET)
+        self.page.goto(PAGE)
+        self.page.wait_for_function("() => window.__sockets.length === 1")
+        self.page.evaluate("() => __open(0)")
+
+    def tearDown(self):
+        self.page.close()
+
+    def open_pane(self, status):
+        self.page.evaluate(
+            "s => { __msg(0, {type: 'agents', agents: [{pane_id: 'w1:p1', agent: 'opencode', status: s}]});"
+            " openTerminal('w1:p1'); }", status)
+
+    def type_and_send(self, text):
+        self.page.evaluate("t => { document.getElementById('termInput').value = t; sendText(); }", text)
+
+    def sent(self):
+        return self.page.evaluate("() => __sock(0).sent.map(m => JSON.parse(m))")
+
+    def box(self):
+        return self.page.evaluate("() => document.getElementById('termInput').value")
+
+    def notice(self):
+        return self.page.evaluate(
+            "() => { const e = document.getElementById('sendError'); return e.hidden ? null : e.textContent; }")
+
+    def test_a_delivered_text_clears_the_box(self):
+        self.open_pane("idle")
+        self.type_and_send("hello?")
+        self.assertEqual([m["type"] for m in self.sent() if m["type"].startswith("send_")],
+                         ["send_text", "send_keys"])
+        self.page.evaluate("() => __msg(0, {type: 'command_result', command: 'send_text', ok: true})")
+        self.assertEqual(self.box(), "")
+        self.assertIsNone(self.notice())
+
+    def test_a_text_herdr_did_not_deliver_comes_back(self):
+        self.open_pane("idle")
+        self.type_and_send("Como essa trava vai se resolver?")
+        self.assertEqual(self.box(), "")
+        self.page.evaluate("() => __msg(0, {type: 'error', message: 'text was not delivered',"
+                           " scope: 'send_text', pane_id: 'w1:p1'})")
+        self.assertEqual(self.box(), "Como essa trava vai se resolver?")
+        self.assertIn("text was not delivered", self.notice())
+
+    def test_a_refused_answer_to_an_unreadable_menu_comes_back_with_a_reason(self):
+        self.open_pane("blocked")
+        self.type_and_send("pode derrubar")
+        self.assertEqual([m["type"] for m in self.sent() if m["type"] == "respond"], ["respond"])
+        self.page.evaluate("() => __msg(0, {type: 'error', scope: 'respond', pane_id: 'w1:p1',"
+                           " message: 'free-text response requires a detected question'})")
+        self.assertEqual(self.box(), "pode derrubar")
+        self.assertIn("menu", self.notice())
+        # Typing again is the reader taking it from here.
+        self.page.fill("#termInput", "outra coisa")
+        self.assertIsNone(self.notice())
+
+    def test_a_refusal_does_not_overwrite_what_the_reader_is_typing_now(self):
+        self.open_pane("idle")
+        self.type_and_send("first")
+        self.page.evaluate("() => { document.getElementById('termInput').value = 'second'; }")
+        self.page.evaluate("() => __msg(0, {type: 'error', message: 'text was not delivered',"
+                           " scope: 'send_text', pane_id: 'w1:p1'})")
+        self.assertEqual(self.box(), "second")
+
+    def test_a_closed_socket_keeps_the_text_and_sends_nothing(self):
+        self.open_pane("idle")
+        before = len(self.sent())
+        self.page.evaluate("() => { __sock(0).readyState = 3; }")  # the page slept; no onclose yet
+        self.type_and_send("still here")
+        self.assertEqual(len(self.sent()), before)
+        self.assertEqual(self.box(), "still here")
+        self.assertIn("Not connected", self.notice())
+
 if __name__ == "__main__":
     unittest.main()

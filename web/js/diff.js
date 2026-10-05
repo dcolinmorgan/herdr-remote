@@ -36,7 +36,9 @@ function handleMessage(msg) {
     // cleared the buttons and looked exactly like an accepted one, so a rejection has to be
     // perceptible at least as a cue. The buttons themselves come back on the next blocked
     // broadcast, since the pane is still blocked.
-    if (window.cue) cue('error');
+    if (msg.scope === 'send_text' || msg.scope === 'respond') {
+      restoreUnsentText(msg);  // cues on its own when it has something to say
+    } else if (window.cue) cue('error');
     // A question refusal is attributable -- the relay names the scope, the pane and the option --
     // so it can be shown against the control that caused it instead of only being heard. The
     // relay re-broadcasts the pane's real state straight after, and that rebuild is what draws

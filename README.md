@@ -11,7 +11,7 @@ Download [Herdi.app](https://github.com/dcolinmorgan/herdr-remote/releases/lates
 Monitors all your local herdr agents automatically -- no relay, no config, no account.
 
 ```bash
-curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/latest/download/Herdi-0.7.0.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
+curl -sL https://github.com/dcolinmorgan/herdr-remote/releases/download/v0.8.0/Herdi-0.8.0.dmg -o /tmp/Herdi.dmg && open /tmp/Herdi.dmg
 ```
 
 ## What you get

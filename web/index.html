@@ -62,7 +62,7 @@ document.addEventListener('DOMContentLoaded', () => bind());
     <label for="relayUrl">Relay URL</label>
     <input id="relayUrl" type="url" placeholder="wss://your-tunnel.trycloudflare.com" />
     <label for="relayToken" style="margin-top:8px">Token (optional)</label>
-    <input id="relayToken" type="password" placeholder="shared secret" />
+    <input id="relayToken" type="password" placeholder="shared secret" autocomplete="off" />
     <button onclick="saveAndConnect()">Connect</button>
     <div class="hint">Run <code>./relay/start.sh</code> to get a URL. <a href="https://github.com/dcolinmorgan/herdr-remote/blob/main/QUICKSTART.md" style="color:var(--blue)">Setup guide →</a></div>
   </div>
@@ -135,9 +135,12 @@ document.addEventListener('DOMContentLoaded', () => bind());
   </div>
   <div class="term-content" id="termContent">Loading…</div>
   <div class="quick-actions" id="quickActions"></div>
+  <div class="qa-hint qa-error send-error" id="sendError" role="alert" hidden></div>
   <div class="term-input">
     <button class="term-cmd" onclick="openCommandPalette()" aria-label="Commands">/</button>
-    <input id="termInput" placeholder="Type…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+    <!-- type/name plus the managers' own opt-outs: the page also holds a password field (the
+         relay token), and password managers ignore autocomplete="off" and offer to fill this. -->
+    <input id="termInput" type="text" name="message" placeholder="Type…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
     <button class="dock-toggle dock-quick" id="quickDockBtn" aria-pressed="false" onclick="toggleQuickDock()" aria-label="Quick actions"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></button>
     <button class="dock-toggle dock-keys" id="keysDockBtn" aria-pressed="false" onclick="toggleKeysDock()" aria-label="Keys"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h.001M12 12h.001M16 12h.001M7 16h10"/></svg></button>
     <button class="term-send" onclick="sendText()" aria-label="Send"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>

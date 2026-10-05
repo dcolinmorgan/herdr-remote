@@ -3018,7 +3018,10 @@ async def handle_client(ws):
                 request_id = msg.get("request_id")
 
                 def command_error(message):
-                    response = {"type": "error", "message": message}
+                    # scope + pane_id let a client put the reader's text back in the box it
+                    # cleared, instead of a refusal being a sound and nothing else.
+                    response = {"type": "error", "message": message, "scope": "respond",
+                                "pane_id": pane_id}
                     if request_id:
                         response["request_id"] = request_id
                     return response
@@ -3326,17 +3329,41 @@ async def handle_client(ws):
                 await ws.send(json.dumps(response))
             elif msg_type == "send_text":
                 pane_id = msg["pane_id"]
+                request_id = msg.get("request_id")
+
+                def text_reply(payload):
+                    return json.dumps({**payload, **({"request_id": request_id} if request_id else {})})
+
+                def text_error(message):
+                    return text_reply({"type": "error", "message": message, "scope": "send_text",
+                                       "pane_id": pane_id})
+
                 if pane_id not in known_panes:
-                    await ws.send(json.dumps({"type": "error", "message": "unknown pane_id"}))
+                    await ws.send(text_error("unknown pane_id"))
                     continue
                 text = msg.get("text", "")
                 if not text or len(text) > 1000:
-                    await ws.send(json.dumps({"type": "error", "message": "text empty or too long"}))
+                    await ws.send(text_error("text empty or too long"))
                     continue
                 remote = pane_remote_map.get(pane_id)
                 log.info("Text from %s (%s): pane=%s text=%r", ip, device, pane_id, text)
                 audit("send_text", ip, device, pane_id, f"text={text!r}")
-                await asyncio.to_thread(run_herdr, "pane", "send-text", pane_id, text, remote=remote)
+                # The exit status used to be dropped here, so a send that never reached the pane
+                # looked delivered from both ends: the log said "Text from", the client had
+                # already cleared its box, and nothing arrived.
+                try:
+                    result = await asyncio.to_thread(
+                        run_herdr_result, "pane", "send-text", pane_id, text, remote=remote
+                    )
+                    failure = "" if result.returncode == 0 else (
+                        f"exit {result.returncode}: {(result.stderr or '').strip()[:200]}")
+                except Exception as exc:
+                    failure = f"raised {exc}"
+                if failure:
+                    log.warning("send_text failed for pane %s: %s", pane_id, failure)
+                    await ws.send(text_error("text was not delivered"))
+                    continue
+                await ws.send(text_reply({"type": "command_result", "command": "send_text", "ok": True}))
             elif msg_type == "agent_prompt":
                 # Use 'herdr agent prompt' for proper submission (works with Codex, Claude, etc.)
                 request_id = msg.get("request_id")

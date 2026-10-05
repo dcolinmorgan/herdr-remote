@@ -68,13 +68,23 @@ class FakeCallback:
 
 
 class FakeBot:
-    def __init__(self):
+    def __init__(self, fail=False, not_modified=False):
         self.sent = []
+        self.edits = []
+        self.fail = fail
+        self.not_modified = not_modified
 
     async def send_message(self, chat_id, text, **kwargs):
         message = SimpleNamespace(message_id=500 + len(self.sent), chat_id=chat_id)
         self.sent.append((chat_id, text, kwargs, message))
         return message
+
+    async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+        self.edits.append((chat_id, message_id, text, kwargs))
+        if self.not_modified:
+            raise Exception("Message is not modified")
+        if self.fail:
+            raise Exception("message to edit not found")
 
 
 class FakeRelayConnection:
@@ -112,6 +122,10 @@ def make_update(chat_id=42, chat_type="private", callback=None, message=None):
     )
 
 
+def make_context(args=None, bot=None):
+    return SimpleNamespace(args=args or [], bot=bot or FakeBot())
+
+
 def make_active_approval_keyboard(pane_id, options):
     markup = tg.make_keyboard(pane_id, options)
     generation = json.loads(markup.inline_keyboard[0][0].callback_data)["g"]
@@ -131,6 +145,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         tg.blocked_prompt_ids.clear()
         tg.prev_statuses.clear()
         tg.daily_stats.clear()
+        tg.read_views.clear()
 
     def tearDown(self):
         tg.CHAT_ID = self.old_chat_id
@@ -264,6 +279,43 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
         await tg.cmd_trust(trust_update, SimpleNamespace(args=[]))
         self.assertEqual(len(trust_update.message.replies[0][1]["reply_markup"].inline_keyboard), 12)
 
+    async def test_repeated_read_edits_one_message_instead_of_stacking(self):
+        # The whole point: /read the same agent twice and the second refreshes the first message
+        # rather than posting a wall to scroll through.
+        tg.agents = make_agents(1, project="api-v2.0")   # specials must not break MarkdownV2
+        update = make_update()
+        ctx = make_context(args=["api"])
+        with patch.object(tg, "read_pane", AsyncMock(side_effect=["first out", "second out"])):
+            await tg.cmd_read(update, ctx)   # posts the view
+            await tg.cmd_read(update, ctx)   # edits it
+
+        self.assertEqual(len(update.message.replies), 1)          # one message, not two
+        self.assertEqual(len(ctx.bot.edits), 1)                    # second read edited it
+        self.assertIn("second out", ctx.bot.edits[0][2])
+        self.assertIn("api\\-v2\\.0", ctx.bot.edits[0][2])          # header escaped
+
+    async def test_unchanged_output_does_not_repost(self):
+        # Identical output -> Telegram "not modified": keep the view, post nothing new.
+        tg.agents = make_agents(1)
+        update = make_update()
+        ctx = make_context(args=["project"], bot=FakeBot(not_modified=True))
+        with patch.object(tg, "read_pane", AsyncMock(side_effect=["same", "same"])):
+            await tg.cmd_read(update, ctx)
+            await tg.cmd_read(update, ctx)
+
+        self.assertEqual(len(update.message.replies), 1)
+
+    async def test_read_reposts_when_the_view_message_is_gone(self):
+        # If the old message can't be edited (deleted / too old), fall back to a fresh one.
+        tg.agents = make_agents(1)
+        update = make_update()
+        ctx = make_context(args=["project"], bot=FakeBot(fail=True))
+        with patch.object(tg, "read_pane", AsyncMock(side_effect=["one", "two"])):
+            await tg.cmd_read(update, ctx)
+            await tg.cmd_read(update, ctx)
+
+        self.assertEqual(len(update.message.replies), 2)
+
     async def test_direct_read_send_and_reply_forms_preserve_behavior(self):
         tg.agents = make_agents(1)
         read_update = make_update()
@@ -274,7 +326,7 @@ class TelegramDashboardTests(unittest.IsolatedAsyncioTestCase):
             patch.object(tg, "read_pane", AsyncMock(side_effect=["read output", "reply output"])),
             patch.object(tg, "send_text_to_relay", AsyncMock()) as send_text,
         ):
-            await tg.cmd_read(read_update, SimpleNamespace(args=["project"]))
+            await tg.cmd_read(read_update, make_context(args=["project"]))
             await tg.cmd_send(send_update, SimpleNamespace(args=["project", "hello"]))
             await tg.cmd_reply(reply_update, SimpleNamespace(args=["project"]))
 

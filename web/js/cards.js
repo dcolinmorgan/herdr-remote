@@ -490,7 +490,7 @@ function openTerminal(paneId) {
   // resetting it on one would drop a reader who had paged back to the live screen the moment
   // their agent asked a question -- the one moment they are most likely to be reading.
   if (activePane !== paneId) {
-    hideHistory(); hideSearch(); clearPaneMirror();
+    hideHistory(); hideSearch(); clearPaneMirror(); hideSendError();
     paneLines = PANE_LINES_BASE; paneFollowing = true; userScrolledUp = false;
     // A real switch is one of the two moments the sibling row may place itself; dropping the anchor
     // here is what asks for it, and what keeps a re-entry from asking again.
