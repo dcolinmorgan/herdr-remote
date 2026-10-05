@@ -983,7 +983,10 @@ def list_panes_from_host(remote=None):
 
     agents, shells = [], []
     for order, p in enumerate(panes):
-        if not p.get("agent"):
+        if not p.get("agent") and not (
+            isinstance(p.get("agent_session"), dict)
+            and p["agent_session"].get("agent")
+        ):
             if SHELL_PANES and p.get("pane_id"):
                 shells.append(shell_pane_record(p, host_label, remote, order))
             continue
@@ -1000,7 +1003,8 @@ def list_panes_from_host(remote=None):
         scroll = p.get("scroll") or {}
         agents.append({
             "pane_id": p["pane_id"],
-            "agent": p.get("agent", ""),
+            "agent": p.get("agent")
+                or (p.get("agent_session") or {}).get("agent", ""),
             # The agent's name first, the pane's label second. herdr keeps the two apart and
             # `pane list` only carries the latter, which nothing sets by default -- so this field
             # was empty for every agent on the host and clients fell back to the pane id.
