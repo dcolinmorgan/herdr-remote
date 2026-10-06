@@ -709,5 +709,156 @@ class PiTests(unittest.TestCase):
         self.assertEqual(body["unavailable"], "no-session")
 
 
+KIMI_SESSION = f"session_{SESSION}"
+KIMI_TIME = 1791219687380  # epoch ms, the shape every kimi row is stamped with
+
+
+def kimi_appended(role, content, source="input", calls=(), tool_call_id=None, time=KIMI_TIME):
+    """One `agent.message.appended` row, the only kimi channel that carries finished messages."""
+    message = {"role": role, "content": content}
+    if calls:
+        message["toolCalls"] = calls
+    if tool_call_id:
+        message["toolCallId"] = tool_call_id
+    return {"type": "agent.message.appended", "time": time,
+            "message": {"message": message, "meta": {"source": source}}}
+
+
+def write_kimi_wire(root, rows, session=KIMI_SESSION, workspace="wd_project_ab12cd34ef56"):
+    directory = Path(root) / workspace / session / "agents" / "main"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "wire.jsonl"
+    with open(path, "w", encoding="utf-8") as handle:
+        for item in rows:
+            handle.write(json.dumps(item) + "\n")
+    return path
+
+
+class KimiTests(unittest.TestCase):
+    """kimi hands over a `session_<uuid>` leaf (kind 'id'); wire.jsonl is an event stream whose
+    finished messages all arrive on `agent.message.appended`."""
+
+    def parse_kimi(self, rows):
+        return transcript.parse_kimi(json.dumps(r) for r in rows)
+
+    def test_user_and_assistant_text_become_turns(self):
+        turns, _ = self.parse_kimi([
+            kimi_appended("user", [{"type": "text", "text": "do the thing"}]),
+            kimi_appended("assistant", [{"type": "text", "text": "done"}], source="llm"),
+        ])
+        self.assertEqual([(t["role"], t["text"]) for t in turns],
+                         [("user", "do the thing"), ("assistant", "done")])
+        # Epoch milliseconds become the ISO string every client already renders.
+        self.assertEqual(turns[0]["ts"], "2026-10-05T17:01:27.380Z")
+
+    def test_thinking_blocks_are_dropped(self):
+        turns, _ = self.parse_kimi([
+            kimi_appended("assistant", [
+                {"type": "think", "think": "secret plan"},
+                {"type": "text", "text": "visible"},
+            ], source="llm"),
+        ])
+        self.assertEqual([t["text"] for t in turns], ["visible"])
+
+    def test_notify_is_a_note_not_the_person_talking(self):
+        turns, _ = self.parse_kimi([
+            kimi_appended("user", [{"type": "text", "text": "background task finished"}],
+                          source="notify"),
+        ])
+        self.assertEqual(turns[0]["role"], "note")
+
+    def test_tool_calls_come_from_a_json_string_and_carry_a_diff(self):
+        turns, _ = self.parse_kimi([
+            kimi_appended("assistant", [], source="llm", calls=[
+                {"type": "function", "id": "call_1", "name": "Edit", "arguments": json.dumps({
+                    "file_path": "/repo/f",
+                    "old_string": "one\n", "new_string": "uno\n"})},
+            ]),
+        ])
+        tool = turns[0]
+        self.assertEqual((tool["role"], tool["tool"], tool["target"]),
+                         ("tool", "Edit", "/repo/f"))
+        self.assertEqual(tool["diff"].splitlines(), ["-one", "+uno"])
+
+    def test_a_tool_result_folds_onto_its_call_by_toolcallid(self):
+        turns, _ = self.parse_kimi([
+            kimi_appended("assistant", [], source="llm", calls=[
+                {"type": "function", "id": "call_1", "name": "Bash",
+                 "arguments": json.dumps({"command": "echo hi"})},
+            ]),
+            kimi_appended("tool", [
+                {"type": "text", "text": "<image path=\"/tmp/a.png\">"},
+                {"type": "image_url", "imageUrl": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "text", "text": "</image>"},
+            ], source="tool", tool_call_id="call_1"),
+        ])
+        self.assertEqual(len(turns), 1)
+        self.assertIn("\u2192 <image path=\"/tmp/a.png\">", turns[0]["text"])
+        # The base64 image never reaches a turn, whichever block carried it.
+        self.assertNotIn("base64", turns[0]["text"])
+
+    def test_the_other_two_channels_are_not_read_so_nothing_is_counted_twice(self):
+        """The typed prompt also arrives on `context.append_message`, and the machinery's
+        injections arrive there too; the loop events are the streaming trace."""
+        rows = [
+            {"type": "context.append_message", "agentId": "main", "time": KIMI_TIME,
+             "message": {"role": "user", "content": [{"type": "text", "text": "do the thing"}],
+                         "origin": {"kind": "user"}}},
+            {"type": "context.append_message", "agentId": "main", "time": KIMI_TIME,
+             "message": {"role": "user", "content": [{"type": "text", "text": "<system-reminder>"}],
+                         "origin": {"kind": "injection"}}},
+            {"type": "context.append_loop_event", "agentId": "main", "time": KIMI_TIME,
+             "event": {"type": "content.part", "text": "streamed"}},
+            kimi_appended("user", [{"type": "text", "text": "do the thing"}]),
+        ]
+        turns, _ = self.parse_kimi(rows)
+        self.assertEqual([(t["role"], t["text"]) for t in turns], [("user", "do the thing")])
+
+    def test_turn_ids_are_unique_without_a_row_uuid(self):
+        """kimi rows carry no message id, so ids fall back to turn-N -- pagination cursors still
+        need every one of them distinct."""
+        turns, _ = self.parse_kimi([
+            kimi_appended("user", [{"type": "text", "text": "ask"}]),
+            kimi_appended("assistant", [{"type": "text", "text": "answer"}], source="llm"),
+            kimi_appended("assistant", [{"type": "text", "text": "and more"}], source="llm"),
+        ])
+        self.assertEqual(len({t["uuid"] for t in turns}), 3)
+
+    def test_a_torn_last_line_is_skipped_not_raised(self):
+        lines = [json.dumps(kimi_appended("user", [{"type": "text", "text": "intact"}])),
+                 json.dumps(kimi_appended("user", [{"type": "text", "text": "torn"}]))[:40]]
+        turns, _ = transcript.parse_kimi(lines)
+        self.assertEqual([t["text"] for t in turns], ["intact"])
+
+    def test_a_kimi_id_needs_its_prefix_and_a_uuid(self):
+        rejected = [SESSION, "../" + KIMI_SESSION, KIMI_SESSION.upper() + "/x",
+                    "session_" + SESSION[:-2], ""]
+        for value in rejected:
+            with self.subTest(value=value):
+                self.assertIsNone(transcript.SESSION_ID_RE.match(value))
+                body = transcript.history({"agent": "kimi", "kind": "id", "value": value},
+                                          agent="kimi")
+                self.assertEqual(body["unavailable"], "no-session")
+        # And the prefix is kimi's, not a general relaxation: claude still wants a bare uuid.
+        body = transcript.history({"agent": "claude", "kind": "id", "value": KIMI_SESSION},
+                                  agent="claude")
+        self.assertEqual(body["unavailable"], "no-session")
+
+    def test_history_reads_the_wire_under_a_kimi_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_kimi_wire(root, [kimi_appended("user", [{"type": "text", "text": "hello"}])])
+            mod = load_transcript({"HERDR_KIMI_ROOTS": root})
+            body = mod.history({"agent": "kimi", "kind": "id", "value": KIMI_SESSION}, agent="kimi")
+        self.assertIsNone(body["unavailable"])
+        self.assertEqual(body["messages"][0]["text"], "hello")
+        self.assertEqual(body["agent"], "kimi")
+
+    def test_a_session_directory_that_is_not_there_yet_is_no_log(self):
+        with tempfile.TemporaryDirectory() as root:
+            mod = load_transcript({"HERDR_KIMI_ROOTS": root})
+            body = mod.history({"agent": "kimi", "kind": "id", "value": KIMI_SESSION}, agent="kimi")
+        self.assertEqual(body["unavailable"], "no-log")
+
+
 if __name__ == "__main__":
     unittest.main()
