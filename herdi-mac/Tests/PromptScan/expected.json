@@ -1,0 +1,46 @@
+{
+  "checkbox": [
+    "[ ] Search A search box in the header.",
+    "[✔] Dark mode Follows the system setting.",
+    "[ ] Type something Submit",
+    "Chat about this"
+  ],
+  "codex-approval": [
+    "Yes, proceed (y)",
+    "Yes, and don't ask again for commands that start with `echo hello > note- codex.txt` (p)",
+    "No, and tell Codex what to do differently (esc)"
+  ],
+  "edit-session-grant": [
+    "Yes",
+    "Yes, allow all edits during this session (shift+tab)",
+    "Yes, and switch to auto mode · auto mode handles these prompts for you",
+    "No, and tell Claude what to do differently (esc)"
+  ],
+  "question-with-descriptions": [
+    "Blue (Recommended) Matches the existing links on the page.",
+    "Green Reads as a success state.",
+    "Grey Keeps the button quiet next to the form.",
+    "Type something.",
+    "Chat about this"
+  ],
+  "review": [
+    "Submit answers",
+    "Cancel"
+  ],
+  "second-question": [
+    "Medium (Recommended) Same height as the inputs beside it.",
+    "Large Easier to hit on a phone.",
+    "Type something.",
+    "Chat about this"
+  ],
+  "wrapped-grant-curly": [
+    "Yes",
+    "Yes, and don’t ask again for: /home/user/project/test.sh",
+    "No"
+  ],
+  "wrapped-grant": [
+    "Yes",
+    "Yes, and don't ask again for git push commands in /home/user/project",
+    "No, and tell Claude what to do differently (esc)"
+  ]
+}

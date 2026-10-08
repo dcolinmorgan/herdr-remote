@@ -1,0 +1,14 @@
+────────────────────────────────────────────────────────────────────────────────
+←  ☒ Colour  ☐ Size  ✔ Submit  →
+
+│ Which size should the button be?
+
+❯ 1. Medium (Recommended)
+     Same height as the inputs beside it.
+  2. Large
+     Easier to hit on a phone.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

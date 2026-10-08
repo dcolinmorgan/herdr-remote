@@ -476,13 +476,12 @@ private struct AgentSessionRow: View {
             // Actions
             if hovered || style == .blocked {
                 HStack(spacing: 4) {
-                    if style == .blocked,
-                       agent.options?.contains("yes, single permission") == true {
+                    if style == .blocked, let allow = allowOption(in: agent.options) {
                         Button {
                             relay.send(response: ResponseMessage(
                                 pane_id: agent.id,
                                 prompt_id: agent.promptId,
-                                text: "yes, single permission"
+                                text: menuPayload(for: allow)
                             ))
                         } label: {
                             Image(systemName: "checkmark.circle.fill")
@@ -667,7 +666,7 @@ private struct ApprovalCard: View {
     }
 
     private func respond(_ text: String) {
-        relay.send(response: ResponseMessage(pane_id: agent.id, prompt_id: agent.promptId, text: text))
+        relay.send(response: ResponseMessage(pane_id: agent.id, prompt_id: agent.promptId, text: menuPayload(for: text)))
         agent.status = .working
         agent.prompt = nil
         agent.promptId = nil
@@ -697,15 +696,19 @@ private struct ApprovalCard: View {
 
 // MARK: - Response Button Grid
 
-/// Clean, icon-labeled buttons for common agent responses.
-/// Maps raw option strings to clear UI with icons and keyboard shortcuts.
+/// One button per option, in the agent's own words and in its order. Colour and icon say what an
+/// option does. The shortcut is the agent's own key with ⌘, from `optionShortcuts`.
 private struct ResponseButtonGrid: View {
     let options: [String]?
     let onRespond: (String) -> Void
 
     private var buttons: [ResponseAction] {
         guard let options else { return [] }
-        return options.map { mapOption($0) }
+        let bodies = options.map(optionBody)
+        let shortcuts = optionShortcuts(zip(options, bodies).map { option, body in
+            (label: body, number: Int(menuPayload(for: option)))
+        })
+        return options.indices.map { mapOption(options[$0], body: bodies[$0], shortcut: shortcuts[$0]) }
     }
 
     var body: some View {
@@ -716,49 +719,50 @@ private struct ResponseButtonGrid: View {
         }
     }
 
-    private func mapOption(_ option: String) -> ResponseAction {
-        let lower = option.lowercased()
-
-        // Permission responses
-        if lower.contains("single permission") || lower == "y" || lower == "yes" {
-            return ResponseAction(label: "Allow", icon: "checkmark", tint: .green, shortcut: "⌘Y", rawValue: option)
-        }
-        if lower.contains("always allow") || lower.contains("trust") {
-            return ResponseAction(label: "Trust", icon: "shield.checkered", tint: .blue, shortcut: "⌘T", rawValue: option)
-        }
-        if lower.contains("tab to edit") || lower.starts(with: "no") || lower == "n" {
-            return ResponseAction(label: "Deny", icon: "xmark", tint: .red, shortcut: "⌘N", rawValue: option)
-        }
-
-        // Batch responses
-        if lower.contains("approve all") {
-            return ResponseAction(label: "Approve All", icon: "checkmark.circle.fill", tint: .green, shortcut: "⌘A", rawValue: option)
-        }
-        if lower.contains("configure individually") {
-            return ResponseAction(label: "Configure", icon: "slider.horizontal.3", tint: .orange, shortcut: nil, rawValue: option)
-        }
-
-        // Flow control
-        if lower.contains("continue") || lower.contains("proceed") {
-            return ResponseAction(label: "Continue", icon: "play.fill", tint: .green, shortcut: "⌘↩", rawValue: option)
-        }
-        if lower.contains("edit") || lower.contains("modify") {
-            return ResponseAction(label: "Edit", icon: "pencil", tint: .orange, shortcut: "⌘E", rawValue: option)
-        }
-        if lower.contains("retry") || lower.contains("again") {
-            return ResponseAction(label: "Retry", icon: "arrow.clockwise", tint: .blue, shortcut: "⌘R", rawValue: option)
-        }
-        if lower.contains("skip") {
-            return ResponseAction(label: "Skip", icon: "forward.fill", tint: .gray, shortcut: nil, rawValue: option)
-        }
-        if lower.contains("exit") || lower.contains("cancel") || lower.contains("abort") {
-            return ResponseAction(label: "Cancel", icon: "xmark.circle", tint: .red, shortcut: "⌘.", rawValue: option)
-        }
-
-        // Fallback
-        let shortLabel = String(option.prefix(16))
-        return ResponseAction(label: shortLabel, icon: "circle", tint: .white.opacity(0.6), shortcut: nil, rawValue: option)
+    private func mapOption(_ option: String, body: String, shortcut: OptionShortcut?) -> ResponseAction {
+        let kind = optionKind(body)
+        return ResponseAction(
+            label: optionTitle(body), icon: kind.look.icon, tint: kind.look.tint,
+            shortcut: shortcut?.label, key: shortcut.map { KeyEquivalent($0.key) }, rawValue: option,
+            shifted: shortcut?.shift ?? false
+        )
     }
+}
+
+extension OptionShortcut {
+    /// The shortcut as the button prints it, such as ⌘P or ⌘⇧Y.
+    var label: String { "⌘" + (shift ? "⇧" : "") + String(key).uppercased() }
+}
+
+/// Colour and icon for each kind of option. The kind itself comes from `optionKind` in
+/// PromptScan.swift, where herdi-mac/test.sh can test it.
+extension OptionKind {
+
+    var look: (icon: String, tint: Color) {
+        switch self {
+        case .grant: ("shield.checkered", .blue)
+        case .once: ("checkmark", .green)
+        case .refuse: ("xmark", .red)
+        case .other: ("circle", .white.opacity(0.6))
+        }
+    }
+}
+
+/// A parsed option arrives as "2. No". The agent's menu is driven by the number alone, so that
+/// is what gets typed; anything the parser did not produce is sent through untouched.
+private func menuPayload(for option: String) -> String {
+    guard let range = option.range(of: #"^\d{1,2}(?=[.):]\s)"#, options: .regularExpression) else { return option }
+    return String(option[range])
+}
+
+/// An option without the number the parser put in front of it.
+private func optionBody(_ option: String) -> String {
+    option.replacingOccurrences(of: #"^\d{1,2}[.):]\s*"#, with: "", options: .regularExpression)
+}
+
+/// The option meaning "go ahead, this once", if the agent offered one.
+private func allowOption(in options: [String]?) -> String? {
+    options?.first { optionKind(optionBody($0)) == .once }
 }
 
 private struct ResponseAction: Identifiable {
@@ -766,9 +770,13 @@ private struct ResponseAction: Identifiable {
     let icon: String
     let tint: Color
     let shortcut: String?
+    let key: KeyEquivalent?
     let rawValue: String
+    var shifted = false
 
     var id: String { rawValue }
+
+    var modifiers: EventModifiers { shifted ? [.command, .shift] : .command }
 }
 
 private struct ResponseButton: View {
@@ -790,6 +798,8 @@ private struct ResponseButton: View {
                     .font(.system(size: 10, weight: .semibold))
                 Text(action.label)
                     .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 if let shortcut = action.shortcut {
                     Text(shortcut)
                         .font(.system(size: 8, weight: .medium))
@@ -811,9 +821,30 @@ private struct ResponseButton: View {
             .scaleEffect(pressed ? 0.95 : 1)
         }
         .buttonStyle(.plain)
+        // The visible label can be cut to 16 characters. VoiceOver and the tooltip get the whole
+        // option, so two options that start the same way do not sound or read the same.
+        .accessibilityLabel(action.label)
+        .accessibilityValue(action.rawValue)
+        .help(action.rawValue)
+        .modifier(OptionalShortcut(key: action.key, modifiers: action.modifiers))
         .onHover { hovered = $0 }
         .animation(NotchAnimation.micro, value: hovered)
         .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
+/// The shortcut printed on a response button only does anything if it is also bound.
+private struct OptionalShortcut: ViewModifier {
+    let key: KeyEquivalent?
+    let modifiers: EventModifiers
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let key {
+            content.keyboardShortcut(key, modifiers: modifiers)
+        } else {
+            content
+        }
     }
 }
 
