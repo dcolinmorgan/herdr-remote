@@ -86,6 +86,37 @@ check("binds a key only once",
       shortcuts([("No (n)", nil), ("Reject (n)", nil)]) == ["n", "-"])
 check("gives an option past 9 with no hint no key", shortcuts([("Green", 12)]) == ["-"])
 
+func ansiFixture(_ name: String) -> [String] {
+    let url = root.appendingPathComponent("fixtures/\(name).ansi")
+    return (try? String(contentsOf: url, encoding: .utf8))?.components(separatedBy: .newlines) ?? []
+}
+
+let trust = detectChoiceMenu(plain: fixture("claude-trust"), ansi: [])
+check("reads a list with a cursor and no numbers",
+      trust == ChoiceMenu(choices: ["No, exit", "Yes, I trust this folder"], selected: 0, horizontal: false),
+      "got \(String(describing: trust))")
+let row = detectChoiceMenu(plain: fixture("opencode-choices"), ansi: ansiFixture("opencode-choices"))
+check("reads choices side by side, with the selected one from its colour",
+      row == ChoiceMenu(choices: ["Allow once", "Allow always", "Reject"], selected: 0, horizontal: true),
+      "got \(String(describing: row))")
+let inline = detectChoiceMenu(plain: fixture("opencode-choices-inline-hints"),
+                              ansi: ansiFixture("opencode-choices-inline-hints"))
+check("leaves out key hints drawn far to the right on the same row as the choices",
+      inline == ChoiceMenu(choices: ["Allow once", "Allow always", "Reject"], selected: 0, horizontal: true),
+      "got \(String(describing: inline))")
+let pair = ["  \u{1B}[48;2;30;30;30m  \u{1B}[48;2;200;0;0m Yes \u{1B}[48;2;30;30;30m   No                \u{1B}[0m"]
+check("finds the selected one of two choices side by side",
+      detectChoiceMenu(plain: ["  Yes   No"], ansi: pair)
+          == ChoiceMenu(choices: ["Yes", "No"], selected: 0, horizontal: true))
+check("reads no choice menu from a plain row with no colour",
+      detectChoiceMenu(plain: fixture("opencode-choices"), ansi: []) == nil)
+check("reads no choice menu where there is a numbered menu",
+      detectChoiceMenu(plain: fixture("wrapped-grant"), ansi: []) == nil)
+check("presses Right twice and Enter to pick the third of three side by side",
+      row.map { keys(toChoose: 2, in: $0) } == ["Right", "Right", "Enter"])
+check("presses Down and Enter to pick the second of a list",
+      trust.map { keys(toChoose: 1, in: $0) } == ["Down", "Enter"])
+
 let question = fixture("question-with-descriptions")
 let excerpt = promptExcerpt(question, menuOptions(question))
 check("starts the card text below the divider",

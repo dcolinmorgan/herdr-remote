@@ -1,0 +1,16 @@
+
+     $ echo third > note-opencode-3.txt
+
+     ▣  Build · Big Pickle
+
+  ┃
+  ┃  △ Permission required
+  ┃    # Shell command
+  ┃
+  ┃  $ echo third > note-opencode-3.txt
+  ┃
+  ┃
+  ┃   Allow once   Allow always   Reject
+  ┃
+  ┃  ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃

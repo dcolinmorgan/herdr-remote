@@ -15,6 +15,8 @@ final class Agent: Identifiable {
     var agentKind: String
     var prompt: String?
     var options: [String]?
+    /// Choices with no numbers, read when `options` is empty. See `detectChoiceMenu`.
+    var choiceMenu: ChoiceMenu?
     var promptId: String?
     var multiOptions: [String] = []
     var selectedOptions: [String] = []
