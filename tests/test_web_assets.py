@@ -140,3 +140,24 @@ class WebAssetAuthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebAppOriginTests(unittest.TestCase):
+    """The page holds the relay token, so it runs no script that another origin serves."""
+
+    def test_no_script_or_module_loads_from_another_origin(self):
+        sources = {"index.html": INDEX}
+        sources.update({f"js/{p.name}": p.read_text(encoding="utf-8") for p in (WEB / "js").glob("*.js")})
+        external = re.compile(r"""(?:<script[^>]+src=|\bfrom\s+|\bimport\s*\()\s*["']https?://""")
+        for name, text in sorted(sources.items()):
+            with self.subTest(file=name):
+                self.assertIsNone(external.search(text))
+
+    def test_the_policy_allows_scripts_from_this_origin_only(self):
+        with loaded_relay() as relay:
+            directives = dict(
+                part.strip().split(" ", 1) for part in relay.WEB_APP_CSP.split(";") if part.strip()
+            )
+            self.assertEqual(directives["script-src"], "'self' 'unsafe-inline'")
+            self.assertEqual(directives["object-src"], "'none'")
+            self.assertIn("https:", directives["connect-src"])

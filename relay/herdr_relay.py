@@ -258,6 +258,13 @@ _remote_locks_guard = threading.Lock()
 _session_list_cache = {}  # source -> (monotonic_timestamp, sessions_list)
 
 
+WEB_APP_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "font-src 'self'; connect-src 'self' ws: wss: http: https:; "
+    "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
+
 SAFE_RESPONSES = {
     "y", "n", "a", "yes", "no", "trust",
     "yes, single permission", "trust, always allow", "no (tab to edit)",
@@ -2865,6 +2872,14 @@ async def process_request(connection, request):
             fields = [
                 ("Content-Type", "text/html; charset=utf-8"),
                 ("Cache-Control", "no-cache"),
+                # This page holds the relay token, which is shell-adjacent access to the host, so
+                # it runs no script from anywhere else. 'unsafe-inline' is unavoidable while the
+                # app keeps its inline <script> blocks and style attributes -- it does not stop
+                # injected inline script, but it does stop every external script origin, which is
+                # the exposure that matters for a page carrying that token. connect-src stays
+                # open to http: and https: because the app can switch to another relay and then
+                # fetches that relay's /api/vapid-public-key.
+                ("Content-Security-Policy", WEB_APP_CSP),
             ]
             if AUTH_TOKEN:
                 # Getting here means this request already authenticated, so plant the token for
