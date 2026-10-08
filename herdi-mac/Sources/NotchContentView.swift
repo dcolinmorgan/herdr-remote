@@ -110,6 +110,7 @@ struct NotchPanelView: View {
         case .approval(let agentId):
             if let agent = relay.agents.first(where: { $0.id == agentId }) {
                 ApprovalCard(agent: agent, relay: relay) {
+                    controller.dismissedBlocked.insert(agent.id)
                     withAnimation(NotchAnimation.close) {
                         controller.surface = .collapsed
                     }
@@ -664,6 +665,8 @@ private struct ApprovalCard: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
         }
+        // Escape dismisses, the keyboard path to what the chevron and a click outside do.
+        .onExitCommand { onDismiss() }
     }
 
     private func respond(_ text: String) {

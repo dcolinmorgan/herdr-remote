@@ -115,6 +115,9 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
     private var hostingView: NotchHostingView<NotchPanelView>?
     private let relay: RelayConnection
     @Published var surface: IslandSurface = .collapsed
+    /// Agents whose card you have already waved away. Cleared once they stop being blocked, so
+    /// the next prompt from the same pane opens normally.
+    var dismissedBlocked: Set<String> = []
     private var globalClickMonitor: Any?
     private var fullscreenLatch = false
 
@@ -173,8 +176,12 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
         globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.surface.isExpanded else { return }
-                // Don't collapse during active approval interaction
-                if case .approval = self.surface { return }
+                // A click elsewhere is a deliberate dismissal, approval cards included. They used
+                // to be exempt, which made a card offering nothing to click impossible to get rid
+                // of. Remember it so the poll does not reopen it a second later.
+                if case .approval(let agentId) = self.surface {
+                    self.dismissedBlocked.insert(agentId)
+                }
                 withAnimation(NotchAnimation.close) {
                     self.surface = .collapsed
                 }
