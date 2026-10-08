@@ -1,0 +1,17 @@
+  Ran 1 shell command
+────────────────────────────────────────────────────────────────────────────────
+←  ☐ Colour  ☐ Size  ✔ Submit  →
+
+Which colour should the button use?
+
+❯ 1. Blue (Recommended)
+     Matches the existing links on the page.
+  2. Green
+     Reads as a success state.
+  3. Grey
+     Keeps the button quiet next to the form.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

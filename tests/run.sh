@@ -163,6 +163,14 @@ echo "18. LICENSE is AGPL"
 grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" "$DIR/LICENSE"
 assert_eq "$?" "0" "AGPL license"
 
+echo "19. Herdi prompt scanner"
+if [ "$(uname)" = "Darwin" ] && command -v swiftc >/dev/null 2>&1; then
+  "$DIR/herdi-mac/test.sh" >/dev/null
+  assert_eq "$?" "0" "Herdi reads menus the way the relay does"
+else
+  echo "  skip: needs macOS and swiftc"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1
