@@ -8,11 +8,13 @@ does reach older rows -- a `recent` + text read, which walks the agent's own mou
 terminal. The agent writes its own transcript anyway, with real message boundaries and timestamps,
 so that is what we read.
 
-Claude and pi JSONL are both understood. Adding another harness means adding a locate+parse pair
-and one line in HARNESSES (plus PATH_HARNESSES if it hands over a file path rather than a uuid) --
-nothing else in here or in the relay is harness-specific.
+Claude, pi and kimi-code transcripts are all understood. Adding another harness means adding a
+locate+parse pair, one line in HARNESSES (plus PATH_HARNESSES if it hands over a file path rather
+than an id) and, when its session ids are not bare uuids, one line in ID_VALUE_RES -- nothing else
+in here or in the relay is harness-specific.
 """
 import difflib
+from datetime import datetime, timezone
 import glob
 import json
 import os
@@ -25,6 +27,12 @@ import threading
 # regex participates in a filesystem path or a remote shell word, so nothing that isn't a uuid is
 # ever allowed past it.
 UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
+
+# kimi-code names its sessions `session_<uuid>`, and the whole value is the session DIRECTORY's
+# name under ~/.kimi-code/sessions -- the prefix is as load-bearing as the hex, so it is validated
+# as part of the value rather than stripped, exactly as constrained as a bare uuid.
+SESSION_ID_RE = re.compile(r"\Asession_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                           r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]")
 
@@ -69,6 +77,9 @@ LOCAL_ROOTS = _roots_env("HERDR_CLAUDE_ROOTS", [os.path.expanduser("~/.claude/pr
 # pi writes one JSONL per session under here; its session ref hands over the absolute path
 # (kind "path"), so these roots are a containment check rather than a search space.
 PI_ROOTS = _roots_env("HERDR_PI_ROOTS", [os.path.expanduser("~/.pi/agent/sessions")])
+# kimi-code writes one directory per session (`<root>/<workspace>/session_<uuid>/agents/main/`);
+# its session ref hands over the `session_<uuid>` leaf (kind "id"), which locate globs for.
+KIMI_ROOTS = _roots_env("HERDR_KIMI_ROOTS", [os.path.expanduser("~/.kimi-code/sessions")])
 # Remote roots stay unexpanded: they are shell words for the remote host, whose $HOME is not ours.
 REMOTE_ROOTS = _roots_env("HERDR_REMOTE_CLAUDE_ROOTS", ["$HOME/.claude/projects"])
 MAX_BYTES = _int_env("HERDR_TRANSCRIPT_MAX_BYTES", 64 * 1024 * 1024)
@@ -553,6 +564,126 @@ def locate_pi(path_value, roots=None):
     return None
 
 
+# ---------------------------------------------------------------------------- kimi parser
+#
+# kimi-code's wire.jsonl is an event stream, and the same conversation arrives on three of its
+# channels: `agent.message.appended` carries each finished message (role user/assistant/tool),
+# `context.append_message` repeats the typed prompts and adds the machinery's injections, and
+# `context.append_loop_event` is the streaming trace the finished message supersedes. Only the
+# first is read, so nothing is counted twice. Message shapes measured across the 105 sessions on
+# this machine:
+#
+#   user       -> content is text blocks; meta.source "input" is a person typing, "notify" is the
+#                 background-task channel (a cron fire, a finished watcher) and reads as a note.
+#   assistant  -> content is `think` + `text` blocks (think dropped, same policy as the others);
+#                 toolCalls carry {id, name, arguments} with arguments a JSON string like pi's.
+#   tool       -> a tool RESULT, one message per call, linked by toolCallId; content is text and
+#                 image_url blocks, and the images are base64 in the row -- text only, ever.
+
+
+def _kimi_timestamp(row):
+    """kimi stamps rows in epoch milliseconds; every other harness and every client speaks ISO."""
+    try:
+        ms = int(row.get("time"))
+    except (TypeError, ValueError):
+        return ""
+    at = datetime.fromtimestamp(ms / 1000, timezone.utc)
+    return at.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
+
+
+def _kimi_blocks(message):
+    blocks = message.get("content")
+    if isinstance(blocks, str):
+        return [{"type": "text", "text": blocks}]
+    return blocks if isinstance(blocks, list) else []
+
+
+def _kimi_spoken(blocks):
+    """The text blocks' texts joined, or "" -- think and image_url never contribute."""
+    pieces = [block.get("text") for block in blocks
+              if isinstance(block, dict) and block.get("type") == "text"
+              and isinstance(block.get("text"), str) and block.get("text").strip()]
+    return "\n".join(pieces)
+
+
+def parse_kimi(lines):
+    """(turns, title) from kimi-code's wire.jsonl. Oldest first, same turn shape as parse_claude."""
+    turns = []
+    tool_turns = {}
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue  # torn last line while the file is being appended to
+        if not isinstance(row, dict) or row.get("type") != "agent.message.appended":
+            continue
+        outer = row.get("message")
+        message = outer.get("message") if isinstance(outer, dict) else None
+        if not isinstance(message, dict):
+            continue
+        # _turn reads uuid and timestamp off the row; kimi rows carry neither, but they do carry
+        # epoch-ms `time`, which becomes the timestamp every client already renders.
+        row = {"timestamp": _kimi_timestamp(row)}
+        role = message.get("role")
+        blocks = _kimi_blocks(message)
+        if role == "user":
+            spoken = _kimi_spoken(blocks)
+            if not spoken:
+                continue
+            source = (outer.get("meta") or {}).get("source") if isinstance(outer, dict) else None
+            turns.append(_turn(row, "note" if source == "notify" else "user", spoken, 0))
+        elif role == "assistant":
+            for index, block in enumerate(blocks):
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    turns.append(_turn(row, "assistant", text, index))
+            for call in message.get("toolCalls") or []:
+                if not isinstance(call, dict):
+                    continue
+                name = call.get("name")
+                name = name if isinstance(name, str) and name else "tool"
+                args = _pi_tool_args(call)  # kimi stores arguments as a JSON string too
+                detail = _tool_target(args)
+                summary = f"{name}({detail})" if detail else name
+                turn = _turn(row, "tool", summary, 0, limit=TOOL_TEXT_LIMIT)
+                _annotate_tool(turn, {"name": name, "input": args})
+                turns.append(turn)
+                call_id = call.get("id")
+                if isinstance(call_id, str) and call_id:
+                    tool_turns[call_id] = turn
+        elif role == "tool":
+            turn = tool_turns.get(message.get("toolCallId"))
+            head = _first_line(_kimi_spoken(blocks))
+            if turn is not None and head:
+                turn["text"], turn["truncated"] = clip(
+                    f"{turn['text']} \u2192 {head}", TOOL_TEXT_LIMIT)
+    for index, turn in enumerate(turns):
+        if not turn["uuid"] or turn["uuid"].startswith("#"):
+            turn["uuid"] = f"turn-{index}"
+    return turns, ""
+
+
+def locate_kimi(session_value, roots=None):
+    """The wire.jsonl for a `session_<uuid>` ref, or None.
+
+    A glob on the leaf name rather than a derived path: the workspace directory in the middle
+    (`wd_<slug>_<hash>`) is keyed to the cwd kimi started in, which the pane's shell may have
+    left, exactly like claude's project directory. The value is SESSION_ID_RE-validated before it
+    gets here, so the pattern cannot be steered out of a root.
+    """
+    for root in (roots if roots is not None else KIMI_ROOTS):
+        matches = sorted(glob.glob(
+            os.path.join(os.path.expanduser(root), "*", session_value, "agents", "main", "wire.jsonl")))
+        if matches:
+            return matches[0]
+    return None
+
+
 # ---------------------------------------------------------------------------- locating
 
 
@@ -729,9 +860,13 @@ def _unavailable(reason, agent=""):
 
 
 # Each harness is (locate, parse). PATH_HARNESSES also names the session-ref kind it accepts:
-# claude uses "id" (a uuid we glob for), pi uses "path" (an absolute file it hands over).
-HARNESSES = {"claude": (locate_claude, parse_claude), "pi": (locate_pi, parse_pi)}
+# claude and kimi use "id" (a value we glob for), pi uses "path" (an absolute file it hands over).
+HARNESSES = {"claude": (locate_claude, parse_claude), "pi": (locate_pi, parse_pi),
+             "kimi": (locate_kimi, parse_kimi)}
 PATH_HARNESSES = {"pi"}
+# The shape an "id" value must take, per harness. Anything absent defaults to a bare uuid, so an
+# unlisted harness keeps the tightest rule until somebody writes its reader.
+ID_VALUE_RES = {"kimi": SESSION_ID_RE}
 
 
 def history(session, remote=None, limit=DEFAULT_LIMIT, before=None, include_tools=False,
@@ -748,9 +883,9 @@ def history(session, remote=None, limit=DEFAULT_LIMIT, before=None, include_tool
     harness = session.get("agent") or agent
     kind = session.get("kind")
     value = session.get("value")
-    # A path harness (pi) hands over an absolute file; an id harness (claude) hands over a uuid we
-    # glob for. Validate the ref shape against what this harness actually uses -- a ref we cannot
-    # make sense of is "no session", whatever the harness.
+    # A path harness (pi) hands over an absolute file; an id harness (claude, kimi) hands over a
+    # value we glob for. Validate the ref shape against what this harness actually uses -- a ref
+    # we cannot make sense of is "no session", whatever the harness.
     if harness in PATH_HARNESSES:
         if kind != "path" or not isinstance(value, str) or not value:
             if log and session:
@@ -761,7 +896,9 @@ def history(session, remote=None, limit=DEFAULT_LIMIT, before=None, include_tool
             if log and session:
                 log.info("transcript: session ref kind %r not supported", kind)
             return _unavailable("no-session", agent)
-        if not isinstance(value, str) or not UUID_RE.match(value):
+        # kimi's ids carry a `session_` prefix (see SESSION_ID_RE); every other id harness is a
+        # bare uuid. The pattern is what keeps the value safe to glue into a path.
+        if not isinstance(value, str) or not ID_VALUE_RES.get(harness, UUID_RE).match(value):
             return _unavailable("no-session", agent)
     entry = HARNESSES.get(harness)
     if entry is None:
