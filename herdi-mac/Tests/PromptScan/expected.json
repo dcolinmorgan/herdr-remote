@@ -5,6 +5,7 @@
     "[ ] Type something Submit",
     "Chat about this"
   ],
+  "claude-trust": [],
   "codex-approval": [
     "Yes, proceed (y)",
     "Yes, and don't ask again for commands that start with `echo hello > note- codex.txt` (p)",
@@ -16,6 +17,7 @@
     "Yes, and switch to auto mode · auto mode handles these prompts for you",
     "No, and tell Claude what to do differently (esc)"
   ],
+  "opencode-choices": [],
   "question-with-descriptions": [
     "Blue (Recommended) Matches the existing links on the page.",
     "Green Reads as a success state.",

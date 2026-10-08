@@ -626,6 +626,20 @@ private struct ApprovalCard: View {
                     .buttonStyle(.borderedProminent)
                 }
                 .padding(.horizontal, 12)
+            } else if agent.options?.isEmpty ?? true {
+                if let menu = agent.choiceMenu {
+                    ChoiceButtons(menu: menu) { index in
+                        relay.sendKeys(keys(toChoose: index, in: menu), to: agent.id, expecting: menu)
+                        agent.status = .working
+                        agent.prompt = nil
+                        agent.choiceMenu = nil
+                        onDismiss()
+                    }
+                    .padding(.horizontal, 12)
+                } else {
+                    MenuKeyPad { key in relay.sendKeys([key], to: agent.id, shownPrompt: agent.prompt) }
+                        .padding(.horizontal, 12)
+                }
             } else {
                 ResponseButtonGrid(options: agent.options) { response in
                     respond(response)
@@ -748,6 +762,62 @@ extension OptionKind {
     }
 }
 
+/// One button per choice of a menu with no numbers, in the agent's words. The selected choice is
+/// outlined and VoiceOver hears "selected". Shortcuts follow the option buttons, from
+/// `optionShortcuts`. The menu has no numbers, so a choice that is not a yes or a no takes ⌘ and
+/// its position. A button presses the arrow keys from the selected choice to its own, then Enter.
+private struct ChoiceButtons: View {
+    let menu: ChoiceMenu
+    let onChoose: (Int) -> Void
+
+    private var actions: [ResponseAction] {
+        let shortcuts = optionShortcuts(menu.choices.enumerated().map { index, choice in
+            (label: choice, number: optionKind(choice) == .other ? index + 1 : nil)
+        })
+        return menu.choices.enumerated().map { index, choice in
+            let kind = optionKind(choice)
+            let shortcut = shortcuts[index]
+            return ResponseAction(
+                label: optionTitle(choice), icon: kind.look.icon, tint: kind.look.tint,
+                shortcut: shortcut?.label, key: shortcut.map { KeyEquivalent($0.key) }, rawValue: String(index),
+                shifted: shortcut?.shift ?? false, selected: index == menu.selected, detail: choice
+            )
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(actions) { action in
+                ResponseButton(action: action) { onChoose(Int(action.rawValue) ?? menu.selected) }
+            }
+        }
+    }
+}
+
+/// Keys for a menu Herdi cannot read at all. Every agent's menu answers to arrows, Enter and
+/// Escape, so these still work on a prompt Herdi has never seen. Each key shows its name and its
+/// shortcut, so the keyboard reaches all of them.
+private struct MenuKeyPad: View {
+    let onKey: (String) -> Void
+
+    private static let keys: [ResponseAction] = [
+        ResponseAction(label: "Up", icon: "arrow.up", tint: .white.opacity(0.85), shortcut: "⌘↑", key: .upArrow, rawValue: "Up"),
+        ResponseAction(label: "Down", icon: "arrow.down", tint: .white.opacity(0.85), shortcut: "⌘↓", key: .downArrow, rawValue: "Down"),
+        ResponseAction(label: "Left", icon: "arrow.left", tint: .white.opacity(0.85), shortcut: "⌘←", key: .leftArrow, rawValue: "Left"),
+        ResponseAction(label: "Right", icon: "arrow.right", tint: .white.opacity(0.85), shortcut: "⌘→", key: .rightArrow, rawValue: "Right"),
+        ResponseAction(label: "Select", icon: "return", tint: .white.opacity(0.85), shortcut: "⌘⇧↩", key: .return, rawValue: "Enter", shifted: true),
+        ResponseAction(label: "Esc", icon: "escape", tint: .white.opacity(0.85), shortcut: "⌘.", key: ".", rawValue: "Escape"),
+    ]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(Self.keys) { action in
+                ResponseButton(action: action) { onKey(action.rawValue) }
+            }
+        }
+    }
+}
+
 /// A parsed option arrives as "2. No". The agent's menu is driven by the number alone, so that
 /// is what gets typed; anything the parser did not produce is sent through untouched.
 private func menuPayload(for option: String) -> String {
@@ -773,6 +843,10 @@ private struct ResponseAction: Identifiable {
     let key: KeyEquivalent?
     let rawValue: String
     var shifted = false
+    /// Outlined, and read as "selected": the choice the agent's own cursor is on.
+    var selected = false
+    /// What VoiceOver and the tooltip give, when the raw value is not words.
+    var detail: String?
 
     var id: String { rawValue }
 
@@ -816,7 +890,8 @@ private struct ResponseButton: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(action.tint.opacity(hovered ? 0.5 : 0.2), lineWidth: 0.5)
+                    .stroke(action.tint.opacity(action.selected ? 0.9 : hovered ? 0.5 : 0.2),
+                            lineWidth: action.selected ? 1.5 : 0.5)
             )
             .scaleEffect(pressed ? 0.95 : 1)
         }
@@ -824,8 +899,8 @@ private struct ResponseButton: View {
         // The visible label can be cut to 16 characters. VoiceOver and the tooltip get the whole
         // option, so two options that start the same way do not sound or read the same.
         .accessibilityLabel(action.label)
-        .accessibilityValue(action.rawValue)
-        .help(action.rawValue)
+        .accessibilityValue(action.selected ? "selected" : action.detail ?? action.rawValue)
+        .help(action.detail ?? action.rawValue)
         .modifier(OptionalShortcut(key: action.key, modifiers: action.modifiers))
         .onHover { hovered = $0 }
         .animation(NotchAnimation.micro, value: hovered)
