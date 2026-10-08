@@ -266,26 +266,29 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
         }
     }
 
+    /// The window has to grow with the text, or the larger steps would be cut off by its edge.
+    /// Both sides stay inside the screen, so the panel never reaches past it.
     private func panelSize(for screen: NSScreen) -> NSSize {
-        let maxH: CGFloat = 420
-        let width = min(580, screen.frame.width - 40)
+        let scale = TextSize.current
+        let maxH = min(420 * scale, screen.frame.height - ScreenDetector.topBarHeight(for: screen))
+        let width = min(580 * scale, screen.frame.width - 40)
         return NSSize(width: width, height: maxH)
     }
 
-    private func makeHostingView(for screen: NSScreen) -> NotchHostingView<NotchPanelView> {
-        let hasNotch = ScreenDetector.hasNotch(screen)
-        let notchH = ScreenDetector.topBarHeight(for: screen)
-        let notchW = ScreenDetector.notchWidth(for: screen)
-
-        let rootView = NotchPanelView(
+    private func makeRootView(for screen: NSScreen) -> NotchPanelView {
+        NotchPanelView(
             relay: relay,
             controller: self,
-            hasNotch: hasNotch,
-            notchHeight: notchH,
-            notchW: notchW,
-            screenWidth: screen.frame.width
+            hasNotch: ScreenDetector.hasNotch(screen),
+            notchHeight: ScreenDetector.topBarHeight(for: screen),
+            notchW: ScreenDetector.notchWidth(for: screen),
+            screenWidth: screen.frame.width,
+            uiScale: TextSize.current
         )
-        let view = NotchHostingView(rootView: rootView)
+    }
+
+    private func makeHostingView(for screen: NSScreen) -> NotchHostingView<NotchPanelView> {
+        let view = NotchHostingView(rootView: makeRootView(for: screen))
         view.sizingOptions = []
         view.translatesAutoresizingMaskIntoConstraints = true
         return view
@@ -298,6 +301,17 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
         let x = screen.frame.midX - size.width / 2
         let y = screen.frame.maxY - size.height
         panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+    }
+
+    /// Hand the view tree the new scale and resize the window around it.
+    ///
+    /// The root view is replaced in place rather than the whole hosting view: a new hosting view
+    /// drops the panel's SwiftUI state, and a hover timer already scheduled against the old tree
+    /// would then fire against state nothing is showing.
+    func reloadLayout() {
+        guard let hostingView else { return }
+        hostingView.rootView = makeRootView(for: ScreenDetector.preferredScreen)
+        updatePosition()
     }
 
     private func handleScreenChange() {

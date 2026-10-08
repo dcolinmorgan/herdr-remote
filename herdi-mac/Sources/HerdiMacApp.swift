@@ -24,6 +24,8 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         // Request notification permissions
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
+        UserDefaults.standard.register(defaults: [Self.scaleKey: Self.defaultScale])
+
         // Minimal status bar item (quit + show panel)
         setupStatusItem()
 
@@ -169,6 +171,7 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
             paused.isEnabled = false
             menu.addItem(paused)
         }
+        menu.addItem(textSizeItem())
 
         menu.addItem(.separator())
 
@@ -241,6 +244,57 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
     /// Repaint immediately rather than waiting up to a second for the next poll.
     private func refreshChrome() {
         applyStatusIcon(blocked: relay.agents.contains { $0.status == .blocked })
+        rebuildMenu()
+    }
+
+    // MARK: - Text size
+
+    private func textSizeItem() -> NSMenuItem {
+        let scale = TextSize.current
+        let item = NSMenuItem(title: "Text Size: \(TextSize.percent(scale))", action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "textformat.size", accessibilityDescription: nil)
+
+        let submenu = NSMenu()
+        let larger = NSMenuItem(title: "Larger", action: #selector(increaseTextSize), keyEquivalent: "=")
+        larger.target = self
+        submenu.addItem(larger)
+
+        let smaller = NSMenuItem(title: "Smaller", action: #selector(decreaseTextSize), keyEquivalent: "-")
+        smaller.target = self
+        submenu.addItem(smaller)
+
+        submenu.addItem(.separator())
+
+        for step in TextSize.steps {
+            let preset = NSMenuItem(title: TextSize.percent(step), action: #selector(selectTextSize(_:)), keyEquivalent: "")
+            preset.target = self
+            preset.representedObject = step
+            preset.state = step == scale ? .on : .off
+            submenu.addItem(preset)
+        }
+
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func increaseTextSize() {
+        guard let next = TextSize.larger else { return }
+        applyTextSize(next)
+    }
+
+    @objc private func decreaseTextSize() {
+        guard let previous = TextSize.smaller else { return }
+        applyTextSize(previous)
+    }
+
+    @objc private func selectTextSize(_ sender: NSMenuItem) {
+        guard let step = sender.representedObject as? Double else { return }
+        applyTextSize(step)
+    }
+
+    private func applyTextSize(_ scale: Double) {
+        TextSize.current = scale
+        panelController?.reloadLayout()
         rebuildMenu()
     }
 

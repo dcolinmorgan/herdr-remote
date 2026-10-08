@@ -13,6 +13,14 @@ private enum HoverTiming {
     static let prehoverScale: CGFloat = 1.003
 }
 
+/// The height the expanded content asks for before it is scaled.
+private struct ContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 // MARK: - NotchPanelView (root view inside the panel)
 
 struct NotchPanelView: View {
@@ -22,10 +30,16 @@ struct NotchPanelView: View {
     let notchHeight: CGFloat
     let notchW: CGFloat
     let screenWidth: CGFloat
+    /// How much larger than drawn the content below the notch is shown. 1 leaves everything as
+    /// laid out; the notch bar itself is never scaled, so it keeps lining up with the hardware.
+    let uiScale: CGFloat
 
     @State private var hoverPhase: HoverPhase = .collapsed
     @State private var hoverTimer: Timer?
     @State private var isHovered = false
+    /// Height the expanded content asks for at scale 1, so the scaled copy can be given the room
+    /// it actually takes. Nil until the first measurement, when the frame is left unconstrained.
+    @State private var contentHeight: CGFloat?
 
     private var blocked: [Agent] { relay.agents.filter { $0.status == .blocked } }
     private var working: [Agent] { relay.agents.filter { $0.status == .working } }
@@ -38,7 +52,7 @@ struct NotchPanelView: View {
 
     /// Panel width adapts to state
     private var panelWidth: CGFloat {
-        let maxWidth = min(580, screenWidth - 40)
+        let maxWidth = min(580 * uiScale, screenWidth - 40)
         if !isActive { return notchW + 60 }
         if shouldShowExpanded { return maxWidth }
         // Collapsed: notch width + wings for status indicators
@@ -78,6 +92,20 @@ struct NotchPanelView: View {
                         .padding(.horizontal, 12)
 
                     expandedContent
+                        // Lay the content out at the panel's own width, then magnify the finished
+                        // layout: text wraps where it would unscaled, and every size grows by the
+                        // same factor rather than only those the type system reaches.
+                        .frame(width: panelWidth / uiScale)
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
+                            }
+                        )
+                        .scaleEffect(uiScale, anchor: .top)
+                        .frame(width: panelWidth, height: contentHeight.map { $0 * uiScale })
+                        .onPreferenceChange(ContentHeightKey.self) { height in
+                            if height > 0 { contentHeight = height }
+                        }
                         .transition(.blurFade.combined(with: .move(edge: .top)))
                 }
             }
