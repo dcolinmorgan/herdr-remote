@@ -447,10 +447,16 @@ private struct AgentSessionRow: View {
 
             // Agent info
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(agent.name)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                    if !agent.agentKind.isEmpty, agent.agentKind != agent.name {
+                        Text(agent.agentKind)
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
                     if agent.host != "local" {
                         Image(systemName: "network")
                             .font(.system(size: 8))

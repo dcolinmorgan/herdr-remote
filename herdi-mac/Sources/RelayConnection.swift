@@ -127,8 +127,10 @@ final class RelayConnection {
                         }
                         if existing.project != a.project { existing.project = a.project }
                         if existing.host != a.host { existing.host = a.host }
+                        if existing.name != a.name { existing.name = a.name }
+                        if existing.agentKind != a.agentKind { existing.agentKind = a.agentKind }
                     } else {
-                        let agent = Agent(id: a.id, name: a.name, status: a.status, project: a.project, cwd: a.cwd, host: a.host)
+                        let agent = Agent(id: a.id, name: a.name, status: a.status, project: a.project, cwd: a.cwd, host: a.host, agentKind: a.agentKind)
                         agents.append(agent)
                         if a.status == .blocked { readPaneForBlocked(agent, remote: a.host == "local" ? nil : a.host) }
                     }
@@ -139,7 +141,7 @@ final class RelayConnection {
     }
 
     private struct ParsedAgent {
-        let id: String, name: String, status: AgentStatus, project: String, cwd: String, host: String
+        let id: String, name: String, status: AgentStatus, project: String, cwd: String, host: String, agentKind: String
     }
 
     private struct PaneLocation {
@@ -158,8 +160,26 @@ final class RelayConnection {
             let paneId = (host == "local" ? "" : "\(host):") + (p["pane_id"] as? String ?? "")
             let status = AgentStatus(rawValue: p["agent_status"] as? String ?? "unknown") ?? .unknown
             let cwd = p["cwd"] as? String ?? ""
-            return ParsedAgent(id: paneId, name: agent, status: status, project: (cwd as NSString).lastPathComponent, cwd: cwd, host: host)
+            return ParsedAgent(id: paneId, name: paneTitle(p) ?? agent, status: status, project: (cwd as NSString).lastPathComponent, cwd: cwd, host: host, agentKind: agent)
         }
+    }
+
+    /// The name a human recognises: the agent's own terminal title, else a pane label set by
+    /// hand, else nil so the caller can fall back to the agent binary. Nerd-font glyphs are
+    /// stripped from labels, and shell titles are rejected -- herdr reports `user@host:~/path`
+    /// for every pane, which says less than the cwd already shown beside it.
+    private func paneTitle(_ pane: [String: Any]) -> String? {
+        for key in ["terminal_title_stripped", "label"] {
+            guard let raw = pane[key] as? String else { continue }
+            let cleaned = raw.unicodeScalars
+                .filter { $0.value < 0xE000 || ($0.value > 0xF8FF && $0.value < 0xF0000) }
+                .reduce(into: "") { $0.unicodeScalars.append($1) }
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleaned.isEmpty { continue }
+            if cleaned.contains("@") && cleaned.contains(":") { continue }
+            return cleaned
+        }
+        return nil
     }
 
     private func parsePaneLocation(from output: String) -> PaneLocation? {
@@ -423,6 +443,7 @@ final class RelayConnection {
     private func upsertAgent(_ data: AgentMessage.AgentData) {
         if let existing = agents.first(where: { $0.id == data.pane_id }) {
             existing.name = data.agent
+            existing.agentKind = data.agent
             existing.status = AgentStatus(rawValue: data.status) ?? .unknown
             existing.project = data.project
             existing.cwd = data.cwd
@@ -432,7 +453,8 @@ final class RelayConnection {
         agents.append(Agent(
             id: data.pane_id, name: data.agent,
             status: AgentStatus(rawValue: data.status) ?? .unknown,
-            project: data.project, cwd: data.cwd, host: data.host ?? "local"
+            project: data.project, cwd: data.cwd, host: data.host ?? "local",
+            agentKind: data.agent
         ))
     }
 

@@ -12,6 +12,7 @@ final class Agent: Identifiable {
     var project: String
     var cwd: String
     var host: String
+    var agentKind: String
     var prompt: String?
     var options: [String]?
     var promptId: String?
@@ -20,13 +21,14 @@ final class Agent: Identifiable {
     var interaction: String?
     var isMultiSelect = false
 
-    init(id: String, name: String, status: AgentStatus, project: String, cwd: String, host: String = "local") {
+    init(id: String, name: String, status: AgentStatus, project: String, cwd: String, host: String = "local", agentKind: String = "") {
         self.id = id
         self.name = name
         self.status = status
         self.project = project
         self.cwd = cwd
         self.host = host
+        self.agentKind = agentKind
     }
 }
 
