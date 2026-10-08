@@ -177,10 +177,35 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
 
-                // Auto-pop the approval card if panel is collapsed and there's a blocked agent
-                if let agent = blocked.first, self.panelController?.surface == .collapsed {
-                    withAnimation(NotchAnimation.pop) {
-                        self.panelController?.surface = .approval(agentId: agent.id)
+                if let controller = self.panelController {
+                    let blockedIds = Set(blocked.map(\.id))
+
+                    // An agent that has stopped asking should not leave its card on screen. This
+                    // is what strands people: the prompt gets answered in the terminal, the card
+                    // stays up showing output that has since moved on, and because approval cards
+                    // ignored both dismissal paths there was no way out of it.
+                    if case .approval(let shownId) = controller.surface, !blockedIds.contains(shownId) {
+                        withAnimation(NotchAnimation.close) { controller.surface = .collapsed }
+                        // The card leaves on its own, so say why: a VoiceOver user would otherwise
+                        // find it gone with no reason given.
+                        NSAccessibility.post(
+                            element: NSApp as Any,
+                            notification: .announcementRequested,
+                            userInfo: [
+                                .announcement: "Approval card closed. The agent is no longer waiting.",
+                                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                            ]
+                        )
+                    }
+
+                    controller.dismissedBlocked.formIntersection(blockedIds)
+
+                    // Auto-pop for a blocked agent you have not already waved away.
+                    if controller.surface == .collapsed,
+                       let agent = blocked.first(where: { !controller.dismissedBlocked.contains($0.id) }) {
+                        withAnimation(NotchAnimation.pop) {
+                            controller.surface = .approval(agentId: agent.id)
+                        }
                     }
                 }
 
