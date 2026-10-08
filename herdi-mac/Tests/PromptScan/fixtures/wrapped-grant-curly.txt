@@ -1,0 +1,12 @@
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   chmod +x /home/user/project/test.sh
+
+ Permission rule Bash(chmod:*) requires confirmation for this command.
+ /permissions to update rules
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for:
+      /home/user/project/test.sh
+   3. No

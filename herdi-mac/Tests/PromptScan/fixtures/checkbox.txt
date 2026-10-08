@@ -1,0 +1,15 @@
+────────────────────────────────────────────────────────────────────────────────
+←  ☐ Features  ✔ Submit  →
+
+Which features should the page have?
+
+❯ 1. [ ] Search
+     A search box in the header.
+  2. [✔] Dark mode
+     Follows the system setting.
+  3. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

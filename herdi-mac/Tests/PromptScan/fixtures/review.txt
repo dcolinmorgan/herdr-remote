@@ -1,0 +1,14 @@
+────────────────────────────────────────────────────────────────────────────────
+←  ☒ Colour  ☒ Size  ✔ Submit  →
+
+Review your answers
+
+ ● Which colour should the button use?
+   → Blue (Recommended)
+ ● Which size should the button be?
+   → Medium (Recommended)
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel

@@ -173,6 +173,10 @@ final class RelayConnection {
     }
 
     private func runSSH(_ remote: String, _ args: String...) -> String {
+        runSSH(remote, arguments: args)
+    }
+
+    private func runSSH(_ remote: String, arguments args: [String]) -> String {
         let process = Process()
         let password = KeychainHelper.getPassword(for: remote)
 
@@ -218,44 +222,73 @@ final class RelayConnection {
             : agent.id
 
         DispatchQueue.global(qos: .utility).async { [self] in
-            // `visible`, not `recent`, as the relay does (PROMPT_READ_SOURCE). `recent` past the
-            // pane's viewport makes herdr harvest the extra rows by walking the agent's own
-            // scroll interface, which moves the operator's terminal -- something a read fired by
-            // a status change must never do. 20 rows sits inside most viewports, so this is
-            // usually a no-op; on a pane split down under 20 rows it is not. The prompt is on
-            // screen by definition, so nothing is given up either way.
-            let raw: String
-            if let remote {
-                raw = runSSH(remote, "herdr", "pane", "read", paneId, "--lines", "20", "--source", "visible")
-            } else {
-                raw = runHerdr("pane", "read", paneId, "--lines", "20", "--source", "visible")
-            }
-            let lines = raw.components(separatedBy: .newlines)
-                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                .suffix(6)
-            let content = lines.joined(separator: "\n")
-            let options = detectOptions(content)
-
+            let lines = readPromptLines(paneId, remote: remote)
+            let ansi = readPromptANSI(paneId, remote: remote)
             DispatchQueue.main.async {
-                agent.prompt = String(content.prefix(500))
-                agent.options = options
+                self.showPrompt(lines, ansi: ansi, on: agent)
                 self.sendNotification(agent: agent.name, project: agent.project)
             }
         }
     }
 
-    private func detectOptions(_ text: String) -> [String] {
-        let lower = text.lowercased()
-        if lower.contains("yes, single permission") {
-            return ["yes, single permission", "trust, always allow", "no (tab to edit)"]
-        }
-        if lower.contains("approve all pending") {
-            return ["approve all pending", "configure individually", "exit (cancel subagents)"]
-        }
-        return ["yes, single permission", "trust, always allow", "no (tab to edit)"]
+    private func showPrompt(_ lines: [String], ansi: [String] = [], on agent: Agent) {
+        let menu = menuOptions(lines)
+        agent.prompt = promptExcerpt(lines, menu)
+        // Numbered here, as the relay's clients bind key N to option N: the number is what gets sent.
+        agent.options = menu.labels.enumerated().map { "\($0.offset + 1). \($0.element)" }
+        agent.choiceMenu = menu.labels.isEmpty ? detectChoiceMenu(plain: lines, ansi: ansi) : nil
     }
 
+    /// The same screen as `readPromptLines`, with its colour codes. A row of choices side by side
+    /// marks the selected one only by colour.
+    private func readPromptANSI(_ paneId: String, remote: String?) -> [String] {
+        let raw: String
+        if let remote {
+            raw = runSSH(remote, "herdr", "pane", "read", paneId, "--lines", "60", "--source", "visible", "--format", "ansi")
+        } else {
+            raw = runHerdr("pane", "read", paneId, "--lines", "60", "--source", "visible", "--format", "ansi")
+        }
+        return raw.components(separatedBy: .newlines)
+    }
+
+    private func readPromptLines(_ paneId: String, remote: String?) -> [String] {
+        // `visible`, not `recent`, as the relay does (PROMPT_READ_SOURCE). `recent` past the
+        // pane's viewport makes herdr harvest the extra rows by walking the agent's own
+        // scroll interface, which moves the operator's terminal -- something a read fired by
+        // a status change must never do. 20 rows sits inside most viewports, so this is
+        // usually a no-op; on a pane split down under 20 rows it is not. The prompt is on
+        // screen by definition, so nothing is given up either way.
+        let raw: String
+        if let remote {
+            raw = runSSH(remote, "herdr", "pane", "read", paneId, "--lines", "60", "--source", "visible")
+        } else {
+            raw = runHerdr("pane", "read", paneId, "--lines", "60", "--source", "visible")
+        }
+        // Read the whole viewport, not a 20-row slice of it. `--source visible` never scrolls
+        // the pane whatever the count, so the old limit bought nothing and cost the options:
+        // a question rendered with a preview panel beside it pushes them well above the tail.
+        return Array(
+            raw.components(separatedBy: .newlines)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                .suffix(60)
+        )
+    }
+
+    /// Read the numbered choices out of the prompt the agent is actually showing, e.g.
+    ///
+    ///     Do you want to proceed?
+    ///     > 1. Yes
+    ///       2. No
+    ///
+    /// returns ["1. Yes", "2. No"]. The number is what gets typed back, so it is kept on the
+    /// front of each entry. An unrecognised prompt returns nothing, which leaves the card with
+    /// its free-text reply field rather than buttons that send a string the agent never offered.
+
     private func runHerdr(_ args: String...) -> String {
+        runHerdr(arguments: args)
+    }
+
+    private func runHerdr(arguments args: [String]) -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: herdrPath)
         process.arguments = Array(args)
@@ -295,14 +328,38 @@ final class RelayConnection {
 
     func send(response: ResponseMessage) {
         if mode == .direct {
+            let paneId = response.pane_id
+            let agent = agents.first(where: { $0.id == paneId })
+            // The prompt the card showed when the answer was given. Read here, before the card
+            // clears it, so the check below compares against what you actually saw.
+            let shownPrompt = agent?.prompt
             DispatchQueue.global(qos: .userInitiated).async { [self] in
-                let paneId = response.pane_id
+                // A menu number goes in as a key press, as the relay sends it, with no Enter: the
+                // Enter would fall through to whatever the agent shows next. Free text still needs
+                // its Enter.
+                let isMenuChoice = !response.text.isEmpty && response.text.allSatisfy(\.isNumber)
+                let verb = isMenuChoice ? "send-keys" : "send-text"
+                let payload = isMenuChoice ? response.text : response.text + "\n"
                 // Check if this is a remote agent (id starts with "host:")
-                if let agent = agents.first(where: { $0.id == paneId }), agent.host != "local" {
-                    let realId = String(paneId.drop(while: { $0 != ":" }).dropFirst())
-                    _ = runSSH(agent.host, "herdr", "pane", "send-text", realId, response.text + "\n")
+                let remote = agent.flatMap { $0.host != "local" ? $0.host : nil }
+                let targetId = remote == nil ? paneId : String(paneId.drop(while: { $0 != ":" }).dropFirst())
+                if isMenuChoice {
+                    let lines = readPromptLines(targetId, remote: remote)
+                    guard promptStillShown(shownPrompt, lines: lines) else {
+                        // Not sent: the menu on screen is not the one on the card. Show the
+                        // current one instead, so the next answer is to what is really there.
+                        DispatchQueue.main.async {
+                            guard let agent else { return }
+                            self.showPrompt(lines, on: agent)
+                            agent.status = .blocked
+                        }
+                        return
+                    }
+                }
+                if let remote {
+                    _ = runSSH(remote, "herdr", "pane", verb, targetId, payload)
                 } else {
-                    _ = runHerdr("pane", "send-text", paneId, response.text + "\n")
+                    _ = runHerdr("pane", verb, targetId, payload)
                 }
             }
 
@@ -344,6 +401,53 @@ final class RelayConnection {
             guard let location = parsePaneLocation(from: output) else { return }
             _ = runHerdr("workspace", "focus", location.workspaceId)
             _ = runHerdr("tab", "focus", location.tabId)
+        }
+    }
+
+    /// Press keys in an agent's pane, then show its screen again so the card follows the cursor.
+    /// Used for menus with no numbers: a list with a cursor, or choices side by side such as
+    /// opencode's "Allow once  Allow always  Reject". With `expecting`, the keys go in only while
+    /// that menu, with that choice selected, is still on screen. With `shownPrompt`, they go in
+    /// only while the card's prompt is still on screen. Relay mode cannot check either: the
+    /// relay's send_keys message carries no prompt id.
+    func sendKeys(_ keys: [String], to paneId: String, expecting menu: ChoiceMenu? = nil, shownPrompt: String? = nil) {
+        guard mode == .direct else {
+            let message: [String: Any] = ["type": "send_keys", "pane_id": paneId, "keys": keys]
+            guard let data = try? JSONSerialization.data(withJSONObject: message),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            task?.send(.string(text)) { _ in }
+            return
+        }
+        let agent = agents.first(where: { $0.id == paneId })
+        let remote = agent.flatMap { $0.host != "local" ? $0.host : nil }
+        let targetId = remote == nil ? paneId : String(paneId.drop(while: { $0 != ":" }).dropFirst())
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            if menu != nil || shownPrompt != nil {
+                let lines = readPromptLines(targetId, remote: remote)
+                let ansi = readPromptANSI(targetId, remote: remote)
+                let unchanged = menu.map { detectChoiceMenu(plain: lines, ansi: ansi) == $0 }
+                    ?? promptStillShown(shownPrompt, lines: lines)
+                guard unchanged else {
+                    DispatchQueue.main.async {
+                        guard let agent else { return }
+                        self.showPrompt(lines, ansi: ansi, on: agent)
+                    }
+                    return
+                }
+            }
+            // One call for every key, so nothing on screen can change between them.
+            if let remote {
+                _ = runSSH(remote, arguments: ["herdr", "pane", "send-keys", targetId] + keys)
+            } else {
+                _ = runHerdr(arguments: ["pane", "send-keys", targetId] + keys)
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+            let lines = readPromptLines(targetId, remote: remote)
+            let ansi = readPromptANSI(targetId, remote: remote)
+            DispatchQueue.main.async {
+                guard let agent else { return }
+                self.showPrompt(lines, ansi: ansi, on: agent)
+            }
         }
     }
 

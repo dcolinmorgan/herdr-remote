@@ -1747,6 +1747,23 @@ class RelayQuestionTests(unittest.TestCase):
             self.assertIn("prompt changed", json.loads(ws.sent[-1])["message"])
 
 
+class HerdiScannerParityTests(unittest.TestCase):
+    """Herdi ports detect_numbered_options to Swift. Both read the same fixtures against the same
+    expected output, so a change to one scanner that the other does not get fails here or in
+    herdi-mac/test.sh."""
+
+    ROOT = Path(__file__).resolve().parents[1] / "herdi-mac" / "Tests" / "PromptScan"
+
+    def test_the_relay_reads_each_fixture_as_herdi_expects(self):
+        expected = json.loads((self.ROOT / "expected.json").read_text(encoding="utf-8"))
+        self.assertTrue(expected)
+        with loaded_relay() as relay:
+            for name, labels in sorted(expected.items()):
+                with self.subTest(fixture=name):
+                    text = (self.ROOT / "fixtures" / f"{name}.txt").read_text(encoding="utf-8")
+                    self.assertEqual(relay.detect_numbered_options(text), labels)
+
+
 class RelayKeyGrammarTests(unittest.TestCase):
     """The relay forwards keys in herdr's grammar, not tmux's.
 
