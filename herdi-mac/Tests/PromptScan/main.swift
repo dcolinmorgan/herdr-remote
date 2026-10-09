@@ -141,6 +141,16 @@ check("leaves the sound to macOS when macOS will play one",
       !Quiet.playsOwnSound(macOSPlaysSound: true, soundWanted: true))
 check("stays silent when the Sound toggle is off",
       !Quiet.playsOwnSound(macOSPlaysSound: false, soundWanted: false))
+check("keeps the keyboard off a card when the setting is off",
+      !mayTakeKeyboard(enabled: false, secondsSinceKeyDown: 60))
+check("gives a card the keyboard when the setting is on and nobody is typing",
+      mayTakeKeyboard(enabled: true, secondsSinceKeyDown: 2))
+check("keeps the keyboard off a card while you type in another app",
+      !mayTakeKeyboard(enabled: true, secondsSinceKeyDown: 1.9))
+check("gives a card the keyboard when you press the shortcut, with the setting off",
+      mayTakeKeyboard(enabled: false, secondsSinceKeyDown: 60, askedByShortcut: true))
+check("gives a card the keyboard when you press the shortcut, while you type",
+      mayTakeKeyboard(enabled: true, secondsSinceKeyDown: 0, askedByShortcut: true))
 
 print(failures == 0 ? "PromptScan tests passed" : "PromptScan tests: \(failures) failed")
 exit(failures == 0 ? 0 : 1)

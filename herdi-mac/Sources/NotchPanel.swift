@@ -7,7 +7,11 @@ private let log = Logger(subsystem: "com.herdr.herdi", category: "Panel")
 // MARK: - Keyable Panel (nonactivatingPanel that can become key for interactions)
 
 private class KeyablePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    /// Only the approval card needs the keyboard. Leaving this on permanently meant the panel
+    /// could re-take key the moment it was ordered front again, which is what stranded focus
+    /// here instead of returning it to the terminal.
+    var wantsKey = false
+    override var canBecomeKey: Bool { wantsKey }
 }
 
 /// NSHostingView subclass that avoids AppKit constraint-update re-entrancy crash
@@ -114,12 +118,85 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
     private var panel: KeyablePanel?
     private var hostingView: NotchHostingView<NotchPanelView>?
     private let relay: RelayConnection
-    @Published var surface: IslandSurface = .collapsed
-    /// Agents whose card you have already waved away. Cleared once they stop being blocked, so
-    /// the next prompt from the same pane opens normally.
-    var dismissedBlocked: Set<String> = []
+    @Published var surface: IslandSurface = .collapsed {
+        didSet {
+            // Key from the moment the panel is open, not only on the card: the click that
+            // expands the notch is the one AppKit uses to make the window key, and it lands
+            // before the card exists. Collapsed, the panel gives the keyboard back.
+            panel?.wantsKey = surface.isExpanded
+            if case .approval = surface {
+                if case .approval = oldValue {} else { cardOpenings += 1 }
+            }
+        }
+    }
+    /// Counts each time an approval card opens. The card view is keyed on it, so every opening
+    /// starts its input guard again, even when the agent asks the same question twice.
+    private(set) var cardOpenings = 0
+    /// The prompt whose card you have already answered or waved away, per agent. Keyed on the
+    /// prompt itself: answering sets the agent working here while the pane still reads blocked
+    /// for a poll or two, and the card must not come back with the question it just answered.
+    /// A different question from the same agent is a different key, so it still opens. Cleared
+    /// once the agent stops being blocked.
+    var dismissedBlocked: [String: String] = [:]
     private var globalClickMonitor: Any?
     private var fullscreenLatch = false
+    private var focusReturnTarget: NSRunningApplication?
+
+    /// Hand the panel the keyboard so an approval can be answered without reaching for the mouse.
+    /// The panel is a nonactivating one, so it takes key without activating Herdi or changing
+    /// which app is frontmost -- the terminal underneath stays exactly where it was.
+    ///
+    /// A card can open while the status menu is still closing. macOS then gives key back to the
+    /// window it had before, and a shortcut lands in the terminal. So the panel takes key only
+    /// once the run loop is back in its default mode, which is the moment the menu has finished.
+    /// No timer: a later grab could take keys you meant for another app.
+    ///
+    /// A card that opens by itself takes it only with "Give Approvals Keyboard Focus" on, and not
+    /// while you type elsewhere. Otherwise a click on the card, or the shortcut, gives it the
+    /// keyboard.
+    func takeKeyboard(askedByShortcut: Bool = false) {
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.panel, case .approval = self.surface,
+                      !panel.isKeyWindow else { return }
+                let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+                guard mayTakeKeyboard(enabled: UserDefaults.standard.bool(forKey: approvalFocusKey),
+                                      secondsSinceKeyDown: idle, askedByShortcut: askedByShortcut) else { return }
+                self.focusReturnTarget = NSWorkspace.shared.frontmostApplication
+                panel.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    /// Close the card and put the keyboard back where it was.
+    ///
+    /// Pass the agent id and the prompt the card showed to remember that card; pass nil when the
+    /// agent stopped asking, so the next prompt from it still opens.
+    ///
+    /// A nonactivating panel does not hand key back on its own, and asking the other app to take
+    /// it does not work either -- macOS refuses cross-app activation from a background accessory
+    /// app, which is why focus sat here after an approval. Ordering the panel out is what
+    /// actually drops key status; ordering it front again restores the notch without reclaiming
+    /// the keyboard, because `wantsKey` is already false by then.
+    func collapse(dismissing agentId: String?, prompt: String?) {
+        if let agentId { dismissedBlocked[agentId] = prompt ?? "" }
+        let target = focusReturnTarget
+        focusReturnTarget = nil
+        let wasKey = panel?.isKeyWindow ?? false
+
+        withAnimation(NotchAnimation.close) { surface = .collapsed }
+
+        guard wasKey, let panel else { return }
+        panel.orderOut(nil)
+        panel.orderFrontRegardless()
+        target?.activate()
+    }
+
+    /// Once the panel is no longer key, whatever app took over owns the keyboard. Forget the app
+    /// we took key from, or collapsing later would pull you out of the app you switched to.
+    func windowDidResignKey(_ notification: Notification) {
+        focusReturnTarget = nil
+    }
 
     init(relay: RelayConnection) {
         self.relay = relay
@@ -180,10 +257,10 @@ final class PanelWindowController: NSObject, NSWindowDelegate, ObservableObject 
                 // to be exempt, which made a card offering nothing to click impossible to get rid
                 // of. Remember it so the poll does not reopen it a second later.
                 if case .approval(let agentId) = self.surface {
-                    self.dismissedBlocked.insert(agentId)
-                }
-                withAnimation(NotchAnimation.close) {
-                    self.surface = .collapsed
+                    let shown = self.relay.agents.first(where: { $0.id == agentId })?.prompt
+                    self.collapse(dismissing: agentId, prompt: shown)
+                } else {
+                    withAnimation(NotchAnimation.close) { self.surface = .collapsed }
                 }
             }
         }

@@ -109,12 +109,16 @@ struct NotchPanelView: View {
         switch controller.surface {
         case .approval(let agentId):
             if let agent = relay.agents.first(where: { $0.id == agentId }) {
-                ApprovalCard(agent: agent, relay: relay) {
-                    controller.dismissedBlocked.insert(agent.id)
-                    withAnimation(NotchAnimation.close) {
-                        controller.surface = .collapsed
-                    }
+                ApprovalCard(agent: agent, relay: relay) { [shown = agent.prompt] in
+                    // Remember every close, answered or waved away, under the prompt the card
+                    // showed. Answering sets the agent working here while the pane still reads
+                    // blocked for a poll or two, and without the mark the card would pop straight
+                    // back up with the question it just answered. A different question from the
+                    // same agent is a different key, so it still opens.
+                    controller.collapse(dismissing: agent.id, prompt: shown)
                 }
+                // A new prompt is a new card, with its own input guard. So is each opening.
+                .id("\(controller.cardOpenings)|\(agent.id)|\(agent.prompt ?? "")")
                 .transition(.blurFade.combined(with: .scale(scale: 0.96, anchor: .top)))
             }
         case .sessionList:
@@ -430,6 +434,11 @@ private struct AgentSessionRow: View {
     let style: RowStyle
     let relay: RelayConnection
     @State private var hovered = false
+    /// Off for the first second after a blocked row appears. A newly blocked agent moves to the
+    /// top of the list, which can put its Allow button under a pointer about to click.
+    @State private var allowArmed = false
+    /// The same guard for Interrupt, which a row that moves can also put under the pointer.
+    @State private var interruptArmed = false
 
     private var accentColor: Color {
         switch style {
@@ -485,6 +494,7 @@ private struct AgentSessionRow: View {
                 HStack(spacing: 4) {
                     if style == .blocked, let allow = allowOption(in: agent.options) {
                         Button {
+                            guard allowArmed else { return }
                             relay.send(response: ResponseMessage(
                                 pane_id: agent.id,
                                 prompt_id: agent.promptId,
@@ -497,6 +507,7 @@ private struct AgentSessionRow: View {
                         }
                         .buttonStyle(.plain)
                         .help("Allow")
+                        .modifier(ArmAfterShown(armed: $allowArmed))
                     }
 
                     Button { relay.focusPane(agent.id) } label: {
@@ -508,13 +519,17 @@ private struct AgentSessionRow: View {
                     .help("Jump to terminal")
 
                     if style == .working || style == .blocked {
-                        Button { relay.interruptPane(agent.id) } label: {
+                        Button {
+                            guard interruptArmed else { return }
+                            relay.interruptPane(agent.id)
+                        } label: {
                             Image(systemName: "stop.circle")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.red.opacity(0.6))
                         }
                         .buttonStyle(.plain)
                         .help("Interrupt (^C)")
+                        .modifier(ArmAfterShown(armed: $interruptArmed))
                     }
                 }
                 .transition(.opacity)
@@ -541,14 +556,22 @@ private struct AgentSessionRow: View {
 private struct ApprovalCard: View {
     let agent: Agent
     let relay: RelayConnection
-    let onDismiss: () -> Void
+    let onClose: () -> Void
     @State private var customResponse = ""
+    /// Off for the first second after the card is on screen. The card can open and take the
+    /// keyboard while you type in another app, or open under a pointer that is about to click
+    /// something else. Keys or clicks already on their way must not answer the prompt.
+    @State private var inputArmed = false
+    @FocusState private var replyFocused: Bool
+    /// The reply field stays off until a click on it. When the panel takes key, AppKit gives
+    /// focus to the first text field, so keys aimed at another app would land in it.
+    @State private var replyOpened = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Header
             HStack(spacing: 8) {
-                Button { onDismiss() } label: {
+                Button { onClose() } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.white.opacity(0.6))
@@ -570,12 +593,16 @@ private struct ApprovalCard: View {
 
                 Spacer()
 
-                Button { relay.interruptPane(agent.id) } label: {
+                Button {
+                    guard inputArmed else { return }
+                    relay.interruptPane(agent.id)
+                } label: {
                     Image(systemName: "stop.circle.fill")
                         .font(.system(size: 12))
                         .foregroundStyle(.red.opacity(0.7))
                 }
                 .buttonStyle(.plain)
+                .disabled(!inputArmed)
                 .help("Interrupt (^C)")
             }
             .padding(.horizontal, 14)
@@ -613,6 +640,7 @@ private struct ApprovalCard: View {
                 VStack(spacing: 6) {
                     ForEach(agent.multiOptions, id: \.self) { option in
                         Button {
+                            guard inputArmed else { return }
                             toggle(option, promptId: promptId)
                         } label: {
                             HStack {
@@ -623,29 +651,36 @@ private struct ApprovalCard: View {
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.plain)
+                        .disabled(!inputArmed)
                     }
                     Button {
+                        guard inputArmed else { return }
                         submit(promptId: promptId)
                     } label: {
                         Label("Submit", systemImage: "checkmark.circle.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!inputArmed)
                 }
                 .padding(.horizontal, 12)
             } else if agent.options?.isEmpty ?? true {
                 if let menu = agent.choiceMenu {
                     ChoiceButtons(menu: menu) { index in
+                        guard inputArmed else { return }
                         relay.sendKeys(keys(toChoose: index, in: menu), to: agent.id, expecting: menu)
                         agent.status = .working
                         agent.prompt = nil
                         agent.choiceMenu = nil
-                        onDismiss()
+                        onClose()
                     }
                     .padding(.horizontal, 12)
                 } else {
-                    MenuKeyPad { key in relay.sendKeys([key], to: agent.id, shownPrompt: agent.prompt) }
-                        .padding(.horizontal, 12)
+                    MenuKeyPad { key in
+                        guard inputArmed else { return }
+                        relay.sendKeys([key], to: agent.id, shownPrompt: agent.prompt)
+                    }
+                    .padding(.horizontal, 12)
                 }
             } else {
                 ResponseButtonGrid(options: agent.options) { response in
@@ -670,7 +705,19 @@ private struct ApprovalCard: View {
                         RoundedRectangle(cornerRadius: 8)
                             .stroke(.white.opacity(0.1), lineWidth: 0.5)
                     )
-                    .onSubmit { if !customResponse.isEmpty { respond(customResponse) } }
+                    .disabled(!replyOpened)
+                    .focused($replyFocused)
+                    .overlay {
+                        if !replyOpened {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    replyOpened = true
+                                    DispatchQueue.main.async { replyFocused = true }
+                                }
+                        }
+                    }
+                    .onSubmit { if inputArmed, replyOpened, !customResponse.isEmpty { respond(customResponse) } }
 
                 Button { respond(customResponse) } label: {
                     Image(systemName: "arrow.up.circle.fill")
@@ -678,14 +725,16 @@ private struct ApprovalCard: View {
                         .foregroundStyle(customResponse.isEmpty ? .white.opacity(0.15) : .blue)
                 }
                 .buttonStyle(.plain)
-                .disabled(customResponse.isEmpty)
-                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(customResponse.isEmpty || !inputArmed)
+                .modifier(OptionalShortcut(key: inputArmed ? .return : nil, modifiers: .command))
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
         }
         // Escape dismisses, the keyboard path to what the chevron and a click outside do.
-        .onExitCommand { onDismiss() }
+        .onExitCommand { onClose() }
+        .environment(\.inputArmed, inputArmed)
+        .modifier(ArmAfterShown(armed: $inputArmed))
     }
 
     private func respond(_ text: String) {
@@ -695,7 +744,7 @@ private struct ApprovalCard: View {
         agent.promptId = nil
         agent.options = nil
         agent.choiceMenu = nil
-        onDismiss()
+        onClose()
     }
 
     private func toggle(_ option: String, promptId: String) {
@@ -714,7 +763,7 @@ private struct ApprovalCard: View {
         agent.promptId = nil
         agent.multiOptions = []
         agent.selectedOptions = []
-        onDismiss()
+        onClose()
     }
 }
 
@@ -866,11 +915,13 @@ private struct ResponseAction: Identifiable {
 private struct ResponseButton: View {
     let action: ResponseAction
     let onTap: () -> Void
+    @Environment(\.inputArmed) private var inputArmed
     @State private var hovered = false
     @State private var pressed = false
 
     var body: some View {
         Button {
+            guard inputArmed else { return }
             withAnimation(.easeOut(duration: 0.08)) { pressed = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 pressed = false
@@ -911,10 +962,50 @@ private struct ResponseButton: View {
         .accessibilityLabel(action.label)
         .accessibilityValue(action.selected ? "selected" : action.detail ?? action.rawValue)
         .help(action.detail ?? action.rawValue)
-        .modifier(OptionalShortcut(key: action.key, modifiers: action.modifiers))
+        .modifier(OptionalShortcut(key: inputArmed ? action.key : nil, modifiers: action.modifiers))
         .onHover { hovered = $0 }
         .animation(NotchAnimation.micro, value: hovered)
         .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
+/// Whether the card's buttons and shortcuts answer yet. The approval card sets it, and every
+/// response button reads it, so no button type can skip the guard.
+private struct InputArmedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private extension EnvironmentValues {
+    var inputArmed: Bool {
+        get { self[InputArmedKey.self] }
+        set { self[InputArmedKey.self] = newValue }
+    }
+}
+
+/// Turns `armed` on one second after the view is on screen, and off again each time the panel
+/// comes back on screen. The panel can be hidden behind a full-screen app with a card already
+/// open, so the second must start when you can see the card, not when SwiftUI first draws it.
+/// Each restart gets a new generation, so a timer from an earlier start cannot arm this one.
+private struct ArmAfterShown: ViewModifier {
+    @Binding var armed: Bool
+    @State private var generation = 0
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear(perform: restart)
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) { note in
+                guard let window = note.object as? NSWindow, window is NSPanel else { return }
+                if window.occlusionState.contains(.visible) { restart() } else { armed = false }
+            }
+    }
+
+    private func restart() {
+        armed = false
+        generation += 1
+        let started = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if generation == started { armed = true }
+        }
     }
 }
 
