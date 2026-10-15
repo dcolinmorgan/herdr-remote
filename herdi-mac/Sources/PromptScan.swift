@@ -11,8 +11,9 @@ struct NumberedMenu {
 }
 
 private let numberedOption = try! NSRegularExpression(
-    pattern: #"^(\s*(?:[❯>›»▶]\s*)?)(\d{1,2})[.)]\s+(\S.*?)\s*$"#
+    pattern: #"^(\s*(?:[❯>›»▶●]\s*)?)(\d{1,2})[.)]\s+(\S.*?)\s*$"#
 )
+private let boxRow = try! NSRegularExpression(pattern: #"^\s*│(.*?)(?:│\s*)?$"#)
 private let menuRule = try! NSRegularExpression(pattern: #"^[\x{2500}-\x{257f}\x{2014}\x{2013}\-=_]{3,}$"#)
 private let checkboxRow = try! NSRegularExpression(
     pattern: #"^\s*(?:[❯>›»▶]\s*)?\d{1,2}[.)]\s+\[[ xX✔✓]?\]"#
@@ -26,20 +27,26 @@ private func group(_ match: NSTextCheckingResult, _ index: Int, in text: String)
     Range(match.range(at: index), in: text).map { String(text[$0]) } ?? ""
 }
 
+/// `line` without the box border gemini-cli draws on each side of it.
+private func unboxed(_ line: String) -> String {
+    matches(boxRow, line).map { group($0, 1, in: line) } ?? line
+}
+
 /// A port of the relay's `detect_numbered_options`, rule for rule, so Herdi reads a menu the way
 /// the web and Telegram clients do. tests/test_herdr_relay.py and herdi-mac/test.sh check both
 /// against the same expected output.
 ///
 /// A run starts at `1.` and counts up by one. A line indented deeper than the numbers continues
 /// the label above it, which is how Claude wraps a long option and draws an option's description.
-/// A divider inside the menu is skipped. The last complete run of two or more wins.
+/// A divider inside the menu is skipped. The last complete run of two or more wins. A row drawn
+/// inside a box, as gemini-cli draws its menus, is read without its borders.
 func detectNumberedOptions(_ lines: [String]) -> NumberedMenu {
     var best = NumberedMenu.none
     var current: [String] = []
     var currentStart = 0
     var numberColumn: Int?
 
-    for (index, line) in lines.enumerated() {
+    for (index, line) in lines.map(unboxed).enumerated() {
         if let match = matches(numberedOption, line) {
             let number = Int(group(match, 2, in: line)) ?? 0
             if number == 1 {

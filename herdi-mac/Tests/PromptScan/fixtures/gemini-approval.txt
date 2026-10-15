@@ -1,0 +1,8 @@
+MCP Server: test-server
+Tool: test-tool
+Allow execution of MCP tool "test-tool" from server "test-server"?
+
+● 1. Allow once                             
+  2. Allow tool for this session
+  3. Allow all server tools for this session
+  4. No, suggest changes (esc)

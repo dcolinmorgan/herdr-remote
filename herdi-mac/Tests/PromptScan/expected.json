@@ -16,6 +16,23 @@
     "Yes, and switch to auto mode · auto mode handles these prompts for you",
     "No, and tell Claude what to do differently (esc)"
   ],
+  "gemini-approval": [
+    "Allow once",
+    "Allow tool for this session",
+    "Allow all server tools for this session",
+    "No, suggest changes (esc)"
+  ],
+  "gemini-boxed-approval": [
+    "Allow once",
+    "Allow for this session",
+    "Modify with external editor",
+    "No, suggest changes (esc)"
+  ],
+  "gemini-sign-in": [
+    "Sign in with Google",
+    "Use Gemini API Key",
+    "Vertex AI"
+  ],
   "question-with-descriptions": [
     "Blue (Recommended) Matches the existing links on the page.",
     "Green Reads as a success state.",

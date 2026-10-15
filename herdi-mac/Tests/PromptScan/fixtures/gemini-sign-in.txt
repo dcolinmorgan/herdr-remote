@@ -1,0 +1,11 @@
+╭───────────────────────────────────────────────────────────────────────────╮
+│ Get started                                                               │
+│                                                                           │
+│ How would you like to authenticate for this project?                      │
+│                                                                           │
+│   ● 1. Sign in with Google                                                │
+│     2. Use Gemini API Key                                                 │
+│     3. Vertex AI                                                          │
+│                                                                           │
+│ (Use Enter to select)                                                     │
+╰───────────────────────────────────────────────────────────────────────────╯
