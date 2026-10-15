@@ -34,8 +34,9 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         // Auto-expand when an agent gets blocked
         observeBlockedAgents()
 
-        // ⌃⌥H gives an open card the keyboard, for a card that opened while you typed elsewhere.
-        cardShortcut = GlobalShortcut(keyCode: kVK_ANSI_H, modifiers: controlKey | optionKey) { [weak self] in
+        // ⌃⌘H gives an open card the keyboard, for a card that opened while you typed elsewhere.
+        // Not ⌃⌥: that is the VoiceOver modifier, and VO-H opens the VoiceOver Help menu.
+        cardShortcut = GlobalShortcut(keyCode: kVK_ANSI_H, modifiers: controlKey | cmdKey) { [weak self] in
             MainActor.assumeIsolated { self?.panelController?.takeKeyboard(askedByShortcut: true) }
         }
     }
@@ -188,7 +189,7 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
             typing.isEnabled = false
             menu.addItem(typing)
         }
-        let shortcut = NSMenuItem(title: "⌃⌥H gives an open approval focus", action: nil, keyEquivalent: "")
+        let shortcut = NSMenuItem(title: "⌃⌘H gives an open approval focus", action: nil, keyEquivalent: "")
         shortcut.isEnabled = false
         menu.addItem(shortcut)
 
