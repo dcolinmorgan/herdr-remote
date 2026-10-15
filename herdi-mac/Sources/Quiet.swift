@@ -30,4 +30,17 @@ enum Quiet {
 
     static var shouldPlaySound: Bool { soundEnabled && !presentationMode }
     static var shouldAutoExpand: Bool { !presentationMode }
+
+    /// The sound Herdi plays itself when macOS will not play one.
+    static let ownSoundName = "Glass"
+
+    /// Whether Herdi plays the alert sound itself.
+    ///
+    /// macOS plays a notification's sound only while Herdi's notifications are allowed and their
+    /// sound is on in System Settings. Someone who turns the banner off, because the panel already
+    /// opens for a blocked agent, still wants to hear it. So Herdi plays the sound whenever macOS
+    /// will not, and the Sound toggle stays the one switch that silences it.
+    static func playsOwnSound(macOSPlaysSound: Bool, soundWanted: Bool) -> Bool {
+        soundWanted && !macOSPlaysSound
+    }
 }

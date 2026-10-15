@@ -98,5 +98,12 @@ check("sees that a new prompt replaced the one on the card",
 check("sees that the prompt is gone", !promptStillShown(excerpt, lines: ["$ "]))
 check("never matches a card with no prompt", !promptStillShown(nil, lines: question))
 
+check("plays its own sound when macOS will not play one",
+      Quiet.playsOwnSound(macOSPlaysSound: false, soundWanted: true))
+check("leaves the sound to macOS when macOS will play one",
+      !Quiet.playsOwnSound(macOSPlaysSound: true, soundWanted: true))
+check("stays silent when the Sound toggle is off",
+      !Quiet.playsOwnSound(macOSPlaysSound: false, soundWanted: false))
+
 print(failures == 0 ? "PromptScan tests passed" : "PromptScan tests: \(failures) failed")
 exit(failures == 0 ? 0 : 1)

@@ -1,7 +1,11 @@
+import AppKit
 import Foundation
 import Network
 import Observation
 import UserNotifications
+import os.log
+
+private let notificationLog = Logger(subsystem: "com.herdr.herdi", category: "Notifications")
 
 @Observable
 final class RelayConnection {
@@ -506,7 +510,15 @@ final class RelayConnection {
         let content = UNMutableNotificationContent()
         content.title = "Agent Blocked"
         content.body = "\(agent) needs input in \(project)"
-        content.sound = Quiet.shouldPlaySound ? .default : nil
-        center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        let soundWanted = Quiet.shouldPlaySound
+        content.sound = soundWanted ? .default : nil
+        center.getNotificationSettings { settings in
+            let macOSPlaysSound = settings.authorizationStatus == .authorized && settings.soundSetting == .enabled
+            if Quiet.playsOwnSound(macOSPlaysSound: macOSPlaysSound, soundWanted: soundWanted) {
+                DispatchQueue.main.async { NSSound(named: Quiet.ownSoundName)?.play() }
+                notificationLog.notice("macOS will not play the alert sound, so Herdi played it")
+            }
+            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        }
     }
 }
