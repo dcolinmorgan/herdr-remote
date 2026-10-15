@@ -1,0 +1,41 @@
+# Runs the test suite and compiles Herdi on every pull request.
+#
+# tests/run.sh parses the Swift sources but does not compile them, so a call to a
+# function that is missing on main passes it. The herdi-mac job compiles the app.
+name: test
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run tests/run.sh
+        run: sh tests/run.sh
+
+  herdi-mac:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile Herdi
+        working-directory: herdi-mac
+        run: swift build
+      - name: Run the prompt scanner tests
+        working-directory: herdi-mac
+        run: ./test.sh
