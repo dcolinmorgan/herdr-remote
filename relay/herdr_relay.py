@@ -1658,7 +1658,23 @@ def detect_approval_options(text):
 # and every client shows a blocked Claude with no way to answer it. The menu is driven by real
 # number keys -- exactly what `send_keys` delivers -- so the labels are harvested here and
 # clients bind key N to option N.
-NUMBERED_OPTION_RE = re.compile(r"^(\s*(?:[❯>›»▶]\s*)?)(\d{1,2})[.)]\s+(\S.*?)\s*$")
+#
+# gemini-cli marks the selected row with `●` instead, and draws its menus inside a box, so every
+# row starts with the border `│`:
+#
+#    │ ● 1. Allow once                │
+#    │   2. Allow for this session    │
+#
+# BOX_ROW_RE takes the borders off a row before NUMBERED_OPTION_RE reads it, which keeps the
+# column test for a wrapped label the same inside a box as outside one.
+NUMBERED_OPTION_RE = re.compile(r"^(\s*(?:[❯>›»▶●]\s*)?)(\d{1,2})[.)]\s+(\S.*?)\s*$")
+BOX_ROW_RE = re.compile(r"^\s*│(.*?)(?:│\s*)?$")
+
+
+def unboxed(line):
+    """`line` without the box border gemini-cli draws on each side of it."""
+    match = BOX_ROW_RE.match(line)
+    return match.group(1) if match else line
 
 
 # Claude draws a MULTI-SELECT question (AskUserQuestion with multiSelect) as a numbered menu
@@ -1982,7 +1998,7 @@ def detect_numbered_options(text):
     best = []
     current = []
     number_col = None
-    for line in text.splitlines():
+    for line in map(unboxed, text.splitlines()):
         match = NUMBERED_OPTION_RE.match(line)
         if match:
             number = int(match.group(2))

@@ -3344,6 +3344,55 @@ class ClaudeNumberedMenuTests(unittest.TestCase):
 
 
 
+class GeminiNumberedMenuTests(unittest.TestCase):
+    """gemini-cli marks the selected option with `●` and often draws the menu inside a box, so
+    each row starts with the border `│`. The rows come from gemini-cli's own render snapshots."""
+
+    def test_reads_the_row_that_carries_the_dot_cursor(self):
+        screen = (
+            'Allow execution of MCP tool "test-tool" from server "test-server"?\n'
+            "\n"
+            "● 1. Allow once\n"
+            "  2. Allow tool for this session\n"
+            "  3. No, suggest changes (esc)\n"
+        )
+        with loaded_relay() as relay:
+            self.assertEqual(relay.detect_numbered_options(screen), [
+                "Allow once", "Allow tool for this session", "No, suggest changes (esc)",
+            ])
+
+    def test_reads_a_menu_drawn_inside_a_box(self):
+        screen = (
+            "╭──────────────────────────────────╮\n"
+            "│ Apply this change?               │\n"
+            "│                                  │\n"
+            "│ ● 1. Allow once                  │\n"
+            "│   2. Allow for this session      │\n"
+            "│   3. No, suggest changes (esc)   │\n"
+            "│                                  │\n"
+            "╰──────────────────────────────────╯\n"
+        )
+        with loaded_relay() as relay:
+            self.assertEqual(relay.detect_numbered_options(screen), [
+                "Allow once", "Allow for this session", "No, suggest changes (esc)",
+            ])
+
+    def test_joins_an_option_that_wraps_inside_the_box(self):
+        screen = (
+            "│ ● 1. Allow once                  │\n"
+            "│   2. Allow this command for all  │\n"
+            "│      future sessions             │\n"
+            "│   3. No, suggest changes (esc)   │\n"
+        )
+        with loaded_relay() as relay:
+            self.assertEqual(relay.detect_numbered_options(screen)[1],
+                             "Allow this command for all future sessions")
+
+    def test_a_single_boxed_number_is_not_a_menu(self):
+        with loaded_relay() as relay:
+            self.assertEqual(relay.detect_numbered_options("│ 1. only one │\n│ text │"), [])
+
+
 class AnswerKeyAfterMenuGoneTests(unittest.TestCase):
     """A digit that echoes a prompt_id is an answer to that menu -- never plain typing."""
 
