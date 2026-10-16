@@ -108,6 +108,12 @@ let pair = ["  \u{1B}[48;2;30;30;30m  \u{1B}[48;2;200;0;0m Yes \u{1B}[48;2;30;30
 check("finds the selected one of two choices side by side",
       detectChoiceMenu(plain: ["  Yes   No"], ansi: pair)
           == ChoiceMenu(choices: ["Yes", "No"], selected: 0, horizontal: true))
+// A foreground colour whose components stray into the background codes, as a grey such as
+// 38;2;107;114;128 does, must not look like a background of its own and split the row.
+let foreground = ["  \u{1B}[48;2;30;30;30m  \u{1B}[48;2;200;0;0m Yes \u{1B}[48;2;30;30;30m  \u{1B}[38;2;107;114;128mNo\u{1B}[48;2;30;30;30m                \u{1B}[0m"]
+check("reads a row whose text colour carries background-looking numbers",
+      detectChoiceMenu(plain: ["  Yes   No"], ansi: foreground)
+          == ChoiceMenu(choices: ["Yes", "No"], selected: 0, horizontal: true))
 check("reads no choice menu from a plain row with no colour",
       detectChoiceMenu(plain: fixture("opencode-choices"), ansi: []) == nil)
 check("reads no choice menu where there is a numbered menu",

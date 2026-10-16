@@ -347,6 +347,11 @@ private func choiceSegments(_ line: String) -> (segments: [ChoiceSegment], base:
                         let width = params.count > at + 1 && params[at + 1] == "5" ? 2 : 4
                         background = params[(at + 1)..<min(params.count, at + 1 + width)].joined(separator: ";")
                         at += width
+                    case "38", "58":
+                        // Step over a foreground or underline colour's own parameters. Read as
+                        // separate codes, a component such as the 107 of 38;2;107;114;128 would
+                        // look like a background and split the row into two.
+                        at += params.count > at + 1 && params[at + 1] == "5" ? 2 : 4
                     default:
                         if let code = Int(param), (40...47).contains(code) || (100...107).contains(code) {
                             background = param
