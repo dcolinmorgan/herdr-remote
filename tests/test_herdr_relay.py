@@ -16,6 +16,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from unittest import mock
+import urllib.parse
 import uuid
 
 
@@ -42,6 +43,31 @@ def _websockets_stubs():
         "websockets.asyncio.server": websockets_server,
         "websockets.exceptions": exceptions,
     }
+
+
+def _http_stubs():
+    """The two websockets modules process_request imports at call time, not at load time.
+
+    loaded_relay's stub package has no submodules, so a test that drives the HTTP push endpoint
+    has to supply these itself -- only the status code and the body matter to the callers here.
+    """
+    http11 = types.ModuleType("websockets.http11")
+
+    class Response:
+        def __init__(self, status_code, reason_phrase, headers, body):
+            self.status_code = status_code
+            self.reason_phrase = reason_phrase
+            self.headers = headers
+            self.body = body
+
+    http11.Response = Response
+    datastructures = types.ModuleType("websockets.datastructures")
+
+    class Headers(list):
+        pass
+
+    datastructures.Headers = Headers
+    return {"websockets.http11": http11, "websockets.datastructures": datastructures}
 
 
 @contextmanager
@@ -4282,6 +4308,256 @@ class QuestionProbeTests(unittest.TestCase):
                 found = relay.probe_idle_questions(panes)
             self.assertEqual(list(found), [("local", "w8:p1")])
 
+
+class RelayIdAllowlistTests(unittest.TestCase):
+    """Ids leave this relay into clients that interpolate them into markup and into JS strings.
+
+    The payloads below are the real exploit shape from GHSA-cxfh-cwv7-wvwm, not stand-ins: the
+    first one closes the quote of an inline `onclick` argument and runs its own statements, which
+    is why these tests assert the whole value is GONE rather than that some `<` was escaped -- an
+    HTML-escaped quote is decoded again before the handler is parsed, so escaping alone leaves a
+    working token exfiltration in place.
+    """
+
+    QUOTE_BREAKOUT = "x');window.__stolen__=localStorage.getItem('herdr_relay_token');//"
+    TAG_BREAKOUT = "x<img src=x onerror=alert(1)>"
+    REAL_IDS = ("w0:p1", "pane-7", "gone:pane", "w6:pH", "agent.worker_2-3")
+
+    @staticmethod
+    def _pane_list(*panes):
+        return json.dumps({"result": {"panes": list(panes)}})
+
+    @staticmethod
+    def _agent_pane(pane_id, **overrides):
+        pane = {"pane_id": pane_id, "agent": "claude", "agent_status": "idle",
+                "cwd": "/work/api", "workspace_id": "w1", "tab_id": "w1:t1"}
+        pane.update(overrides)
+        return pane
+
+    def test_a_real_id_passes_and_a_breakout_payload_does_not(self):
+        with loaded_relay() as relay:
+            for good in self.REAL_IDS:
+                with self.subTest(id=good):
+                    self.assertTrue(relay.valid_id(good))
+            refused = (
+                self.QUOTE_BREAKOUT, self.TAG_BREAKOUT, "w1:p1');alert(1)//",
+                'w1:p1"', "w1:p1 onload=alert(1)", "w1:p1`", "w1:p1\\", "", None,
+                ["w1:p1"], {"pane_id": "w1:p1"}, "x" * 129,
+            )
+            for bad in refused:
+                with self.subTest(id=bad):
+                    self.assertFalse(relay.valid_id(bad))
+
+    def test_a_trailing_newline_is_not_an_id(self):
+        """`$` also matches BEFORE a trailing newline; `fullmatch` does not.
+
+        A newline that rode through would be an unterminated string literal in every client that
+        builds a handler out of an id, so this is the one that must fail if the pattern is ever
+        rewritten as `re.match(... + "$")`.
+        """
+        with loaded_relay() as relay:
+            self.assertFalse(relay.valid_id("w1:p1\n"))
+            self.assertFalse(relay.valid_id("w1:p1\n');alert(1)//"))
+            self.assertFalse(relay.valid_id("w1:p1\r\n"))
+            # End to end as well, so the swap cannot survive anywhere between pattern and poll.
+            listing = self._pane_list(self._agent_pane("w1:p1\n"), self._agent_pane("w0:p1"))
+            with mock.patch.object(relay, "run_herdr",
+                                   side_effect=lambda *a, remote=None: listing
+                                   if a[:2] == ("pane", "list") else ""):
+                agents, _ = relay.list_panes_from_host()
+            self.assertEqual([a["pane_id"] for a in agents], ["w0:p1"])
+
+    def test_a_hostile_pane_id_from_pane_list_is_never_broadcast(self):
+        with loaded_relay(shell_panes="1") as relay:
+            listing = self._pane_list(
+                self._agent_pane(self.QUOTE_BREAKOUT),
+                self._agent_pane("w0:p1"),
+                self._agent_pane(self.TAG_BREAKOUT, agent=None, agent_status="unknown"),
+                self._agent_pane("w1:p2", agent=None, agent_status="unknown"),
+            )
+            with mock.patch.object(relay, "run_herdr",
+                                   side_effect=lambda *a, remote=None: listing
+                                   if a[:2] == ("pane", "list") else ""):
+                agents, shells = relay.list_panes_from_host()
+                relay.update_pane_maps(agents, shells)
+
+            self.assertEqual([a["pane_id"] for a in agents], ["w0:p1"])
+            self.assertEqual([s["pane_id"] for s in shells], ["w1:p2"])
+            self.assertEqual(relay.known_panes, {"w0:p1", "w1:p2"})
+            # The whole payload, not a fragment: a client decodes `&#39;` back to `'` before it
+            # parses the handler, so "the quote was escaped" is not a passing result.
+            outbound = json.dumps({"type": "agents", "agents": agents, "panes": shells})
+            self.assertNotIn(self.QUOTE_BREAKOUT, outbound)
+            self.assertNotIn("localStorage", outbound)
+            self.assertNotIn(self.TAG_BREAKOUT, outbound)
+
+    def test_a_hostile_grouping_id_blanks_the_chip_without_losing_the_pane(self):
+        """Drop the pane and the reader cannot answer it; drop its grouping and they only lose
+        the chip it sits under."""
+        with loaded_relay(shell_panes="1") as relay:
+            listing = self._pane_list(
+                self._agent_pane("w0:p1", workspace_id=self.QUOTE_BREAKOUT),
+                self._agent_pane("w1:p2", agent=None, agent_status="unknown",
+                                 tab_id=self.TAG_BREAKOUT),
+            )
+            with mock.patch.object(relay, "run_herdr",
+                                   side_effect=lambda *a, remote=None: listing
+                                   if a[:2] == ("pane", "list") else ""):
+                agents, shells = relay.list_panes_from_host()
+
+            self.assertEqual([a["pane_id"] for a in agents], ["w0:p1"])
+            self.assertEqual(agents[0]["workspace_id"], "")
+            self.assertEqual(agents[0]["tab_id"], "w1:t1")
+            self.assertEqual([s["pane_id"] for s in shells], ["w1:p2"])
+            self.assertEqual(shells[0]["tab_id"], "")
+            self.assertEqual(shells[0]["workspace_id"], "w1")
+
+    def test_a_hostile_workspace_or_tab_never_reaches_the_chip_strip(self):
+        with loaded_relay() as relay:
+            workspaces = {"result": {"workspaces": [
+                {"workspace_id": self.QUOTE_BREAKOUT, "label": "evil", "active_tab_id": "w9:t1"},
+                {"workspace_id": "w1", "label": "api", "active_tab_id": self.TAG_BREAKOUT},
+            ]}}
+            tabs = {"result": {"tabs": [
+                {"tab_id": self.TAG_BREAKOUT, "workspace_id": "w1", "label": "1"},
+                {"tab_id": "w1:t1", "workspace_id": self.QUOTE_BREAKOUT, "label": "1"},
+            ]}}
+
+            def herdr_stub(*args, remote=None, **kwargs):
+                if args[:2] == ("workspace", "list"):
+                    return json.dumps(workspaces)
+                if args[:2] == ("tab", "list"):
+                    return json.dumps(tabs)
+                return ""
+
+            with mock.patch.object(relay, "run_herdr", side_effect=herdr_stub):
+                spaces = relay.get_all_spaces()
+
+            self.assertEqual([w["workspace_id"] for w in spaces["workspaces"]], ["w1"])
+            self.assertEqual(spaces["workspaces"][0]["active_tab_id"], "")
+            self.assertEqual([t["tab_id"] for t in spaces["tabs"]], ["w1:t1"])
+            self.assertEqual(spaces["tabs"][0]["workspace_id"], "")
+            outbound = json.dumps(spaces)
+            self.assertNotIn(self.QUOTE_BREAKOUT, outbound)
+            self.assertNotIn(self.TAG_BREAKOUT, outbound)
+
+    def test_a_hostile_id_over_udp_is_dropped(self):
+        """UDP 8376 is bound to 127.0.0.1 with no token: anything on this host can push here."""
+        with loaded_relay() as relay:
+            plugin = relay.UDPPlugin()
+            hostile = {"type": "agent_event", "pane_id": self.QUOTE_BREAKOUT, "agent": "claude",
+                       "status": "blocked", "cwd": "/work/api", "project": "api"}
+            plugin.datagram_received(json.dumps(hostile).encode(), ("127.0.0.1", 51000))
+            plugin.datagram_received(b"{not json", ("127.0.0.1", 51000))
+            self.assertEqual(relay.event_queue.qsize(), 0)
+
+            legit = {**hostile, "pane_id": "gone:pane"}
+            plugin.datagram_received(json.dumps(legit).encode(), ("127.0.0.1", 51000))
+            self.assertEqual(relay.event_queue.qsize(), 1)
+            self.assertEqual(relay.event_queue.get_nowait()["pane_id"], "gone:pane")
+
+    def test_a_hostile_id_pushed_over_http_is_dropped(self):
+        with loaded_relay() as relay:
+            hostile = {"type": "agent_event", "pane_id": self.QUOTE_BREAKOUT, "agent": "claude",
+                       "status": "blocked", "cwd": "/work/api", "project": "api"}
+            legit = {**hostile, "pane_id": "pane-7"}
+
+            def push(event):
+                request = types.SimpleNamespace(
+                    path="/?d=" + urllib.parse.quote(json.dumps(event)),
+                    headers=types.SimpleNamespace(raw_items=lambda: ()),
+                )
+                with mock.patch.dict(sys.modules, _http_stubs(), clear=False):
+                    return asyncio.run(relay.process_request(None, request))
+
+            # Same 200 either way: the refusal is not an oracle for a prober on this port.
+            self.assertEqual(push(hostile).status_code, 200)
+            self.assertEqual(relay.event_queue.qsize(), 0)
+            self.assertEqual(push(legit).status_code, 200)
+            self.assertEqual(relay.event_queue.qsize(), 1)
+            self.assertEqual(relay.event_queue.get_nowait()["pane_id"], "pane-7")
+
+    def test_a_hostile_id_over_the_websocket_is_dropped(self):
+        with loaded_relay() as relay:
+            hostile = {"type": "agent_event", "pane_id": self.QUOTE_BREAKOUT, "agent": "claude",
+                       "status": "blocked", "cwd": "/work/api", "project": "api"}
+            ws = _FakeWebSocket(
+                [json.dumps(hostile), json.dumps({**hostile, "pane_id": "w0:p1"})],
+                headers={"X-Herdr-Remote-Command": "1"},
+            )
+            with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()):
+                asyncio.run(relay.handle_client(ws))
+            self.assertEqual(relay.event_queue.qsize(), 1)
+            self.assertEqual(relay.event_queue.get_nowait()["pane_id"], "w0:p1")
+
+    def test_a_refused_id_is_logged_once_rather_than_every_poll(self):
+        with loaded_relay() as relay:
+            relay.log.disabled = False
+            listing = self._pane_list(self._agent_pane(self.QUOTE_BREAKOUT))
+            with mock.patch.object(relay, "run_herdr",
+                                   side_effect=lambda *a, remote=None: listing
+                                   if a[:2] == ("pane", "list") else ""):
+                with self.assertLogs("herdr-relay", level="WARNING") as logs:
+                    for _ in range(5):
+                        relay.list_panes_from_host()
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("pane_id", logs.output[0])
+
+
+class RelayIdAllowlistEventQueueTests(unittest.IsolatedAsyncioTestCase):
+    """The queue is where UDP, HTTP and WebSocket meet, so it is gated on the way out too."""
+
+    async def test_the_consumer_drops_an_id_that_reached_the_queue(self):
+        with loaded_relay() as relay:
+            pane_id = RelayIdAllowlistTests.QUOTE_BREAKOUT
+            event = {"type": "agent_event", "pane_id": pane_id, "agent": "claude",
+                     "status": "blocked", "cwd": "/work/api", "project": "api", "host": "local"}
+            with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+                 mock.patch.object(relay, "read_pane", return_value="Deploy to prod?"), \
+                 mock.patch.object(relay, "send_web_push", new=mock.AsyncMock()), \
+                 mock.patch.object(relay, "broadcast", new=mock.AsyncMock()) as broadcast:
+                task = asyncio.create_task(relay.event_push())
+                try:
+                    await relay.event_queue.put(event)
+                    await asyncio.sleep(0.05)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+            broadcast.assert_not_awaited()
+            self.assertNotIn(pane_id, relay.agent_cache)
+            self.assertNotIn(pane_id, relay.known_panes)
+            self.assertNotIn(pane_id, relay.last_blocked_prompts)
+
+    async def test_a_legitimate_event_still_goes_all_the_way_through(self):
+        for pane_id in ("w0:p1", "pane-7", "gone:pane"):
+            with self.subTest(pane_id=pane_id), loaded_relay() as relay:
+                event = {"type": "agent_event", "pane_id": pane_id, "agent": "claude",
+                         "status": "idle", "cwd": "/work/api", "project": "api",
+                         "host": "local"}
+                seen = asyncio.Event()
+                messages = []
+
+                async def capture(message):
+                    messages.append(message)
+                    if message.get("type") == "agent_update":
+                        seen.set()
+
+                with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+                     mock.patch.object(relay, "broadcast", side_effect=capture):
+                    task = asyncio.create_task(relay.event_push())
+                    try:
+                        await relay.event_queue.put(event)
+                        await asyncio.wait_for(seen.wait(), timeout=1)
+                    finally:
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+
+                update = next(m for m in messages if m["type"] == "agent_update")
+                self.assertEqual(update["agent"]["pane_id"], pane_id)
+                self.assertEqual(relay.agent_cache[pane_id]["pane_id"], pane_id)
 
 
 if __name__ == "__main__":

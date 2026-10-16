@@ -381,6 +381,76 @@ def key_is_allowed(key):
     return len(base) == 1 and base.isprintable()
 
 
+# --- Id allowlist ---
+# Ids come from herdr and look like `w0:p1`, `pane-7`, `gone:pane`. Anything outside this set
+# cannot be a real id, and is the shape a payload needs to break out of a quote or a tag in a
+# client that interpolates it.
+#
+# fullmatch, never `...$`: python's `$` also matches BEFORE a trailing newline, so `w1:p1\n`
+# would pass -- and a newline inside an id is an unterminated string literal in every client
+# that builds a handler out of one.
+ID_PATTERN = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
+
+
+def valid_id(value):
+    return bool(value) and ID_PATTERN.fullmatch(str(value)) is not None
+
+
+# Values already refused, so the warning below is one line per offending id rather than one per
+# poll tick -- every ingest path this guards runs on a timer or an unauthenticated socket, and a
+# single bad pane would otherwise fill the log at POLL_INTERVAL forever. Bounded because the UDP
+# path takes datagrams from anything on this host: past the cap the ledger is emptied and the
+# next sighting of a value logs again, which costs a repeated line and never unbounded memory.
+REFUSED_ID_MEMORY = 512
+_refused_ids = set()
+
+
+def accept_id(field, value):
+    """True when `value` is an id the relay will pass on; otherwise False, logged once.
+
+    The refusal is never a rewrite. A sanitised id would still name a pane -- a DIFFERENT pane --
+    so every caller drops the record (or blanks the grouping field) instead of repairing it.
+    """
+    if valid_id(value):
+        return True
+    key = (field, str(value)[:160])
+    if key not in _refused_ids:
+        if len(_refused_ids) >= REFUSED_ID_MEMORY:
+            _refused_ids.clear()
+        _refused_ids.add(key)
+        log.warning("refusing %s %r: not a herdr id", field, str(value)[:160])
+    return False
+
+
+def grouping_id(field, value):
+    """A workspace/tab id, or "" when it is not one herdr could have produced.
+
+    Blanked rather than dropping the pane that carries it: a pane missing from the list is a pane
+    the reader cannot answer, while a pane missing its chip is still fully usable.
+    """
+    if not value:
+        return ""
+    return value if accept_id(field, value) else ""
+
+
+# Every id a pushed event may carry. `agent_event` is validated at each producer (UDP, HTTP `?d=`,
+# WebSocket) AND again when event_push dequeues it, because the queue is the one place all three
+# meet and nothing downstream of it looks at an id twice.
+EVENT_ID_FIELDS = ("pane_id", "workspace_id", "tab_id")
+
+
+def event_ids_are_safe(event):
+    """True when every id present on a pushed event is one herdr could have produced.
+
+    An absent or empty field passes: event_push already does nothing with an event that names no
+    pane. Anything PRESENT is held to the charset, since this is the last gate before the value
+    is cached under agent_cache and broadcast.
+    """
+    if not isinstance(event, dict):
+        return False
+    return all(not event.get(field) or accept_id(field, event[field]) for field in EVENT_ID_FIELDS)
+
+
 # --- Audit logging ---
 _audit_handler = RotatingFileHandler(AUDIT_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
 _audit_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"))
@@ -950,8 +1020,8 @@ def shell_pane_record(pane, host_label, remote, order=0):
         "project": os.path.basename(pane.get("cwd", "")),
         "host": host_label,
         "remote": remote,
-        "workspace_id": pane.get("workspace_id", ""),
-        "tab_id": pane.get("tab_id", ""),
+        "workspace_id": grouping_id("workspace_id", pane.get("workspace_id", "")),
+        "tab_id": grouping_id("tab_id", pane.get("tab_id", "")),
         "focused": bool(pane.get("focused")),
         # The reason scrollback is worth offering here and not on an agent pane: measured 34-693
         # rows on the shell panes of this host against a flat 0 on every agent pane, and a
@@ -990,11 +1060,17 @@ def list_panes_from_host(remote=None):
 
     agents, shells = [], []
     for order, p in enumerate(panes):
+        # The ids are copied verbatim out of herdr -- over SSH for every HERDR_REMOTES target --
+        # and land inside quoted strings in clients that do no escaping of their own. A pane
+        # whose id could break out of one is dropped here, before anything caches or broadcasts
+        # it; there is no pane this relay can usefully name without its id anyway.
+        if not accept_id("pane_id", p.get("pane_id")):
+            continue
         if not p.get("agent") and not (
             isinstance(p.get("agent_session"), dict)
             and p["agent_session"].get("agent")
         ):
-            if SHELL_PANES and p.get("pane_id"):
+            if SHELL_PANES:
                 shells.append(shell_pane_record(p, host_label, remote, order))
             continue
         session = pane_session_ref(p)
@@ -1023,8 +1099,8 @@ def list_panes_from_host(remote=None):
             "project": os.path.basename(p.get("cwd", "")),
             "host": host_label,
             "remote": remote,
-            "workspace_id": p.get("workspace_id", ""),
-            "tab_id": p.get("tab_id", ""),
+            "workspace_id": grouping_id("workspace_id", p.get("workspace_id", "")),
+            "tab_id": grouping_id("tab_id", p.get("tab_id", "")),
             # A working claude sets its terminal title to what it is doing, so this is live
             # activity rather than a stable session name. Idle and done panes report either
             # nothing or the harness's own banner, which says less than the cwd it would
@@ -1407,7 +1483,9 @@ def get_spaces_from_host(remote=None):
     except (json.JSONDecodeError, AttributeError):
         listed = []
     for w in listed:
-        if not w.get("workspace_id"):
+        # Same rule as a pane: the record's OWN id is what names it to a client, so a workspace
+        # that cannot be named safely is not listed at all.
+        if not accept_id("workspace_id", w.get("workspace_id")):
             continue
         worktree = w.get("worktree") or {}
         workspaces.append({
@@ -1421,7 +1499,7 @@ def get_spaces_from_host(remote=None):
             # Every pane, agent or not. The relay only lists agent panes, so the difference is
             # exactly how much of this workspace a client cannot see yet.
             "pane_count": w.get("pane_count", 0),
-            "active_tab_id": w.get("active_tab_id", ""),
+            "active_tab_id": grouping_id("active_tab_id", w.get("active_tab_id", "")),
             "repo": worktree.get("repo_name", ""),
             "host": host_label,
             "remote": remote,
@@ -1433,11 +1511,11 @@ def get_spaces_from_host(remote=None):
     except (json.JSONDecodeError, AttributeError):
         listed = []
     for t in listed:
-        if not t.get("tab_id"):
+        if not accept_id("tab_id", t.get("tab_id")):
             continue
         tabs.append({
             "tab_id": t["tab_id"],
-            "workspace_id": t.get("workspace_id", ""),
+            "workspace_id": grouping_id("workspace_id", t.get("workspace_id", "")),
             # Defaults to the tab number as a string, so it is only interesting once someone
             # renames it -- but then it is the only place that name exists.
             "label": t.get("label", ""),
@@ -2656,6 +2734,11 @@ async def _poll_once():
 async def event_push():
     while True:
         event = await event_queue.get()
+        # Last gate before an event's ids are cached and broadcast. Every producer checks too,
+        # but they are three (UDP, HTTP `?d=`, WebSocket) and this is the one place all three
+        # meet -- a fourth would otherwise arrive unguarded.
+        if not event_ids_are_safe(event):
+            continue
         gen = POLL_GENERATION
         pane_id = event.get("pane_id", "")
         update = None
@@ -2870,8 +2953,12 @@ async def process_request(connection, request):
         if "d" in params:
             try:
                 event = json.loads(params["d"][0])  # parse_qs already decodes
-                event_queue.put_nowait(event)
-                log.debug("push: received event type=%s", event.get("type", "unknown"))
+                # Checked before the queue, not after: a refused event must not cost a dequeue,
+                # and the sender gets the same 200 either way (see below) so a prober learns
+                # nothing from the difference.
+                if event_ids_are_safe(event):
+                    event_queue.put_nowait(event)
+                    log.debug("push: received event type=%s", event.get("type", "unknown"))
             except Exception as e:
                 log.warning("push: unparseable event payload (%d bytes): %s", len(params["d"][0]), e)
             headers = Headers([("Access-Control-Allow-Origin", "*")])
@@ -3201,7 +3288,8 @@ async def handle_client(ws):
                         except Exception:
                             log.exception("post-switch poll failed")
             elif msg_type == "agent_event":
-                event_queue.put_nowait(msg)
+                if event_ids_are_safe(msg):
+                    event_queue.put_nowait(msg)
             elif msg_type == "read_pane":
                 pane_id = msg["pane_id"]
                 if pane_id not in known_panes:
@@ -3562,10 +3650,16 @@ async def handle_client(ws):
 
 class UDPPlugin(asyncio.DatagramProtocol):
     def datagram_received(self, data, addr):
+        # Bound to 127.0.0.1:8376 with no token, so anything running on this host can queue an
+        # event. An id off this socket is dropped rather than cleaned: the datagram is a whole
+        # agent_event, and one with a forged id has nothing left worth processing.
         try:
-            event_queue.put_nowait(json.loads(data.decode()))
+            event = json.loads(data.decode())
         except Exception:
-            pass
+            return
+        if not event_ids_are_safe(event):
+            return
+        event_queue.put_nowait(event)
 
 
 def start_mdns():
