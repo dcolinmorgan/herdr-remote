@@ -694,6 +694,7 @@ private struct ApprovalCard: View {
         agent.prompt = nil
         agent.promptId = nil
         agent.options = nil
+        agent.choiceMenu = nil
         onDismiss()
     }
 
