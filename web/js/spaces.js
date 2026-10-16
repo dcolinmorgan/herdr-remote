@@ -76,7 +76,7 @@ function render() {
   const strips = chipStripScroll(list);
   list.innerHTML = activeWorkspace ? renderSpaceView(rows) : renderHerd(rows, occupied);
   restoreChipStripScroll(list, strips);
-  bindLongPressHandlers();
+  bindRowHandlers();
 }
 
 // A rebuild is not a gesture, and this list rebuilds on every `agents` snapshot -- every two
@@ -213,7 +213,7 @@ function spaceStrip(rows) {
     // HERDR_SHELL_PANES off, a space of five panes drew one card and said nothing about the other four.
     const hint = w.paneCount > held.length ? ` (${w.paneCount})` : '';
     html += `<button class="chip${activeWorkspace === w.key ? ' active' : ''}${w.focused ? ' focused' : ''}"
-      onclick="selectWorkspace('${escapeAttr(w.key)}')" data-ws-key="${escapeAttr(w.key)}" data-ws-name="${escapeAttr(w.name)}"
+      data-ws-key="${escapeAttr(w.key)}" data-ws-name="${escapeAttr(w.name)}"
       title="${escapeAttr(w.focused ? w.name + ' — herdr is here' : w.name)}">`
       + (bucket ? `<span class="dot chip-dot" style="background:${TRIAGE_COLOR[bucket]}"></span>` : '')
       + `${escapeHtml(w.name)}${hint}</button>`;
@@ -230,7 +230,7 @@ function tabStrip(rows) {
   for (const t of wsTabs) {
     const bucket = worstTriage(agents.filter(a => agentTabKey(a) === t.key));
     html += `<button class="chip${activeTab === t.key ? ' active' : ''}${t.focused ? ' focused' : ''}"
-      onclick="selectTab('${escapeAttr(t.key)}')" data-tab-key="${escapeAttr(t.key)}" data-tab-name="${escapeAttr(t.name)}"
+      data-tab-key="${escapeAttr(t.key)}" data-tab-name="${escapeAttr(t.name)}"
       title="${escapeAttr(t.focused ? t.name + ' — herdr is here' : t.name)}">`
       + (bucket ? `<span class="dot chip-dot" style="background:${TRIAGE_COLOR[bucket]}"></span>` : '')
       + `${escapeHtml(t.name)}</button>`;
@@ -256,19 +256,42 @@ function emptyStateHtml() {
   return '<div class="empty">Waiting for agents…</div>';
 }
 
-function bindLongPressHandlers() {
+// Everything a rendered row reacts to, wired from its dataset after the HTML is in the DOM.
+//
+// The activation handlers used to be `onclick="openTerminal('<id>')"` written into the markup. An
+// id is the agent's, and a quote in one closes that JS string -- escaping it for HTML does not
+// help, because the browser decodes the attribute before it parses the handler, so the payload
+// ran in the page that holds the relay token. Nothing agent-supplied is written into code here.
+function bindRowHandlers() {
   // Bind to spaces and tabs
   document.querySelectorAll('[data-ws-key]').forEach(el => {
-    setupLongPress(el, 'workspace', el.dataset.wsKey, el.dataset.wsName);
+    const key = el.dataset.wsKey;
+    activateOn(el, () => selectWorkspace(key));
+    setupLongPress(el, 'workspace', key, el.dataset.wsName);
   });
   document.querySelectorAll('[data-tab-key]').forEach(el => {
-    setupLongPress(el, 'tab', el.dataset.tabKey, el.dataset.tabName);
+    const key = el.dataset.tabKey;
+    activateOn(el, () => selectTab(key));
+    setupLongPress(el, 'tab', key, el.dataset.tabName);
   });
   // Bind to agents
   document.querySelectorAll('[data-pane-id]').forEach(el => {
     const id = el.dataset.paneId;
     const name = el.dataset.agentName;
+    activateOn(el, () => openTerminal(id));
     setupLongPress(el, 'agent', id, name);
+  });
+}
+
+// Click, plus the Enter and Space a `role="button"` owes the keyboard. A `<button>` gets those from
+// the browser, so it only needs the click; a div dressed as a button needs both.
+function activateOn(el, run) {
+  el.addEventListener('click', run);
+  if (el.tagName === 'BUTTON') return;
+  el.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    run();
   });
 }
 

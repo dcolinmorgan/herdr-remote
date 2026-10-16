@@ -199,7 +199,9 @@ function renderTimeline() {
   el.innerHTML = timeline.map(e => {
     const t = e.time.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     const color = e.status==='blocked'?'var(--red)':e.status==='working'?'var(--green)':'var(--muted)';
-    return `<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)"><span style="color:var(--muted)">${t}</span><span style="flex:1">${e.project} (${e.agent})</span><span style="color:${color}">${e.status}</span></div>`;
+    // project and agent are the pane's, so they are agent-supplied: project is basename(cwd), and
+    // a directory can be named `<img src=x onerror=...>`. Unescaped here, that fired on render.
+    return `<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)"><span style="color:var(--muted)">${escapeHtml(t)}</span><span style="flex:1">${escapeHtml(e.project)} (${escapeHtml(e.agent)})</span><span style="color:${color}">${escapeHtml(e.status)}</span></div>`;
   }).join('');
 }
 
@@ -270,8 +272,8 @@ function renderSessions() {
   const currentUrl = localStorage.getItem('herdr_relay_url') || '';
   el.innerHTML = sessions.map((s, i) => `
     <div class="session-item${s.url === currentUrl ? ' active' : ''}" onclick="switchSession(${i})">
-      <span class="session-name">${s.name}</span>
-      <span class="session-url">${new URL(s.url).hostname}</span>
+      <span class="session-name">${escapeHtml(s.name)}</span>
+      <span class="session-url">${escapeHtml(new URL(s.url).hostname)}</span>
       <button onclick="deleteSession(${i}, event)" aria-label="Delete" style="background:none;border:none;color:var(--muted);cursor:pointer;padding:4px">×</button>
     </div>
   `).join('');

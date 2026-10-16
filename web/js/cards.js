@@ -123,7 +123,11 @@ function agentCard(a, scope) {
   // page has none, so the only place `claude` is written is here.
   const meta = [escapeHtml(a.agent), secondary ? escapeHtml(secondary) : '']
     .filter(Boolean).join(' · ');
-  return `<div class="agent${bucket === 'needs' ? ' blocked' : ''}${bucket === 'ready' ? ' ready' : ''}${a.focused ? ' focused' : ''}" role="button" tabindex="0" aria-label="${escapeAttr(named)}, ${TRIAGE_META[bucket].label}${a.focused ? ', focused in herdr' : ''}" data-pane-id="${escapeAttr(a.pane_id)}" data-agent-name="${escapeAttr(named)}" data-bucket="${bucket}" onclick="openTerminal('${escapeAttr(a.pane_id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(a.pane_id)}')}">
+  // No handler is written into this markup. `pane_id` is the agent's, and an id carrying a quote
+  // escapes any JS string it is interpolated into -- HTML-escaping it does not help, because the
+  // browser decodes the attribute before it parses the handler. The id travels as data only, and
+  // bindRowHandlers wires the click and the Enter/Space from the dataset.
+  return `<div class="agent${bucket === 'needs' ? ' blocked' : ''}${bucket === 'ready' ? ' ready' : ''}${a.focused ? ' focused' : ''}" role="button" tabindex="0" aria-label="${escapeAttr(named)}, ${TRIAGE_META[bucket].label}${a.focused ? ', focused in herdr' : ''}" data-pane-id="${escapeAttr(a.pane_id)}" data-agent-name="${escapeAttr(named)}" data-bucket="${bucket}">
     <span class="dot${pulseClass}" style="background:${TRIAGE_COLOR[bucket]}" aria-hidden="true"></span>
     <div class="info"><div class="project">${titleHtml(a, scope, hostHtml(a))}</div><div class="meta">${meta}</div></div>
     <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
@@ -146,9 +150,7 @@ function shellCard(p, scope) {
     .join(' · ');
   return `<div class="agent shell${p.focused ? ' focused' : ''}" role="button" tabindex="0" data-shell="1"
     aria-label="${escapeAttr(named)}, terminal${p.focused ? ', focused in herdr' : ''}"
-    data-pane-id="${escapeAttr(p.pane_id)}" data-agent-name="${escapeAttr(named)}"
-    onclick="openTerminal('${escapeAttr(p.pane_id)}')"
-    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openTerminal('${escapeAttr(p.pane_id)}')}">
+    data-pane-id="${escapeAttr(p.pane_id)}" data-agent-name="${escapeAttr(named)}">
     <span class="dot dot-hollow" aria-hidden="true"></span>
     <div class="info"><div class="project">${titleHtml(p, scope, hostHtml(p))}</div><div class="meta">${meta}</div></div>
     <span style="color:var(--muted);font-size:1.2rem" aria-hidden="true">›</span>
