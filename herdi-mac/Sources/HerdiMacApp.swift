@@ -24,8 +24,6 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         // Request notification permissions
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
-        UserDefaults.standard.register(defaults: [Self.scaleKey: Self.defaultScale])
-
         // Minimal status bar item (quit + show panel)
         setupStatusItem()
 

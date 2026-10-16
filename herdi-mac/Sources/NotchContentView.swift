@@ -184,11 +184,16 @@ struct NotchPanelView: View {
             withAnimation(NotchAnimation.open) { controller.surface = .sessionList }
         case .sessionList:
             hoverPhase = .collapsed
+            // A click on the bar is a deliberate close, so remember what is blocked right now.
+            // Otherwise the poll pops the panel back up as an approval card within a second and
+            // the click looks like it did nothing. A later question still opens: the mark is
+            // keyed on the prompt the agent is showing.
+            for agent in blocked { controller.dismissedBlocked[agent.id] = agent.prompt ?? "" }
             withAnimation(NotchAnimation.close) { controller.surface = .collapsed }
         case .approval(let agentId):
             hoverPhase = .collapsed
-            controller.dismissedBlocked.insert(agentId)
-            withAnimation(NotchAnimation.close) { controller.surface = .collapsed }
+            controller.collapse(dismissing: agentId,
+                                prompt: relay.agents.first(where: { $0.id == agentId })?.prompt)
         }
     }
 

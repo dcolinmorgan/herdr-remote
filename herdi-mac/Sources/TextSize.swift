@@ -13,7 +13,7 @@ enum TextSize {
     private static let key = "herdi_ui_scale"
 
     static let `default`: Double = 1.2
-    static let steps: [Double] = stride(from: 1.0, through: 2.0, by: 0.1).map(round)
+    static let steps: [Double] = stride(from: 1.0, through: 2.0, by: 0.1).map { onStep($0) }
 
     /// Stored scale, rounded to a step and clamped to the range the menu offers. A value written
     /// by hand with `defaults write` cannot push the panel off the screen.
@@ -21,9 +21,9 @@ enum TextSize {
         get {
             let stored = UserDefaults.standard.double(forKey: key)
             guard stored > 0 else { return `default` }
-            return min(max(round(stored), steps.first ?? 1.0), steps.last ?? 2.0)
+            return min(max(onStep(stored), steps.first ?? 1.0), steps.last ?? 2.0)
         }
-        set { UserDefaults.standard.set(round(newValue), forKey: key) }
+        set { UserDefaults.standard.set(onStep(newValue), forKey: key) }
     }
 
     /// The next step up, or nil at the largest.
@@ -35,5 +35,5 @@ enum TextSize {
     static func percent(_ scale: Double) -> String { "\(Int((scale * 100).rounded()))%" }
 
     /// One decimal, so a stored 1.2000000000000002 still matches the 1.2 step.
-    private static func round(_ scale: Double) -> Double { (scale * 10).rounded() / 10 }
+    private static func onStep(_ scale: Double) -> Double { (scale * 10).rounded() / 10 }
 }
