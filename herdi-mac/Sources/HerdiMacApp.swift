@@ -169,20 +169,12 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
             paused.isEnabled = false
             menu.addItem(paused)
         }
-        menu.addItem(textSizeItem())
-
-        menu.addItem(.separator())
-
-        // Launch at login
-        let launchItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-        launchItem.target = self
-        launchItem.state = UserDefaults.standard.bool(forKey: "launchAtLogin") ? .on : .off
-        menu.addItem(launchItem)
 
         let focusOn = UserDefaults.standard.bool(forKey: approvalFocusKey)
         let focusItem = NSMenuItem(title: "Give Approvals Keyboard Focus", action: #selector(toggleApprovalFocus), keyEquivalent: "")
         focusItem.target = self
         focusItem.state = focusOn ? .on : .off
+        focusItem.image = NSImage(systemSymbolName: focusOn ? "keyboard.fill" : "keyboard", accessibilityDescription: nil)
         menu.addItem(focusItem)
 
         if focusOn {
@@ -193,6 +185,16 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         let shortcut = NSMenuItem(title: "⌃⌘H gives an open approval focus", action: nil, keyEquivalent: "")
         shortcut.isEnabled = false
         menu.addItem(shortcut)
+
+        menu.addItem(textSizeItem())
+
+        menu.addItem(.separator())
+
+        // Launch at login
+        let launchItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchItem.target = self
+        launchItem.state = UserDefaults.standard.bool(forKey: "launchAtLogin") ? .on : .off
+        menu.addItem(launchItem)
 
         menu.addItem(.separator())
 
