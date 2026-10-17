@@ -8,8 +8,12 @@ struct HerdiApp: App {
     @NSApplicationDelegateAdaptor(HerdiAppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // No visible window — the panel IS the UI
-        Settings { EmptyView() }
+        // No visible window — the panel IS the UI. macOS 26 opens a lone Settings scene at
+        // launch, which showed an empty "Herdi Settings" window, so it is suppressed. macOS 14
+        // cannot suppress it, so it gets no scene. The panel and the status item are AppKit.
+        if #available(macOS 15.0, *) {
+            Settings { EmptyView() }.defaultLaunchBehavior(.suppressed)
+        }
     }
 }
 
