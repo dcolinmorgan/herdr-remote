@@ -294,11 +294,14 @@ _session_list_cache = {}  # source -> (monotonic_timestamp, sessions_list)
 # both come back from list_panes_from_host as ([], []), and the upload sweep must tell them apart:
 # reading "no panes" off a failed SSH call would delete every folder recorded for that host.
 pane_list_ok = {}
-# host label -> {pane_id: ref_key or None} for every pane in that host's last good `pane list`.
-# The upload sweep's live set, and the ref store_upload names a folder from. Per host because a pane
-# id is only unique within one herdr: `w1:p1` exists on every host, and the bare-id maps above
-# (known_panes, pane_session_map) would let a pane alive on one host keep -- or a pane closed on
-# another delete -- the uploads of its namesake. A failed read leaves the host's previous map here.
+# host label -> (herdr session, {pane_id: ref_key or None}) for every pane in that host's last good
+# `pane list`. The upload sweep's live set, and the ref store_upload names a folder from. Per host
+# because a pane id is only unique within one herdr: `w1:p1` exists on every host, and the bare-id
+# maps above (known_panes, pane_session_map) would let a pane alive on one host keep -- or a pane
+# closed on another delete -- the uploads of its namesake. The session is the one the read was
+# made under, not the one active when the sweep runs: a `session_switch` that lands while a read is
+# in its worker thread would otherwise judge session B's uploads against session A's panes. A
+# failed read, or one a switch overtook, leaves the host's previous pair here.
 pane_refs_by_host = {}
 # Every folder this relay has written an upload into (see uploads.valid_entry for the shape).
 # Appended from a worker thread by store_upload and swept from another by the poll, so every
@@ -308,12 +311,16 @@ _upload_ledger_lock = threading.Lock()
 # Idle-timeout drops in flight. The loop keeps only a weak reference to a task, so one that is not
 # held here can be collected before it has deleted its spool.
 _upload_tasks = set()
-# host label -> the live set the last sweep of that host acted on. The sweep compares against it so
+# host label -> the (session, live set) the last sweep of that host acted on. The sweep compares against it so
 # a remote host costs an SSH call when its panes or refs change, not one per poll.
 _upload_swept_refs = {}
 # monotonic time of the last TTL run, None until the first poll. The first poll also forces a sweep
 # of every host, which is what catches panes that closed while the relay was down.
 _upload_expired_at = None
+# Whether the first poll has emptied the spool. Its own flag rather than _upload_expired_at, because
+# a first poll that a switch overtook claims no hour, and the spool must not be cleared again once
+# known_panes is full and an upload can be in flight.
+_upload_spool_cleared = False
 UPLOAD_EXPIRE_INTERVAL = 3600
 
 
@@ -984,11 +991,12 @@ def store_upload(spool_path, pane_id, name):
     relay polls for that host, so a sweep after a `session_switch` cannot mistake another session's
     panes for ended ones. Raises OSError when the remote write fails.
 
-    The ref comes from pane_refs_by_host, the same per-host map the sweep compares against, so the
-    folder's name and the ledger's `ref` cannot disagree with what the sweep will later read.
+    The ref and the session come from pane_refs_by_host, the read the sweep compares against, so
+    the folder's name, the ledger's `ref` and its `session` all describe one `pane list`.
     """
     remote = pane_remote_map.get(pane_id)
-    ref = pane_refs_by_host.get(pane_host(pane_id), {}).get(pane_id)
+    session, refs = pane_refs_by_host.get(pane_host(pane_id), (active_session_for(remote), {}))
+    ref = refs.get(pane_id)
     folder = uploads.folder_for_key(pane_id, ref)
     name = uploads.stored_name(uploads.clean_name(name), secrets.token_hex(4))
     if remote:
@@ -1003,7 +1011,7 @@ def store_upload(spool_path, pane_id, name):
     entry = {
         "host": remote or "local",
         "remote": remote,
-        "session": active_session_for(remote),
+        "session": session,
         "pane_id": pane_id,
         "folder": folder,
         "ref": ref,
@@ -1019,7 +1027,7 @@ def store_upload(spool_path, pane_id, name):
 def live_upload_refs(host):
     """Pane id -> ref_key for every pane in `host`'s last good `pane list`. A copy, since the poll
     replaces the map from another thread while a sweep reads it."""
-    return dict(pane_refs_by_host.get(host, {}))
+    return dict(pane_refs_by_host.get(host, (None, {}))[1])
 
 
 def _remote_upload_script(remote, script):
@@ -1036,7 +1044,7 @@ def _remote_upload_script(remote, script):
     return code == 0
 
 
-def _sweep_host(host, live):
+def _sweep_host(host, session, live):
     """Rule 1 for one host: delete the folders of entries whose conversation ended. BLOCKING.
 
     The lock is held only to read and to rewrite the ledger, never across the delete, which on a
@@ -1045,7 +1053,7 @@ def _sweep_host(host, live):
     """
     remote = None if host == "local" else host
     with _upload_ledger_lock:
-        ended = uploads.ended_entries(upload_ledger, host, active_session_for(remote), live)
+        ended = uploads.ended_entries(upload_ledger, host, session, live)
         ended_ids = {id(entry) for entry in ended}
         # Folders are per host, not per herdr session: two sessions' `w1:p1` with no ref share one.
         still_used = {entry["folder"] for entry in upload_ledger
@@ -1074,14 +1082,17 @@ def sweep_ended_uploads(force=False):
     for host, ok in list(pane_list_ok.items()):
         if ok is not True:
             continue
-        live = live_upload_refs(host)
-        if not force and _upload_swept_refs.get(host) == live:
+        read = pane_refs_by_host.get(host)
+        if read is None:
+            continue
+        session, live = read[0], dict(read[1])
+        if not force and _upload_swept_refs.get(host) == (session, live):
             continue
         # Recorded before the attempt, so a host that keeps failing retries on the next change or
         # the hourly force rather than on every poll.
-        _upload_swept_refs[host] = live
+        _upload_swept_refs[host] = (session, live)
         try:
-            _sweep_host(host, live)
+            _sweep_host(host, session, live)
         except (OSError, ValueError) as exc:
             log.warning("upload sweep on %s failed: %s", host, exc)
 
@@ -1298,6 +1309,7 @@ def list_panes_from_host(remote=None):
     interleaving away, so each record keeps its index in the list it came from. Per host, since a
     client only ever compares panes within one tab of one machine.
     """
+    session_at_read = active_session_for(remote)
     raw = run_herdr("pane", "list", remote=remote)
     host_label = remote or "local"
     try:
@@ -1382,7 +1394,9 @@ def list_panes_from_host(remote=None):
             # history view. The ref itself stays in pane_session_map.
             "has_session": session is not None,
         })
-    pane_refs_by_host[host_label] = refs
+    # A switch that landed mid-read leaves no way to know which session herdr answered for.
+    if active_session_for(remote) == session_at_read:
+        pane_refs_by_host[host_label] = (session_at_read, refs)
     return agents, shells
 
 
@@ -2920,18 +2934,12 @@ def probe_idle_questions(agents):
 
 
 async def _poll_once():
-        global _upload_expired_at
+        global _upload_expired_at, _upload_spool_cleared
         gen = POLL_GENERATION
-        upload_hourly = False
-        if UPLOADS_ENABLED:
-            now = time.monotonic()
-            if _upload_expired_at is None:
-                # Before get_all_panes, while known_panes is still empty and no upload can start.
-                await asyncio.to_thread(clear_upload_spool)
-            upload_hourly = (_upload_expired_at is None
-                             or now - _upload_expired_at >= UPLOAD_EXPIRE_INTERVAL)
-            if upload_hourly:
-                _upload_expired_at = now
+        if UPLOADS_ENABLED and not _upload_spool_cleared:
+            # Before get_all_panes, while known_panes is still empty and no upload can start.
+            _upload_spool_cleared = True
+            await asyncio.to_thread(clear_upload_spool)
         agents, shells = await asyncio.to_thread(get_all_panes)
         # Before update_pane_maps and before the snapshot, so the activity ledger, the clients and
         # the blocked branch below all see one status for the pane rather than three.
@@ -2940,10 +2948,6 @@ async def _poll_once():
             if (a.get("host", "local"), a["pane_id"]) in probed:
                 a["status"] = "blocked"
         update_pane_maps(agents, shells)
-        if UPLOADS_ENABLED:
-            await asyncio.to_thread(sweep_ended_uploads, force=upload_hourly)
-            if upload_hourly:
-                await asyncio.to_thread(expire_uploads)
         # Always broadcast (even empty list) so clients stay in sync
         spaces = await asyncio.to_thread(refresh_spaces)
         await broadcast(
@@ -3012,6 +3016,19 @@ async def _poll_once():
                 # smaller cost than losing the channel.
                 last_blocked_prompts.pop(pid, None)
             last_statuses[pid] = status
+        # Last, so no SSH call here delays the snapshot or a blocked prompt, and behind every
+        # generation check above: a poll a session_switch overtook returns before it gets here.
+        # The hour is claimed only here, so an overtaken first poll still leaves the forced sweep
+        # and the TTL run to the next one.
+        if UPLOADS_ENABLED and gen == POLL_GENERATION:
+            now = time.monotonic()
+            upload_hourly = (_upload_expired_at is None
+                             or now - _upload_expired_at >= UPLOAD_EXPIRE_INTERVAL)
+            if upload_hourly:
+                _upload_expired_at = now
+            await asyncio.to_thread(sweep_ended_uploads, force=upload_hourly)
+            if upload_hourly:
+                await asyncio.to_thread(expire_uploads)
 async def event_push():
     while True:
         event = await event_queue.get()

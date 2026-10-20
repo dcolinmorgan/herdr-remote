@@ -2714,7 +2714,7 @@ class RelayUploadTests(unittest.TestCase):
 
     def test_a_finished_upload_is_audited_and_recorded(self):
         with self.relay_with_root() as relay, mock.patch.object(relay, "audit") as audit:
-            relay.pane_refs_by_host["local"] = {self.PANE: "id:abc"}
+            relay.pane_refs_by_host["local"] = (None, {self.PANE: "id:abc"})
             sent = self.run_client(relay, upload_messages(
                 self.UPLOAD_ID, b"data", name="Screenshot_20261020-101500.png"))
 
@@ -2798,7 +2798,8 @@ class RelayUploadSweepTests(unittest.TestCase):
     @staticmethod
     def poll_saw(relay, host, live, ok=True):
         relay.pane_list_ok[host] = ok
-        relay.pane_refs_by_host[host] = dict(live)
+        relay.pane_refs_by_host[host] = (relay.active_session_for(None if host == "local" else host),
+                                         dict(live))
 
     def folder_exists(self, relay, entry):
         return os.path.isdir(os.path.join(relay.UPLOAD_ROOT, entry["folder"]))
@@ -2955,7 +2956,7 @@ class RelayUploadSweepTests(unittest.TestCase):
 
     def test_store_upload_names_the_folder_from_the_per_host_ref(self):
         with self.relay_with_root() as relay:
-            relay.pane_refs_by_host["local"] = {self.PANE: self.REF}
+            relay.pane_refs_by_host["local"] = (None, {self.PANE: self.REF})
             spool = os.path.join(relay.UPLOAD_ROOT, "spool.part")
             Path(spool).write_bytes(b"x")
             relay.store_upload(spool, self.PANE, "shot.png")
@@ -3036,6 +3037,86 @@ class RelayUploadSweepTests(unittest.TestCase):
             sweep.assert_not_called()
             expire.assert_not_called()
             self.assertEqual(os.listdir(relay.UPLOAD_SPOOL_DIR), ["left-over.part"])
+
+    def test_a_switch_during_the_pane_list_spares_the_new_sessions_uploads(self):
+        # The read starts under session A and a session_switch to B lands while it is in its
+        # worker thread. Judged against A's pane list, B's entry for w1:p5 would look closed.
+        listing = json.dumps({"result": {"panes": [
+            {"pane_id": "w1:p1", "agent": "claude", "agent_status": "idle"}]}})
+        with self.relay_with_root() as relay:
+            relay.ACTIVE_SESSIONS[None] = "A"
+            entry = self.seed(relay, pane_id="w1:p5", session="B")
+
+            def switch_mid_read(*args, **kwargs):
+                relay.ACTIVE_SESSIONS[None] = "B"
+                relay.POLL_GENERATION += 1
+                return listing
+
+            with mock.patch.object(relay, "run_herdr", side_effect=switch_mid_read), \
+                 mock.patch.object(relay, "get_workspace_labels", return_value={}), \
+                 mock.patch.object(relay, "get_agent_names", return_value={}), \
+                 mock.patch.object(relay, "probe_idle_questions", return_value={}), \
+                 mock.patch.object(relay, "refresh_spaces", return_value={"workspaces": [], "tabs": []}), \
+                 mock.patch.object(relay, "broadcast", new=mock.AsyncMock()):
+                asyncio.run(relay._poll_once())
+                relay.sweep_ended_uploads(force=True)
+            self.assertTrue(self.folder_exists(relay, entry))
+            self.assertEqual(relay.upload_ledger, [entry])
+            self.assertNotIn("local", relay.pane_refs_by_host)
+
+    def test_the_sweep_judges_entries_by_the_session_the_read_was_made_under(self):
+        with self.relay_with_root() as relay:
+            relay.ACTIVE_SESSIONS[None] = "B"
+            under_a = self.seed(relay, pane_id="w1:p1", ref="id:a", session="A")
+            under_b = self.seed(relay, pane_id="w1:p2", ref="id:b", session="B")
+            relay.pane_list_ok["local"] = True
+            relay.pane_refs_by_host["local"] = ("A", {})
+            relay.sweep_ended_uploads()
+            self.assertFalse(self.folder_exists(relay, under_a))
+            self.assertTrue(self.folder_exists(relay, under_b))
+            self.assertEqual(relay.upload_ledger, [under_b])
+
+    def test_store_upload_records_the_session_of_the_read(self):
+        with self.relay_with_root() as relay:
+            relay.ACTIVE_SESSIONS[None] = "personal"
+            relay.pane_refs_by_host["local"] = ("work", {self.PANE: self.REF})
+            spool = os.path.join(relay.UPLOAD_ROOT, "spool.part")
+            Path(spool).write_bytes(b"x")
+            relay.store_upload(spool, self.PANE, "shot.png")
+            (entry,) = relay.upload_ledger
+            self.assertEqual(entry["session"], "work")
+
+    def test_a_poll_a_switch_overtook_sweeps_nothing_and_claims_no_hour(self):
+        with self.relay_with_root() as relay:
+            def switch(_message):
+                relay.POLL_GENERATION += 1
+
+            with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+                 mock.patch.object(relay, "probe_idle_questions", return_value={}), \
+                 mock.patch.object(relay, "refresh_spaces", return_value={"workspaces": [], "tabs": []}), \
+                 mock.patch.object(relay, "broadcast", new=mock.AsyncMock(side_effect=switch)), \
+                 mock.patch.object(relay, "sweep_ended_uploads") as sweep, \
+                 mock.patch.object(relay, "expire_uploads") as expire:
+                asyncio.run(relay._poll_once())
+            sweep.assert_not_called()
+            expire.assert_not_called()
+            sweep, expire = self.run_polls(relay, 1)
+            sweep.assert_called_once_with(force=True)
+            expire.assert_called_once_with()
+
+    def test_the_sweep_runs_after_the_snapshot_is_sent(self):
+        with self.relay_with_root() as relay:
+            order = []
+            with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+                 mock.patch.object(relay, "probe_idle_questions", return_value={}), \
+                 mock.patch.object(relay, "refresh_spaces", return_value={"workspaces": [], "tabs": []}), \
+                 mock.patch.object(relay, "broadcast",
+                                   new=mock.AsyncMock(side_effect=lambda m: order.append(m["type"]))), \
+                 mock.patch.object(relay, "sweep_ended_uploads",
+                                   side_effect=lambda force: order.append("sweep")), \
+                 mock.patch.object(relay, "expire_uploads", side_effect=lambda: order.append("expire")):
+                asyncio.run(relay._poll_once())
+            self.assertEqual(order, ["agents", "sweep", "expire"])
 
     def test_a_sweep_error_does_not_escape_into_the_poll(self):
         with self.relay_with_root() as relay:
