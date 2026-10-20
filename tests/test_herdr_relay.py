@@ -2713,14 +2713,17 @@ class RelayUploadTests(unittest.TestCase):
     def test_a_finished_upload_is_audited_and_recorded(self):
         with self.relay_with_root() as relay, mock.patch.object(relay, "audit") as audit:
             relay.pane_session_map[self.PANE] = {"kind": "id", "value": "abc", "agent": "claude"}
-            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, b"data"))
+            sent = self.run_client(relay, upload_messages(
+                self.UPLOAD_ID, b"data", name="Screenshot_20261020-101500.png"))
 
             (result,) = self.results(sent)
             audit.assert_called_once()
             args = audit.call_args.args
             self.assertEqual(args[0], "upload")
             self.assertEqual(args[3], self.PANE)
-            self.assertIn(result["path"], args[4])
+            # audit() keeps the first 120 characters of the detail, so the path has to lead it:
+            # behind the name, an ordinary screenshot's path was cut off the end of the line.
+            self.assertTrue(args[4].startswith(f"path={result['path']!r}"), args[4])
             (entry,) = relay.upload_ledger
             self.assertEqual(entry["host"], "local")
             self.assertIsNone(entry["remote"])

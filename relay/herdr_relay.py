@@ -3388,7 +3388,9 @@ async def finish_upload(ws, slot, msg, ip, device):
     clean = uploads.clean_name(upload["name"])
     log.info("Upload from %s (%s): pane=%s name=%r size=%d path=%r",
              ip, device, pane_id, clean, upload["size"], path)
-    audit("upload", ip, device, pane_id, f"name={clean!r} size={upload['size']} path={path!r}")
+    # Path first, and no separate name: audit() keeps 120 characters of the detail, the clean name
+    # is already the end of the path, and behind it an ordinary screenshot's path was cut off.
+    audit("upload", ip, device, pane_id, f"path={path!r} size={upload['size']}")
     await ws.send(upload_result(upload_id, True, path=path))
 
 
