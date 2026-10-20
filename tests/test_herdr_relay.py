@@ -3030,10 +3030,36 @@ class RelayUploadSweepTests(unittest.TestCase):
     def test_expire_runs_the_ttl_script_on_every_remote(self):
         with self.relay_with_root() as relay:
             relay.REMOTES = ["user@box", "user@other"]
+            relay.pane_list_ok.update({"user@box": True, "user@other": True})
             with mock.patch.object(relay, "upload_ssh", side_effect=[OSError("down"), (0, b"")]) as ssh:
                 relay.expire_uploads()
             self.assertEqual([c.args[0] for c in ssh.call_args_list], ["user@box", "user@other"])
             self.assertIn(f"-mmin +{int(relay.UPLOAD_TTL_HOURS * 60)}", ssh.call_args.args[1])
+
+    def test_expire_skips_a_remote_whose_last_pane_list_was_not_good(self):
+        with self.relay_with_root() as relay:
+            relay.REMOTES = ["user@good", "user@failed", "user@unread"]
+            relay.pane_list_ok.update({"user@good": True, "user@failed": False})
+            with mock.patch.object(relay, "upload_ssh", return_value=(0, b"")) as ssh:
+                relay.expire_uploads()
+            self.assertEqual([c.args[0] for c in ssh.call_args_list], ["user@good"])
+
+    def test_the_sweep_scripts_get_a_short_ssh_timeout(self):
+        timeouts = []
+
+        def fake_run(cmd, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+        with self.relay_with_root() as relay:
+            relay.REMOTES = ["user@box"]
+            self.seed(relay, host="user@box")
+            self.poll_saw(relay, "user@box", {})
+            with mock.patch.object(relay.subprocess, "run", side_effect=fake_run):
+                relay.sweep_ended_uploads()
+                relay.expire_uploads()
+            self.assertEqual(relay.UPLOAD_SWEEP_SSH_TIMEOUT, 15)
+            self.assertEqual(timeouts, [relay.UPLOAD_SWEEP_SSH_TIMEOUT] * 2)
 
     def run_polls(self, relay, count):
         with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \

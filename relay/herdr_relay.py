@@ -208,6 +208,9 @@ UPLOAD_IDLE_SECONDS = 60
 # One SSH session carries the whole file. 20 MiB over a slow uplink takes far longer than the 15s a
 # herdr call gets, so this has its own ceiling.
 UPLOAD_SSH_TIMEOUT = 120
+# The sweep's delete and expire scripts move no file, so they get the herdr call's 15s. They run
+# inside the poll, and a hung sshd would otherwise hold every client's snapshot for 120s per host.
+UPLOAD_SWEEP_SSH_TIMEOUT = 15
 
 if RELAY_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_TOKEN:
     raise SystemExit("HERDR_RELAY_TOKEN is required when HERDR_RELAY_HOST binds beyond loopback")
@@ -966,7 +969,7 @@ def transcript_ssh(remote, script, ssh_args=()):
     return proc.returncode, proc.stdout
 
 
-def upload_ssh(remote, script, stdin_path):
+def upload_ssh(remote, script, stdin_path, timeout=UPLOAD_SSH_TIMEOUT):
     """Run an upload script on a remote host with a local file as its stdin. BLOCKING.
 
     Unlike transcript_ssh this does NOT take _remote_lock. ControlMaster carries this session
@@ -976,7 +979,7 @@ def upload_ssh(remote, script, stdin_path):
     """
     cmd = ["ssh", *SSH_BASE_ARGS, remote, "sh -c " + shlex.quote(script)]
     with open(stdin_path, "rb") as source:
-        proc = subprocess.run(cmd, stdin=source, capture_output=True, timeout=UPLOAD_SSH_TIMEOUT)
+        proc = subprocess.run(cmd, stdin=source, capture_output=True, timeout=timeout)
     if proc.returncode != 0:
         log.warning("upload ssh on %s exited %s: %s", remote, proc.returncode,
                     proc.stderr.decode("utf-8", "replace").strip()[:200])
@@ -1037,7 +1040,7 @@ def _remote_upload_script(remote, script):
     must cost its uploads a later retry, not the snapshot every client is waiting for.
     """
     try:
-        code, _ = upload_ssh(remote, script, os.devnull)
+        code, _ = upload_ssh(remote, script, os.devnull, timeout=UPLOAD_SWEEP_SSH_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("upload sweep on %s failed: %s", remote, exc)
         return False
@@ -1123,6 +1126,9 @@ def expire_uploads():
     Files past the TTL go first, then empty folders, then the ledger entries past the TTL and the
     local ones whose folder is gone. A remote entry is not checked for its folder, since that would
     cost an SSH call per entry. The TTL alone retires it.
+
+    A remote host runs the script only when its last `pane list` read clean. One that failed is
+    likely unreachable, and each try would cost the poll the whole SSH timeout.
     """
     now = time.time()
     ttl_seconds = UPLOAD_TTL_HOURS * 3600
@@ -1132,6 +1138,8 @@ def expire_uploads():
         log.warning("upload expiry on this host failed: %s", exc)
     script = uploads.remote_expire_script(UPLOAD_TTL_HOURS * 60)
     for remote in REMOTES:
+        if pane_list_ok.get(remote) is not True:
+            continue
         if not _remote_upload_script(remote, script):
             log.warning("upload expiry on %s did not run clean", remote)
     cutoff = now - ttl_seconds

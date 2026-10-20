@@ -823,7 +823,9 @@ naming and placement rules, and `SECURITY.md#what-the-relay-can-write` lists eve
   the lock, a 20 MiB transfer on a slow link would stall that host's polls until it ends, and every
   read a client asks for with them. The upload script never calls herdr, so the lock has nothing
   to protect. It has its own 120s timeout (`UPLOAD_SSH_TIMEOUT`) in place of the 15s a herdr call
-  gets.
+  gets. The sweep's delete and expire scripts move no file and run inside the poll, so they keep
+  15s (`UPLOAD_SWEEP_SSH_TIMEOUT`). The expire script runs only on a remote host whose last
+  `pane list` read clean.
 - **The web client** (`web/js/upload.js`) shows a paperclip between `/` and the input. It shows it
   only when the `agents` message carries `upload_max_bytes`. A paste of files into the reply box
   uploads them too, and a paste of plain text behaves as before. The client sends at most 5 files
