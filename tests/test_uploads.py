@@ -122,5 +122,176 @@ class RemoteScriptTests(unittest.TestCase):
             uploads.remote_write_script("s-0123456789abcdef", "a.png\n")
 
 
+def entry(**overrides):
+    base = {"host": "local", "remote": None, "session": None, "pane_id": "w1:p1",
+            "folder": "s-0123456789abcdef", "ref": "id:abc", "path": "/x", "at": 0.0}
+    return {**base, **overrides}
+
+
+class EndedEntriesTests(unittest.TestCase):
+    def test_a_live_ref_survives(self):
+        self.assertEqual(uploads.ended_entries([entry()], "local", None, {"w1:p1": "id:abc"}), [])
+
+    def test_a_closed_pane_ends(self):
+        self.assertEqual(uploads.ended_entries([entry()], "local", None, {}), [entry()])
+
+    def test_a_changed_ref_ends(self):
+        self.assertEqual(uploads.ended_entries([entry()], "local", None, {"w1:p1": "id:new"}), [entry()])
+
+    def test_a_lost_ref_ends(self):
+        self.assertEqual(uploads.ended_entries([entry()], "local", None, {"w1:p1": None}), [entry()])
+
+    def test_an_entry_with_no_ref_survives_the_pane_gaining_one(self):
+        e = entry(ref=None, folder="p-0123456789abcdef")
+        self.assertEqual(uploads.ended_entries([e], "local", None, {"w1:p1": "id:abc"}), [])
+
+    def test_an_entry_from_another_herdr_session_survives(self):
+        e = entry(session="work")
+        self.assertEqual(uploads.ended_entries([e], "local", "personal", {}), [])
+
+    def test_an_entry_from_another_host_survives(self):
+        e = entry(host="user@box")
+        self.assertEqual(uploads.ended_entries([e], "local", None, {}), [])
+
+
+class LedgerTests(unittest.TestCase):
+    def test_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "uploads.json")
+            entries = [entry(), entry(remote="user@box", session="work", ref=None,
+                                      folder="p-fedcba9876543210", at=12.5)]
+            uploads.save_ledger(path, entries)
+            self.assertEqual(uploads.load_ledger(path), entries)
+            self.assertFalse(os.path.exists(path + ".tmp"))
+
+    def test_a_bad_folder_is_dropped(self):
+        for folder in ("../x", "s-0123456789abcdef\n"):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "uploads.json")
+                uploads.save_ledger(path, [entry(folder=folder), entry()])
+                self.assertEqual(uploads.load_ledger(path), [entry()])
+
+    def test_a_malformed_entry_is_dropped(self):
+        bad = [entry(at=True), entry(at="1"), entry(pane_id=3), entry(path=None),
+               entry(ref=5), entry(remote=5), entry(session=5), entry(host=None)]
+        missing = entry()
+        del missing["path"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "uploads.json")
+            uploads.save_ledger(path, bad + [missing, "x", entry()])
+            self.assertEqual(uploads.load_ledger(path), [entry()])
+
+    def test_a_missing_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(uploads.load_ledger(os.path.join(tmp, "nope.json")), [])
+
+    def test_a_half_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "uploads.json")
+            with open(path, "w") as handle:
+                handle.write('[{"host"')
+            self.assertEqual(uploads.load_ledger(path), [])
+
+    def test_a_non_list_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "uploads.json")
+            with open(path, "w") as handle:
+                handle.write('{"host": "local"}')
+            self.assertEqual(uploads.load_ledger(path), [])
+
+
+class LocalSweepTests(unittest.TestCase):
+    def make_file(self, root, folder, name, mtime):
+        directory = os.path.join(root, folder)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, name)
+        with open(path, "w") as handle:
+            handle.write("x")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_delete_removes_only_matching_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_file(tmp, "s-0123456789abcdef", "a.txt", 0)
+            self.make_file(tmp, "keep-me", "a.txt", 0)
+            uploads.delete_local_folders(tmp, ["s-0123456789abcdef", "keep-me"])
+            self.assertFalse(os.path.exists(os.path.join(tmp, "s-0123456789abcdef")))
+            self.assertTrue(os.path.exists(os.path.join(tmp, "keep-me")))
+
+    def test_delete_refuses_a_trailing_newline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_file(tmp, "s-0123456789abcdef", "a.txt", 0)
+            uploads.delete_local_folders(tmp, ["s-0123456789abcdef\n"])
+            self.assertTrue(os.path.exists(os.path.join(tmp, "s-0123456789abcdef")))
+
+    def test_delete_ignores_a_missing_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads.delete_local_folders(tmp, ["s-0123456789abcdef"])
+
+    def test_delete_does_not_follow_a_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = os.path.join(tmp, "outside")
+            os.makedirs(outside)
+            kept = os.path.join(outside, "keep.txt")
+            with open(kept, "w") as handle:
+                handle.write("x")
+            root = os.path.join(tmp, "root")
+            os.makedirs(root)
+            os.symlink(outside, os.path.join(root, "s-0123456789abcdef"))
+            uploads.delete_local_folders(root, ["s-0123456789abcdef"])
+            self.assertFalse(os.path.lexists(os.path.join(root, "s-0123456789abcdef")))
+            self.assertTrue(os.path.exists(kept))
+
+    def test_expire_removes_old_files_then_empty_folders(self):
+        now = 1_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.make_file(tmp, "s-0123456789abcdef", "old.txt", now - 73 * 3600)
+            new = self.make_file(tmp, "p-fedcba9876543210", "new.txt", now - 3600)
+            uploads.expire_local(tmp, 72 * 3600, now)
+            self.assertFalse(os.path.exists(old))
+            self.assertFalse(os.path.exists(os.path.dirname(old)))
+            self.assertTrue(os.path.exists(new))
+
+    def test_expire_leaves_unmatched_names_alone(self):
+        now = 1_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            stray = self.make_file(tmp, "notes", "old.txt", now - 100 * 3600)
+            uploads.expire_local(tmp, 72 * 3600, now)
+            self.assertTrue(os.path.exists(stray))
+
+    def test_expire_does_not_follow_a_symlinked_folder(self):
+        now = 1_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = os.path.join(tmp, "outside")
+            kept = self.make_file(tmp, "outside", "old.txt", now - 100 * 3600)
+            root = os.path.join(tmp, "root")
+            os.makedirs(root)
+            os.symlink(outside, os.path.join(root, "s-0123456789abcdef"))
+            uploads.expire_local(root, 72 * 3600, now)
+            self.assertTrue(os.path.exists(kept))
+
+    def test_expire_with_no_root_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads.expire_local(os.path.join(tmp, "nope"), 3600, 1_000_000.0)
+
+
+class RemoteSweepScriptTests(unittest.TestCase):
+    def test_delete_script_names_each_folder(self):
+        script = uploads.remote_delete_script(["s-0123456789abcdef", "p-fedcba9876543210"])
+        self.assertIn("rm -rf -- s-0123456789abcdef p-fedcba9876543210", script)
+        self.assertIn('cd "$HOME/.cache/herdr-remote/uploads" 2>/dev/null || exit 0', script)
+
+    def test_delete_script_refuses_a_bad_folder(self):
+        with self.assertRaises(ValueError):
+            uploads.remote_delete_script(["s-0123456789abcdef", "../../"])
+
+    def test_delete_script_refuses_a_trailing_newline(self):
+        with self.assertRaises(ValueError):
+            uploads.remote_delete_script(["s-0123456789abcdef\n"])
+
+    def test_expire_script_uses_the_ttl(self):
+        self.assertIn("-mmin +4320", uploads.remote_expire_script(4320))
+
+
 if __name__ == "__main__":
     unittest.main()

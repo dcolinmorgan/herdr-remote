@@ -11,9 +11,11 @@ set again. And a folder is named by a hash, never by the pane id or the session 
 contain characters (`:`) and values the operator did not choose.
 """
 import hashlib
+import json
 import os
 import re
 import shutil
+import stat
 
 UPLOAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 FOLDER_RE = re.compile(r"^[sp]-[0-9a-f]{16}$")
@@ -86,4 +88,117 @@ def remote_write_script(folder, name):
         f'umask 077; d="{REMOTE_ROOT}/{folder}"; '
         f'mkdir -p "$d" && cat > "$d/{name}.part" && mv "$d/{name}.part" "$d/{name}" '
         f"&& printf '%s\\n' \"$d/{name}\""
+    )
+
+
+LEDGER_STRING_FIELDS = ("host", "pane_id", "folder", "path")
+LEDGER_OPTIONAL_STRING_FIELDS = ("remote", "session", "ref")
+
+
+def valid_entry(entry):
+    """A ledger entry is trusted only whole: its `folder` ends up in a recursive delete, so a field
+    that is missing, mistyped or outside FOLDER_RE drops the entry rather than being repaired."""
+    if not isinstance(entry, dict):
+        return False
+    if not all(isinstance(entry.get(key), str) for key in LEDGER_STRING_FIELDS):
+        return False
+    for key in LEDGER_OPTIONAL_STRING_FIELDS:
+        if key not in entry or not (entry[key] is None or isinstance(entry[key], str)):
+            return False
+    at = entry.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return False
+    return FOLDER_RE.fullmatch(entry["folder"]) is not None
+
+
+def load_ledger(path):
+    """BLOCKING. A missing, unreadable or half-written file is an empty ledger: the sweep then has
+    nothing to delete, and the TTL sweep still catches whatever was left behind."""
+    try:
+        with open(path) as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [entry for entry in loaded if valid_entry(entry)]
+
+
+def save_ledger(path, entries):
+    """BLOCKING. Temp file plus rename, so a crash mid-write cannot leave a half file behind."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(entries, handle)
+    os.replace(tmp, path)
+
+
+def ended_entries(entries, host, session, live):
+    """The entries on this host and herdr session whose agent session is over.
+
+    `live` maps each pane id still on that host to its `ref_key`. A pane that is gone ends its
+    entries, and so does a pane whose ref changed or vanished, since the folder belonged to the old
+    session. An entry written before the pane had a ref has nothing to compare, so it ends only with
+    the pane itself.
+    """
+    ended = []
+    for item in entries:
+        if item["host"] != host or item["session"] != session:
+            continue
+        if item["pane_id"] not in live:
+            ended.append(item)
+        elif item["ref"] is not None and live[item["pane_id"]] != item["ref"]:
+            ended.append(item)
+    return ended
+
+
+def delete_local_folders(root, folders):
+    """BLOCKING. A symlink is unlinked, never followed: `rmtree` on one would delete its target."""
+    for name in folders:
+        if not isinstance(name, str) or not FOLDER_RE.fullmatch(name):
+            continue
+        target = os.path.join(root, name)
+        try:
+            mode = os.lstat(target).st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
+            os.unlink(target)
+        elif stat.S_ISDIR(mode):
+            shutil.rmtree(target, ignore_errors=True)
+
+
+def expire_local(root, ttl_seconds, now):
+    """BLOCKING. Delete files older than the TTL from upload folders, then folders left empty.
+
+    Only names matching FOLDER_RE directly under `root` are visited, and nothing is followed, so a
+    stray directory or a symlink planted in the root is left alone.
+    """
+    try:
+        folders = [e for e in os.scandir(root)
+                   if FOLDER_RE.fullmatch(e.name) and e.is_dir(follow_symlinks=False)]
+    except FileNotFoundError:
+        return
+    cutoff = now - ttl_seconds
+    for folder in folders:
+        for item in os.scandir(folder.path):
+            if item.is_file(follow_symlinks=False) and item.stat(follow_symlinks=False).st_mtime < cutoff:
+                os.unlink(item.path)
+        try:
+            os.rmdir(folder.path)
+        except OSError:
+            pass
+
+
+def remote_delete_script(folders):
+    if not all(isinstance(name, str) and FOLDER_RE.fullmatch(name) for name in folders):
+        raise ValueError("unsafe upload folder")
+    return f'cd "{REMOTE_ROOT}" 2>/dev/null || exit 0; rm -rf -- {" ".join(folders)}'
+
+
+def remote_expire_script(ttl_minutes):
+    minutes = int(ttl_minutes)
+    return (
+        f'r="{REMOTE_ROOT}"; [ -d "$r" ] || exit 0; '
+        f'find "$r" -mindepth 2 -maxdepth 2 -type f -path "$r/[sp]-*" -mmin +{minutes} -exec rm -f {{}} +; '
+        f"find \"$r\" -mindepth 1 -maxdepth 1 -type d -name '[sp]-*' -empty -exec rmdir {{}} +"
     )
