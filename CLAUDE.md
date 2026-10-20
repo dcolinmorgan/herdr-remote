@@ -46,6 +46,7 @@ The relay reads `visible` for exactly this reason (`PROMPT_READ_SOURCE`).
 |------|------|----------|
 | `relay/herdr_relay.py` | WebSocket+HTTP relay server | Python (websockets, zeroconf) |
 | `relay/transcript.py` | Agent transcript reader behind `get_history` | Python (stdlib only) |
+| `relay/uploads.py` | Naming, placement and sweep rules for files a client uploads | Python (stdlib only) |
 | `relay/herdr_telegram.py` | Telegram bot client | Python (python-telegram-bot) |
 | `relay/herdr_tui.py` | Terminal TUI client | Python (textual) |
 | `web/` | Mobile/desktop web app: `index.html` + `app.css` + `js/*.js`, no build step | HTML/CSS/JS |
@@ -109,13 +110,16 @@ cd herdi-win && ./build.ps1
 | `HERDR_REMOTE_CLAUDE_ROOTS` | Same, as remote shell words (default `$HOME/.claude/projects`) |
 | `HERDR_TRANSCRIPT_MAX_BYTES` / `HERDR_TRANSCRIPT_TAIL_BYTES` | Read only the last N bytes of a transcript past this size (default 64MB / 8MB) |
 | `HERDR_TRANSCRIPT_REMOTE_TAIL_BYTES` | Bytes of a remote transcript to fetch per read (default 4MB) |
+| `HERDR_UPLOADS` | Set to `0` to refuse every upload and stop advertising `upload_max_bytes` (default on, see SECURITY.md) |
+| `HERDR_UPLOAD_MAX_BYTES` | Largest file a client may upload (default 20971520, 20 MiB) |
+| `HERDR_UPLOAD_TTL_HOURS` | Age past which the hourly sweep deletes any upload, recorded or not (default 72) |
 | `HERDI_RENDER` | Windows client only: `hardware` restores WPF's GPU path (default is software — see `herdi-win/README.md#memory`) |
 
 Runtime session overrides (per source) are persisted to `active_sessions.json` inside `HERDR_LOG_DIR`, so they survive relay restarts.
 
 ## Web App
 
-`web/` is `index.html` (markup) + `app.css` + ten scripts under `web/js/`, and **still has no build
+`web/` is `index.html` (markup) + `app.css` + eleven scripts under `web/js/`, and **still has no build
 step** — plain `<script src>` tags, loaded in the order they are listed. It's deployed to Cloudflare
 Pages. It carries a mobile terminal keyboard, PWA support, and agent-icon detection.
 
@@ -133,7 +137,8 @@ Three things about that layout are load-bearing:
 
 `web/js/` in load order: `state` (globals, settings, theme, socket) → `markdown` → `diff` →
 `triage` → `spaces` (grouping and naming lookups) → `cards` (what a row is called and how it
-renders) → `mirror` (the terminal reconciler) → `nav` → `palette` → `push`.
+renders) → `mirror` (the terminal reconciler) → `upload` (attach and paste) → `nav` → `palette` →
+`push`.
 
 **The palette is Claude Code's own ground, by way of collie** (`collie/web/src/index.css`): a neutral
 grey ramp on `#0a0a0a`, with the four status hues tuned against each ground rather than one set
@@ -611,10 +616,10 @@ becoming a way of switching reconnection off.
 
 Messages are JSON with a `type` field:
 
-**Server → Client:** `agents` (complete state snapshot, plus the `spaces` hierarchy), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection), `history` (transcript turns, or `unavailable` with a reason), `command_result` / `tab_created` (did the mutation land), `error`
-**Server → Client:** `agents` (complete state snapshot, plus the `spaces` hierarchy and the `panes` list), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `history` (transcript turns, or `unavailable` with a reason), `command_result` / `tab_created` (did the mutation land), `error`
+**Server → Client:** `agents` (complete state snapshot, plus the `spaces` hierarchy), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `sessions` (per-source herdr session lists and the active selection), `history` (transcript turns, or `unavailable` with a reason), `command_result` / `tab_created` (did the mutation land), `upload_ack` / `upload_result` (see File uploads), `error`
+**Server → Client:** `agents` (complete state snapshot, plus the `spaces` hierarchy and the `panes` list), `agent_update` (single-pane state merge), `blocked` (approval prompt), `pane_content` (terminal read), `history` (transcript turns, or `unavailable` with a reason), `command_result` / `tab_created` (did the mutation land), `upload_ack` / `upload_result` (see File uploads), `error`
 
-**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `focus`, `create_tab`, `rename_tab`, `close_tab`, `rename_agent`, `push_subscribe`/`push_unsubscribe`
+**Client → Server:** `respond` (send text to agent), `read_pane` (request terminal content), `send_keys` (send key sequences), `send_text` (raw text without newline), `agent_prompt` (submit free-form text via `herdr agent prompt`), `session_switch` (point one source at a herdr session; `session: null` follows herdr's default), `get_history`, `focus`, `create_tab`, `rename_tab`, `close_tab`, `rename_agent`, `push_subscribe`/`push_unsubscribe`, `upload_start` / `upload_chunk` / `upload_end` / `upload_cancel`
 
 An `agents` entry carries, per pane: `pane_id`, `agent`, `label`, `workspace_label`, `title` (herdr's terminal title —
 live activity, not a session name: a working claude sets it to what it is doing, and
@@ -624,7 +629,8 @@ The durable title comes back from `get_history`), `status`, `cwd`, `project`, `h
 `scrollback` + `viewport_rows` (from herdr's `scroll`), `has_session` (this pane names an agent
 transcript), `order` (see below), and `last_active_at` / `last_seen_at` (epoch **milliseconds**,
 because every client that will compare them is JavaScript). The session ref itself stays
-server-side in `pane_session_map`.
+server-side in `pane_session_map`. The message itself also carries `upload_max_bytes` when the
+relay takes uploads, and omits it when `HERDR_UPLOADS=0`.
 
 **`order` is the pane's index in its host's own `pane list`, and it is the only thing that says
 where a pane sits on the operator's screen.** herdr answers `pane list` in the order the panes are
@@ -784,6 +790,67 @@ appeared for the people on a tunnel.
   `.`, `..` and anything holding a separator — the server has already percent-decoded, so `%2e%2e`
   is covered), and the resolved path is re-checked to be inside `web/`, which is what stops a
   symlink pointing out of the tree. `tests/test_web_assets.py` covers both halves.
+
+### File uploads: a file from the phone, onto the agent's machine
+
+The web app can attach a file to a reply. The relay writes the file beside the agent and answers
+with an absolute path. The web app puts that path into the reply box as ordinary text, and the
+reader sends it like any other reply, so `send_text` did not change. `relay/uploads.py` holds the
+naming and placement rules, and `SECURITY.md#what-the-relay-can-write` lists every limit.
+
+- **The bytes ride the WebSocket, in acked chunks.** The relay's HTTP handler (`process_request`)
+  sees headers only, so it has no request body to take a file from. A chunk holds 256 KiB of raw
+  bytes, about 342 KiB as base64. The client sends the next chunk only after the `upload_ack` for
+  the last one. Every frame stays under the `websockets` default of 1 MiB, and `serve()` still
+  sets no `max_size`. A higher limit for uploads would also apply to every other message from
+  every client.
+- **A folder is one conversation, not one pane.** The relay names it `s-<16 hex>` from the SHA-256
+  of the pane's `agent_session` ref, or `p-<16 hex>` from the pane id when the pane has no ref. The
+  ref and the herdr session come from `pane_refs_by_host`. The sweep compares against that same
+  read, so a folder name and its `uploads.json` entry always describe one `pane list`.
+- **The sweep deletes only what this relay wrote, and judges each host apart.** Pane ids collide
+  across hosts, so `pane_refs_by_host` is keyed by host. A `w1:p1` that closes on one machine must
+  not delete the uploads of its namesake on another. The relay judges an entry only against the
+  herdr session it read the pane list under. A `session_switch` therefore cannot make session B's
+  panes end session A's uploads.
+- **A failed read is not an empty host.** `list_panes_from_host` returns `([], [])` for both. herdr
+  also prints its errors to stdout as JSON, and before `pane_list_ok` the relay parsed an
+  `{"error": …}` reply as a host with no panes. The sweep now skips a host whose last read failed.
+  Only the 72-hour rule (`expire_uploads`) touches folders the relay did not record, and only
+  folders of the exact `s-`/`p-` 16-hex shape.
+- **A remote upload does not take the host's `_remote_lock`.** It is one SSH session that pipes the
+  spool file into `cat`, and ControlMaster carries it beside the poll on the one connection. Under
+  the lock, a 20 MiB transfer on a slow link would stall that host's polls until it ends, and every
+  read a client asks for with them. The upload script never calls herdr, so the lock has nothing
+  to protect. It has its own 120s timeout (`UPLOAD_SSH_TIMEOUT`) in place of the 15s a herdr call
+  gets.
+- **The web client** (`web/js/upload.js`) shows a paperclip between `/` and the input. It shows it
+  only when the `agents` message carries `upload_max_bytes`. A paste of files into the reply box
+  uploads them too, and a paste of plain text behaves as before. The client sends at most 5 files
+  from one pick or paste, one at a time. It puts each path at the caret, in double quotes when the
+  path holds whitespace. A refusal keeps the typed text and shows the relay's reason in
+  `#sendError`.
+- **A real pane switch cancels every upload, in flight or queued.** The path belongs to that pane's
+  reply, and the box serves every pane. A re-entry of `openTerminal` for the same pane cancels
+  nothing. A closed socket and a relay switch also cancel, with a notice in `#sendError`.
+- **The native clients did not change.** macOS, iOS, Windows, the TUI and Telegram send none of the
+  new messages and ignore `upload_max_bytes`. `demo-worker` acks every chunk and answers with a
+  placeholder path, so the demo shows the button.
+
+Measured live on 2026-10-20, with herdr on macOS and Claude Code 2.1.305 on Haiku, through a test
+relay beside the live one:
+
+- **A path is enough for Claude Code to read the file.** A 12,788-byte PNG went up in one chunk. It
+  landed at `~/.cache/herdr-remote/uploads/s-<16 hex>/<8 hex>-Screenshot_20261020-163500.png`, with
+  the folder at 0700 and the file at 0600. The path went to the pane as plain text through
+  `send_text` + `Enter`. Claude Code read the image ("Read 1 file") and quoted the text in it.
+  Every `agents` message carried `upload_max_bytes: 20971520`. No other harness was tested.
+- **`/clear` ends a conversation for the sweep.** It gives the pane a new `agent_session` value in
+  `herdr pane list` (`235e2ff5-…` became `4a680b2e-…`). The relay deleted the old conversation's
+  folder within about 5 seconds. A file uploaded before a `/clear` therefore does not survive into
+  the new conversation.
+- **`/exit` ends it too.** The pane drops back to a shell, and `agent` and `agent_session` both
+  become null. The relay deleted the folder within about 8 seconds.
 
 ### Relay-side constraints clients must respect
 
@@ -1023,6 +1090,19 @@ appeared for the people on a tunnel.
     reason rather than "no history for this pane". `file_truncated` means only the tail of the file
     was read (a remote host, or a file past `HERDR_TRANSCRIPT_MAX_BYTES`) — say so instead of
     implying the conversation starts there.
+- **An upload is one file at a time per connection, and every step waits for an answer.** The
+  client sends `upload_start {pane_id, upload_id, name, size}` and gets `upload_ack {received: 0}`.
+  It then sends `upload_chunk {upload_id, seq, data}`, with `seq` counting from 0 and `data` as
+  base64 of at most 256 KiB, and waits for each `upload_ack {received}`. Last comes `upload_end`,
+  answered by `upload_result {ok: true, path}`. `upload_cancel` gets no reply.
+  - `upload_id` must match `^[A-Za-z0-9_-]{8,64}$`. The relay keys it to the connection, so no
+    client can name or cancel another client's upload.
+  - Every refusal is `upload_result {ok: false, error}`, and it ends only the upload it names. The
+    relay refuses a `size` over `upload_max_bytes`, a second upload while one is open, a chunk out
+    of `seq` order, bytes past the declared `size`, and an `upload_end` that arrives early. An
+    upload with no chunk for 60 seconds ends with `error: "upload timed out"`.
+  - The gate is `known_panes`, with no second check. `upload_start` is in `SEEN_ON`, because an
+    upload drives the pane.
 
 ### herdr read semantics the relay is built on (live-probed on herdr 0.8.0 / protocol 19; re-probed on 0.8.2 where a bullet says so)
 
