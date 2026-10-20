@@ -280,6 +280,27 @@ class WebUploadTests(_UploadPage, unittest.TestCase):
         self.assertEqual(self.box(), "keep me")
         self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
 
+    def test_a_file_that_cannot_be_read_stops_and_the_queue_goes_on(self):
+        """A picked file can change or be revoked under the page; the read then rejects."""
+        self.type_into_box("keep me")
+        self.pick(_file(name="gone.png"), _file(name="next.png"))
+        uid = self.wait_uploads(1)[0]["upload_id"]
+        self.page.evaluate("""() => {
+          const real = Blob.prototype.arrayBuffer;
+          Blob.prototype.arrayBuffer = function () {
+            Blob.prototype.arrayBuffer = real;
+            return Promise.reject(new DOMException('file changed', 'NotReadableError'));
+          };
+        }""")
+        self.ack(uid, 0)
+        msgs = self.wait_uploads(3)
+        self.assertEqual(msgs[1], {"type": "upload_cancel", "upload_id": uid})
+        self.assertEqual((msgs[2]["type"], msgs[2]["name"]), ("upload_start", "next.png"))
+        self.assertIn("gone.png", self.notice())
+        self.assertEqual(self.box(), "keep me")
+        self.drive()
+        self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
+
     def test_a_file_over_the_limit_is_refused_in_the_app(self):
         self.advertise(max_bytes=100)
         self.pick(_file(name="big.bin", size=101))

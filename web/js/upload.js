@@ -64,7 +64,19 @@ function newUploadId() {
 
 async function sendNextChunk(u) {
   const end = Math.min(u.offset + UPLOAD_CHUNK_BYTES, u.file.size);
-  const buf = await u.file.slice(u.offset, end).arrayBuffer();
+  let buf;
+  try {
+    buf = await u.file.slice(u.offset, end).arrayBuffer();
+  } catch (e) {
+    // A picked file can change or be revoked under the page (NotReadableError). Left uncaught it
+    // stalled the queue until the relay's idle drop, which then blamed a timeout.
+    if (uploadCurrent !== u) return;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'upload_cancel', upload_id: u.id}));
+    uploadCurrent = null;
+    showSendError('Could not read ' + u.file.name + '. Your text is still in the box.');
+    startNextUpload();
+    return;
+  }
   // The read is async: a pane switch or a dropped socket may have ended this upload meanwhile.
   if (uploadCurrent !== u || !ws || ws.readyState !== WebSocket.OPEN) return;
   u.offset = end;
