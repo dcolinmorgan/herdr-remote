@@ -44,6 +44,8 @@ cloudflared tunnel --url http://localhost:8375
 # → gives you https://something.trycloudflare.com
 ```
 
+This address changes on every restart. For a fixed address with a login page, see [REMOTE_ACCESS.md](REMOTE_ACCESS.md).
+
 On a remote machine with herdr:
 
 ```bash

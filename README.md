@@ -48,6 +48,8 @@ cd herdr-remote/relay && ./start.sh
 
 Open [herdr-demo.pages.dev](https://herdr-demo.pages.dev) on your phone, paste the tunnel URL.
 
+For a fixed address on your own domain, with a login page in front of the relay, see [REMOTE_ACCESS.md](REMOTE_ACCESS.md).
+
 ### Windows
 
 With Git, [uv](https://docs.astral.sh/uv/), and `herdr` installed:

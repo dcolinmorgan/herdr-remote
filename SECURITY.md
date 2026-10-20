@@ -37,6 +37,7 @@ When running herdr-remote:
 - Use a unique `HERDR_RELAY_TOKEN` (not the example token)
 - Run the relay behind a reverse proxy with TLS (Cloudflare Tunnel, nginx, etc.)
 - Keep the relay on a private network when possible
+- On a public tunnel, put a login page in front of the token with Cloudflare Access ([REMOTE_ACCESS.md](REMOTE_ACCESS.md))
 - Regularly update to the latest version
 
 ## What the relay can read
