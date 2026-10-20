@@ -1161,13 +1161,19 @@ def list_panes_from_host(remote=None):
     host_label = remote or "local"
     try:
         data = json.loads(raw)
-        panes = data.get("result", {}).get("panes", [])
-        workspace_labels = get_workspace_labels(remote=remote) if panes else {}
-        agent_names = get_agent_names(remote=remote) if panes else {}
-    except (json.JSONDecodeError, KeyError):
+    except json.JSONDecodeError:
+        data = None
+    # herdr prints an error to stdout as JSON and exits 1, and run_herdr hands back stdout whatever
+    # the exit code, so `{"error": ...}` parses. Only a reply that really holds a pane list counts
+    # as one: the upload sweep reads an empty list as "every pane on this host is gone".
+    result = data.get("result") if isinstance(data, dict) and "error" not in data else None
+    panes = result.get("panes") if isinstance(result, dict) else None
+    if not isinstance(panes, list):
         pane_list_ok[host_label] = False
         return [], []
     pane_list_ok[host_label] = True
+    workspace_labels = get_workspace_labels(remote=remote) if panes else {}
+    agent_names = get_agent_names(remote=remote) if panes else {}
 
     agents, shells = [], []
     for order, p in enumerate(panes):

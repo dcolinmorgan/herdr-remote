@@ -2751,6 +2751,15 @@ class RelayUploadTests(unittest.TestCase):
                 relay.list_panes_from_host()
             self.assertIs(relay.pane_list_ok["local"], True)
 
+    def test_a_herdr_error_reply_marks_the_host_not_ok(self):
+        # herdr prints its errors to stdout as JSON and exits 1, and run_herdr returns stdout
+        # whatever the exit code. Read as a pane list, that reply would say "no panes".
+        error = json.dumps({"error": {"code": "x", "message": "y"}})
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=error):
+                self.assertEqual(relay.list_panes_from_host(), ([], []))
+            self.assertIs(relay.pane_list_ok["local"], False)
+
 
 class RelayPaneReadSourceTests(unittest.TestCase):
     """Reads the relay makes on a timer must never harvest an agent's scrollback.
