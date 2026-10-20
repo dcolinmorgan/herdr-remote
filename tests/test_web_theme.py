@@ -13,12 +13,14 @@ reader actually gets:
 
 Skipped, not failed, when playwright or a chromium build is missing.
 """
+import json
 import os
 from pathlib import Path
 import unittest
 
 
-PAGE = (Path(__file__).resolve().parents[1] / "web" / "index.html").as_uri()
+WEB = Path(__file__).resolve().parents[1] / "web"
+PAGE = (WEB / "index.html").as_uri()
 
 CHROME_CANDIDATES = [
     os.environ.get("HERDR_TEST_CHROME", ""),
@@ -217,8 +219,8 @@ class WebThemeTests(unittest.TestCase):
     def test_the_metas_follow_the_pin_and_the_manifest_agrees(self):
         """Both metas carry `media`, so on Auto each keeps its own half and the browser's query
         picks; pinned, both have to say the pinned colour or Android's URL bar renders the other
-        theme above the page. The manifest is a data: URL and cannot be re-themed, so it holds the
-        dark ground -- what the app looks like out of the box."""
+        theme above the page. The manifest is one static file and cannot be re-themed, so it holds
+        the dark ground -- what the app looks like out of the box."""
         self.page.evaluate("() => setTheme('auto')")
         self.assertEqual(self.page.evaluate(
             "() => [...document.querySelectorAll('meta[name=theme-color]')].map(m => m.content)"),
@@ -231,8 +233,8 @@ class WebThemeTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate(
             "() => [...document.querySelectorAll('meta[name=theme-color]')].map(m => m.content)"),
             ["#0a0a0a", "#0a0a0a"])
-        manifest = self.page.evaluate("() => document.querySelector('link[rel=manifest]').href")
-        self.assertIn("%230a0a0a", manifest)
+        manifest = json.loads((WEB / "manifest.webmanifest").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["theme_color"], "#0a0a0a")
 
     # --- the font ---
 

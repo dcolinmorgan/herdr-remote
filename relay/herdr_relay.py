@@ -2838,6 +2838,7 @@ WEB_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__
 WEB_ASSET_TYPES = {
     ".css": ("text/css; charset=utf-8", "no-cache"),
     ".js": ("text/javascript; charset=utf-8", "no-cache"),
+    ".webmanifest": ("application/manifest+json", "no-cache"),
     ".svg": ("image/svg+xml", "public, max-age=31536000, immutable"),
     ".png": ("image/png", "public, max-age=31536000, immutable"),
     ".woff2": ("font/woff2", "public, max-age=31536000, immutable"),

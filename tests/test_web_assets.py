@@ -25,7 +25,7 @@ def referenced_assets():
     """
     found = set(re.findall(r'<link rel="stylesheet" href="([^"]+)"', INDEX))
     found |= set(re.findall(r'<script src="([^"]+)"></script>', INDEX))
-    found |= set(re.findall(r'<link rel="(?:icon|apple-touch-icon)"[^>]*href="([^"]+)"', INDEX))
+    found |= set(re.findall(r'<link rel="(?:icon|apple-touch-icon|manifest)"[^>]*href="([^"]+)"', INDEX))
     paths = set()
     for ref in found:
         if ref.startswith(("http://", "https://", "data:")):
@@ -45,10 +45,10 @@ class WebAssetRoutingTests(unittest.TestCase):
                     self.assertIsNotNone(relay.web_asset(path), f"{path} is not served")
 
     def test_the_scripts_are_not_cached_forever(self):
-        """app.css and js/*.js change under a fixed name; immutable would pin browsers to them."""
+        """app.css, js/*.js and the manifest change under a fixed name; immutable would pin them."""
         with loaded_relay() as relay:
             for path in sorted(referenced_assets()):
-                if not path.endswith((".css", ".js")):
+                if not path.endswith((".css", ".js", ".webmanifest")):
                     continue
                 with self.subTest(path=path):
                     _, _, cache = relay.web_asset(path)
@@ -65,7 +65,8 @@ class WebAssetRoutingTests(unittest.TestCase):
         with loaded_relay() as relay:
             for path, expected in [("/app.css", "text/css"),
                                    ("/js/state.js", "text/javascript"),
-                                   ("/logo.svg", "image/svg+xml")]:
+                                   ("/logo.svg", "image/svg+xml"),
+                                   ("/manifest.webmanifest", "application/manifest+json")]:
                 with self.subTest(path=path):
                     self.assertIn(expected, relay.web_asset(path)[1])
 

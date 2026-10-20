@@ -9,14 +9,17 @@ The four PNGs are the reason this file exists. A reviewer cannot diff a binary, 
 arrive with assertions instead: real PNG headers, the exact pixel dimensions the manifest
 advertises, and a size ceiling, all read straight out of the committed bytes.
 """
+import asyncio
 import json
 import pathlib
 import re
 import struct
+import sys
+import types
 import unittest
+from unittest import mock
 
-from test_herdr_relay import loaded_relay
-import urllib.parse
+from test_herdr_relay import _http_stubs, loaded_relay
 
 from web_source import web_source
 
@@ -52,12 +55,10 @@ def png_size(path):
 
 
 def manifest():
-    """The manifest, parsed out of the data: URI the page declares it with."""
-    match = re.search(r'<link rel="manifest" href="data:application/json,([^"]+)"', INDEX)
+    """The manifest file the page links to, parsed."""
+    match = re.search(r'<link rel="manifest" href="([^"]+)"', INDEX)
     assert match, "the page declares no manifest"
-    # The href is HTML-escaped (&quot;) and percent-encoded (%23 for #); undo both, in that order.
-    body = match.group(1).replace("&quot;", '"').replace("&amp;", "&")
-    return json.loads(urllib.parse.unquote(body))
+    return json.loads((WEB / match.group(1).lstrip("/")).read_text(encoding="utf-8"))
 
 
 def declared_icon_paths():
@@ -187,6 +188,16 @@ class RelayIconRouteTests(unittest.TestCase):
                 with self.subTest(path=declared):
                     self.assertIsNotNone(relay.web_asset(declared),
                                          f"{declared} is not served by the relay")
+
+    def test_the_manifest_is_served_without_the_token(self):
+        """Chrome fetches the manifest with no credentials, so the token cannot be asked of it."""
+        with loaded_relay(relay_token="secret") as relay:
+            request = types.SimpleNamespace(path="/manifest.webmanifest",
+                                            headers=types.SimpleNamespace(raw_items=lambda: ()))
+            with mock.patch.dict(sys.modules, _http_stubs(), clear=False):
+                response = asyncio.run(relay.process_request(None, request))
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(json.loads(response.body)["name"], "herdr-remote")
 
     def test_the_icons_are_served_as_png(self):
         with loaded_relay() as relay:

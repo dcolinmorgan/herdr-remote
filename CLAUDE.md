@@ -772,8 +772,8 @@ until someone remembers two more lines in two different places — so a missing 
 appeared for the people on a tunnel.
 
 - **Cache-Control is split by extension, deliberately.** `.woff2/.png/.svg/.txt` get a year
-  immutable; `.css/.js` get `no-cache`, because they change under a fixed name on every deploy and
-  a year of immutable would pin returning browsers to whatever JavaScript they saw first.
+  immutable; `.css/.js/.webmanifest` get `no-cache`, because they change under a fixed name on
+  every deploy and a year of immutable would pin returning browsers to whatever they saw first.
 - **`.html` is absent from the table on purpose.** `index.html` is served further up, behind
   `HERDR_RELAY_TOKEN` when one is set. Static assets are exempt from that token — a browser fetches
   the stylesheet and the scripts before it can authenticate — so putting `.html` here would turn
