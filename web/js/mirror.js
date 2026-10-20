@@ -845,6 +845,7 @@ function sendText() {
 function showSendError(message){
   if(window.cue)cue('error');
   const el=document.getElementById('sendError');
+  el.classList.add('qa-error');
   el.textContent='\u26a0 '+message;
   el.hidden=false;
 }

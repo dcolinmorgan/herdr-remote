@@ -15,6 +15,9 @@ let uploadMaxBytes = 0;
 let uploadQueue = [];        // [{file, pane}] still to go
 let uploadCurrent = null;    // {id, file, pane, offset, seq, awaiting}
 let uploadBatch = {done: 0, total: 0};  // what the placeholder counts: "Uploading 1 of 2…"
+// pane -> {paths, names, error}: answers that came back while the reader was on the herd list.
+// Back keeps an upload going, so its file lands, and the path waits here for the pane to reopen.
+const uploadHeld = new Map();
 
 function updateAttachButton() {
   document.getElementById('attachBtn').hidden = !(uploadMaxBytes > 0);
@@ -107,14 +110,46 @@ function handleUploadMessage(msg) {
     return true;
   }
   uploadCurrent = null;
-  if (msg.ok && u.pane === activePane) insertAtCaret(msg.path);
-  else if (!msg.ok) showSendError('Upload failed: ' + (msg.error || 'unknown error') + '. Your text is still in the box.');
+  const failure = 'Upload failed: ' + (msg.error || 'unknown error') + '. Your text is still in the box.';
+  if (u.pane !== activePane) holdUploadResult(u, msg.ok ? msg.path : null, failure);
+  else if (msg.ok) insertAtCaret(msg.path);
+  else showSendError(failure);
   startNextUpload();
   return true;
 }
 
-// Called with no reason on a real pane switch -- the path belongs to that pane's reply and the box
-// serves every pane -- and with one when the socket goes, so the reader learns the file did not land.
+function holdUploadResult(u, path, failure) {
+  const held = uploadHeld.get(u.pane) || {paths: [], names: [], error: null};
+  if (path) { held.paths.push(path); held.names.push(u.file.name); }
+  else held.error = failure;
+  uploadHeld.set(u.pane, held);
+}
+
+// Called on a real switch to `paneId`, after the switch has cleared the notice line.
+function releaseHeldUploads(paneId) {
+  const held = uploadHeld.get(paneId);
+  if (!held) return;
+  uploadHeld.delete(paneId);
+  held.paths.forEach(insertAtCaret);
+  if (held.error) showSendError(held.error);
+  else showSendNotice('Attached ' + held.names.join(', ') + '.');
+}
+
+// A real switch to `paneId` drops the uploads for every other pane, in flight and queued. The ones
+// for `paneId` itself go on: the reader went Back and came straight back to the same pane.
+function cancelUploadsExcept(paneId) {
+  uploadQueue = uploadQueue.filter(q => q.pane === paneId);
+  const keep = uploadCurrent && uploadCurrent.pane === paneId;
+  if (uploadCurrent && !keep && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({type: 'upload_cancel', upload_id: uploadCurrent.id}));
+  }
+  uploadBatch = {done: keep ? 1 : 0, total: (keep ? 1 : 0) + uploadQueue.length};
+  if (keep) { renderUploadBusy(); return; }
+  uploadCurrent = null;
+  startNextUpload();
+}
+
+// Called when the socket goes, so the reader learns the file did not land.
 function cancelUploads(reason) {
   const had = uploadCurrent || uploadQueue.length;
   if (uploadCurrent && ws && ws.readyState === WebSocket.OPEN) {
@@ -125,6 +160,14 @@ function cancelUploads(reason) {
   uploadBatch = {done: 0, total: 0};
   renderUploadBusy();
   if (reason && had) showSendError(reason);
+}
+
+// The same line as showSendError, without the error tint or the cue, for news that is not a failure.
+function showSendNotice(message) {
+  const el = document.getElementById('sendError');
+  el.classList.remove('qa-error');
+  el.textContent = message;
+  el.hidden = false;
 }
 
 // The reader can keep typing while a file goes up, so the box says it is busy without being locked.

@@ -360,6 +360,63 @@ class WebUploadTests(_UploadPage, unittest.TestCase):
         self.assertEqual(self.box(), "")
         self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
 
+    def back(self):
+        self.page.evaluate("() => hideTerminal()")
+
+    def notice_is_error(self):
+        return self.page.evaluate(
+            "() => document.getElementById('sendError').classList.contains('qa-error')")
+
+    def test_back_keeps_an_upload_and_its_path_waits_for_the_pane(self):
+        self.pick(_file())
+        self.wait_uploads(1)
+        self.back()
+        self.drive()
+        self.assertNotIn("upload_cancel", [m["type"] for m in self.uploads()])
+        self.assertEqual(self.box(), "")
+        self.open_pane("w1:p1")
+        self.assertEqual(self.box(), PATH + " ")
+        self.assertEqual(self.notice(), "Attached shot.png.")
+        self.assertFalse(self.notice_is_error())
+
+    def test_a_refusal_after_back_shows_when_the_pane_reopens(self):
+        self.pick(_file())
+        uid = self.wait_uploads(1)[0]["upload_id"]
+        self.back()
+        self.reply({"type": "upload_result", "upload_id": uid, "ok": False, "error": "file too large"})
+        self.assertIsNone(self.notice())
+        self.open_pane("w1:p1")
+        self.assertIn("file too large", self.notice())
+        self.assertTrue(self.notice_is_error())
+        self.assertEqual(self.box(), "")
+
+    def test_a_held_path_is_shown_once(self):
+        self.advertise(panes=("w1:p1", "w1:p2"))
+        self.pick(_file())
+        self.wait_uploads(1)
+        self.back()
+        self.drive()
+        self.open_pane("w1:p1")
+        self.type_into_box("")
+        self.open_pane("w1:p2")
+        self.open_pane("w1:p1")
+        self.assertEqual(self.box(), "")
+        self.assertIsNone(self.notice())
+
+    def test_back_then_another_pane_cancels_and_inserts_nothing(self):
+        self.advertise(panes=("w1:p1", "w1:p2"))
+        self.pick(_file(name="one.png"), _file(name="two.png"))
+        uid = self.wait_uploads(1)[0]["upload_id"]
+        self.back()
+        self.open_pane("w1:p2")
+        self.assertEqual(self.uploads()[-1], {"type": "upload_cancel", "upload_id": uid})
+        self.reply({"type": "upload_result", "upload_id": uid, "ok": True, "path": PATH})
+        self.page.wait_for_timeout(50)
+        self.assertEqual([m["type"] for m in self.uploads()], ["upload_start", "upload_cancel"])
+        self.assertEqual(self.box(), "")
+        self.assertIsNone(self.notice())
+        self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
+
     def test_a_reentry_for_the_same_pane_cancels_nothing(self):
         self.pick(_file())
         self.wait_uploads(1)

@@ -493,8 +493,11 @@ function openTerminal(paneId) {
   // their agent asked a question -- the one moment they are most likely to be reading.
   if (activePane !== paneId) {
     hideHistory(); hideSearch(); clearPaneMirror(); hideSendError();
-    // The path an upload returns belongs in THIS pane's reply, and the box serves every pane.
-    cancelUploads();
+    // The path an upload returns belongs in THIS pane's reply, and the box serves every pane. Back
+    // cancels nothing, so a file still going up for this pane goes on, and one that landed while
+    // the reader was away goes into the box now -- after hideSendError, so its notice stays.
+    cancelUploadsExcept(paneId);
+    releaseHeldUploads(paneId);
     paneLines = PANE_LINES_BASE; paneFollowing = true; userScrolledUp = false;
     // A real switch is one of the two moments the sibling row may place itself; dropping the anchor
     // here is what asks for it, and what keeps a re-entry from asking again.

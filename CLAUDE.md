@@ -832,9 +832,12 @@ naming and placement rules, and `SECURITY.md#what-the-relay-can-write` lists eve
   from one pick or paste, one at a time. It puts each path at the caret, in double quotes when the
   path holds whitespace. A refusal keeps the typed text and shows the relay's reason in
   `#sendError`.
-- **A real pane switch cancels every upload, in flight or queued.** The path belongs to that pane's
-  reply, and the box serves every pane. A re-entry of `openTerminal` for the same pane cancels
-  nothing. A closed socket and a relay switch also cancel, with a notice in `#sendError`.
+- **A real pane switch cancels the uploads of every other pane, in flight or queued.** The path
+  belongs to that pane's reply, and the box serves every pane. Back cancels nothing. A file that
+  lands while the reader is on the herd list waits in `uploadHeld`. When its pane opens again, the
+  path goes into the box and `#sendError` shows `Attached <name>.` without the error tint. A
+  refusal waits the same way. A re-entry of `openTerminal` for the same pane cancels nothing. A
+  closed socket and a relay switch cancel every upload, with a notice in `#sendError`.
 - **The native clients did not change.** macOS, iOS, Windows, the TUI and Telegram send none of the
   new messages and ignore `upload_max_bytes`. `demo-worker` acks every chunk and answers with a
   placeholder path, so the demo shows the button.
