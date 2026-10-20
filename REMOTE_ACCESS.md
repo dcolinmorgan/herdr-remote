@@ -130,25 +130,68 @@ lookup. Try again from the phone on mobile data.
 
 ## First visit from the phone
 
-The phone needs the token once. After the first visit, the relay sets a cookie that lasts one year,
-and the page stores the token in the browser.
+The phone needs a secret link one time. The link is your relay address with the token at the end. It
+looks like this:
 
-1. On the host, show the token:
+```text
+https://relay.example.com/?token=4f9c...e21a
+```
+
+After the first visit, the browser keeps a cookie for one year. Then the plain address works without
+the token.
+
+### Show the link as a QR code
+
+The easy way to get the link onto the phone is a QR code on the host screen.
+
+1. On a Mac, install the QR tool once:
 
    ```bash
-   sed -n 's/^HERDR_RELAY_TOKEN=//p' ~/.config/herdr-remote/secrets.env
+   brew install qrencode
    ```
 
-2. On the phone, open `https://relay.example.com/?token=<token>`. To skip the typing, show the address
-   as a QR code on the host with `qrencode -t ansiutf8 "<address>"`, and scan it.
-3. If Access asks, enter your email, then the PIN from the email.
-4. Check that your agents appear.
+   On Linux, install the `qrencode` package with your package manager.
 
-The QR code and the address both hold the token. Clear the terminal after you scan it.
+2. Copy the two lines below into the terminal. Change `relay.example.com` to your relay address
+   first. Then press Enter.
 
-Open the link in the browser where you want to use Herdi. A QR scanner app often opens links in its
-own browser, which has its own cookies. Copy the link from the scanner and paste it into Chrome or
-Safari.
+   ```bash
+   TOKEN=$(sed -n 's/^HERDR_RELAY_TOKEN=//p' ~/.config/herdr-remote/secrets.env)
+   qrencode -t ansiutf8 "https://relay.example.com/?token=$TOKEN"
+   ```
+
+   A square of black and white blocks appears in the terminal.
+
+3. Point the phone camera at the square. Tap the link that the camera shows.
+4. If the link opens in the camera app or in a scanner app, copy it. Paste it into Chrome (Android)
+   or Safari (iPhone).
+5. If Cloudflare asks, enter your email, then the PIN from the email.
+6. Make sure your agents appear.
+7. Close the terminal window, or run `clear`. The QR code holds the token.
+
+The QR code is the same as a password. Do not show it in a screenshot, a video call or a chat.
+
+### Without a QR code
+
+Show the token on the host:
+
+```bash
+sed -n 's/^HERDR_RELAY_TOKEN=//p' ~/.config/herdr-remote/secrets.env
+```
+
+On the phone, type `https://relay.example.com/?token=` and then the token, in one line.
+
+### Which browser keeps the login
+
+The cookie stays in the browser where you opened the link. Each of these needs the token link again:
+
+- **A private or incognito tab.** It deletes all cookies when you close it. The plain address then
+  shows `Invalid token`.
+- **A different browser,** for example the browser of a QR scanner app.
+- **A different address for the same relay.** Each address has its own cookies. Use the same address
+  every time.
+
+Use a normal tab in your daily browser. Then add the page to the home screen.
 
 ### Android
 
@@ -177,7 +220,7 @@ cover them, and no one has tested them with the relay.
 
 | What you see | Cause | Fix |
 |---|---|---|
-| `Invalid token` after the Access login | The request had no token, or the wrong one | Open the `?token=` link once in the same browser |
+| `Invalid token` after the Access login | This browser has no token cookie: a private tab, another browser, or another address | Open the `?token=` link once in a normal tab of that browser |
 | No PIN email from Access | Access sends a PIN only to an address that the policy allows | Check the policy Include rule, then the spam folder |
 | A second PIN does not arrive | Cloudflare may limit PINs to one address | Wait 5 minutes, or use the browser that already has the login |
 | Installer: `Port 8375 is not listening after 3 seconds` | `uv` installs packages on the first start and needs more time | Check `lsof -iTCP:8375 -sTCP:LISTEN`. Set `HERDR_INSTALL_SETTLE_SECONDS=15` for a new run. |
