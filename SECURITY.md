@@ -105,6 +105,9 @@ polls, including everything in `HERDR_REMOTES`.
   shell as code.
 - Folders are mode 0700 and files 0600. A partial upload collects in `upload-spool/` under
   `HERDR_LOG_DIR` as a 0600 file, and the relay empties that folder before its first poll.
+  Two relays on one machine therefore need separate `HERDR_LOG_DIR` values, because the spool and
+  `uploads.json` live there. If the spool file of an upload goes missing or changes size, the relay
+  refuses that upload and stores nothing.
 - One file is at most 20 MiB (`HERDR_UPLOAD_MAX_BYTES`). The relay refuses a larger declared size at
   `upload_start`, and refuses again when the chunks pass the declared size. A connection holds one
   upload at a time, a chunk holds at most 256 KiB, and the client waits for the ack of each chunk

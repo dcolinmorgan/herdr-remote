@@ -2735,6 +2735,49 @@ class RelayUploadTests(unittest.TestCase):
             self.assertTrue(relay.uploads.valid_entry(entry))
             self.assertEqual(relay.uploads.load_ledger(relay.UPLOAD_LEDGER_FILE), [entry])
 
+    def test_a_spool_deleted_between_chunks_refuses_the_next_chunk(self):
+        # A second relay on the same HERDR_LOG_DIR empties the spool when it starts. Appending must
+        # not create the file again, or the later chunks alone would land as the whole file.
+        data = os.urandom(300 * 1024)
+        with self.relay_with_root() as relay:
+            append = relay.append_upload_spool
+            calls = []
+
+            def delete_before_second(path, chunk):
+                calls.append(path)
+                if len(calls) == 2:
+                    os.remove(path)
+                append(path, chunk)
+
+            with mock.patch.object(relay, "append_upload_spool", side_effect=delete_before_second):
+                sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, data))
+
+            results = self.results(sent)
+            self.assertFalse(results[0]["ok"], results)
+            self.assertFalse(any(r["ok"] for r in results), results)
+            self.assertEqual(list(Path(relay.UPLOAD_ROOT).rglob("*")), [])
+            self.assertEqual(relay.upload_ledger, [])
+
+    def test_a_spool_whose_size_differs_from_the_declared_size_is_refused(self):
+        data = b"0123456789"
+        with self.relay_with_root() as relay, mock.patch.object(relay, "audit") as audit:
+            append = relay.append_upload_spool
+
+            def append_then_truncate(path, chunk):
+                append(path, chunk)
+                os.truncate(path, 4)
+
+            with mock.patch.object(relay, "append_upload_spool", side_effect=append_then_truncate):
+                sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, data))
+
+            (result,) = self.results(sent)
+            self.assertEqual(result, {"type": "upload_result", "upload_id": self.UPLOAD_ID,
+                                      "ok": False, "error": "upload incomplete"})
+            self.assertEqual(list(Path(relay.UPLOAD_ROOT).rglob("*")), [])
+            self.assertEqual(relay.upload_ledger, [])
+            self.assertEqual(self.spool_files(relay), [])
+            audit.assert_not_called()
+
     def test_the_snapshot_advertises_the_limit(self):
         with loaded_relay() as relay:
             ws = _FakeWebSocket([])

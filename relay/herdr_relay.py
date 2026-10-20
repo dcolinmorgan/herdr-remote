@@ -3364,9 +3364,22 @@ def create_upload_spool():
 
 
 def append_upload_spool(path, data):
-    """BLOCKING."""
-    with open(path, "ab") as spool:
+    """BLOCKING. Opened without O_CREAT, so a spool file that went missing fails the chunk.
+
+    A second relay sharing HERDR_LOG_DIR empties the spool when it starts. With "ab" the next chunk
+    would create the file again, and the later chunks alone would land as the whole file.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    with os.fdopen(fd, "ab") as spool:
         spool.write(data)
+
+
+def spool_size(path):
+    """BLOCKING. The spool's size on disk, or None when it is gone."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
 
 
 def delete_upload_spool(path):
@@ -3550,6 +3563,13 @@ async def finish_upload(ws, slot, msg, ip, device):
     pause_upload_timer(upload)
     pane_id = upload["pane_id"]
     if upload["received"] != upload["size"]:
+        await refuse_upload(ws, slot, upload_id, "upload incomplete")
+        return
+    # The count above is what this relay sent to the spool, not what is in it. A spool another
+    # relay deleted, or changed, between chunks must not be stored as the whole file.
+    on_disk = await asyncio.to_thread(spool_size, upload["spool"])
+    if on_disk != upload["size"]:
+        log.warning("Upload %s: spool holds %s bytes, %d declared", upload_id, on_disk, upload["size"])
         await refuse_upload(ws, slot, upload_id, "upload incomplete")
         return
     # Checked again because the pane may have closed while the chunks were arriving, and a file
