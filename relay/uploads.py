@@ -28,6 +28,7 @@ NAME_MAX_CHARS = 80
 FALLBACK_NAME = "file"
 UNSAFE_NAME_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]")
 FOLDER_HASH_CHARS = 16
+FOLDER_GLOB = "[sp]-" + "[0-9a-f]" * FOLDER_HASH_CHARS
 FOLDER_MODE = 0o700
 FILE_MODE = 0o600
 
@@ -190,15 +191,21 @@ def expire_local(root, ttl_seconds, now):
 
 
 def remote_delete_script(folders):
+    """Every name is checked against FOLDER_RE before it is joined into the shell word list, so a
+    value from the ledger file can never add a path, a flag or a second command."""
     if not all(isinstance(name, str) and FOLDER_RE.fullmatch(name) for name in folders):
         raise ValueError("unsafe upload folder")
     return f'cd "{REMOTE_ROOT}" 2>/dev/null || exit 0; rm -rf -- {" ".join(folders)}'
 
 
 def remote_expire_script(ttl_minutes):
+    """The shell globs spell out FOLDER_RE, hex digits included. `[sp]-*` would also match a folder
+    like `s-notes` that the operator made under the root, and the sweep would delete its files.
+    `int()` keeps the TTL a number, and `find` does not follow symlinks by default.
+    """
     minutes = int(ttl_minutes)
     return (
         f'r="{REMOTE_ROOT}"; [ -d "$r" ] || exit 0; '
-        f'find "$r" -mindepth 2 -maxdepth 2 -type f -path "$r/[sp]-*" -mmin +{minutes} -exec rm -f {{}} +; '
-        f"find \"$r\" -mindepth 1 -maxdepth 1 -type d -name '[sp]-*' -empty -exec rmdir {{}} +"
+        f'find "$r" -mindepth 2 -maxdepth 2 -type f -path "$r/{FOLDER_GLOB}/*" -mmin +{minutes} -exec rm -f {{}} +; '
+        f"find \"$r\" -mindepth 1 -maxdepth 1 -type d -name '{FOLDER_GLOB}' -empty -exec rmdir {{}} +"
     )

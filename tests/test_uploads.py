@@ -2,6 +2,8 @@
 import importlib.util
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -291,6 +293,23 @@ class RemoteSweepScriptTests(unittest.TestCase):
 
     def test_expire_script_uses_the_ttl(self):
         self.assertIn("-mmin +4320", uploads.remote_expire_script(4320))
+
+    @unittest.skipUnless(shutil.which("sh") and shutil.which("find"), "needs sh and find")
+    def test_expire_script_only_touches_upload_folders(self):
+        old = 1_000_000.0
+        with tempfile.TemporaryDirectory() as home:
+            root = os.path.join(home, ".cache", "herdr-remote", "uploads")
+            paths = {}
+            for folder in ("s-0123456789abcdef", "s-notes"):
+                os.makedirs(os.path.join(root, folder))
+                paths[folder] = os.path.join(root, folder, "old.txt")
+                with open(paths[folder], "w") as handle:
+                    handle.write("x")
+                os.utime(paths[folder], (old, old))
+            subprocess.run(["sh", "-c", uploads.remote_expire_script(60)],
+                           env={**os.environ, "HOME": home}, check=True)
+            self.assertFalse(os.path.exists(paths["s-0123456789abcdef"]))
+            self.assertTrue(os.path.exists(paths["s-notes"]))
 
 
 if __name__ == "__main__":
