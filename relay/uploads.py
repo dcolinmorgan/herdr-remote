@@ -31,7 +31,7 @@ FILE_MODE = 0o600
 
 
 def valid_upload_id(value):
-    return isinstance(value, str) and UPLOAD_ID_RE.match(value) is not None
+    return isinstance(value, str) and UPLOAD_ID_RE.fullmatch(value) is not None
 
 
 def clean_name(name):
@@ -80,7 +80,7 @@ def place_local(spool_path, root, folder, name):
 
 
 def remote_write_script(folder, name):
-    if not FOLDER_RE.match(folder) or not STORED_NAME_RE.match(name):
+    if not FOLDER_RE.fullmatch(folder) or not STORED_NAME_RE.fullmatch(name):
         raise ValueError("unsafe upload folder or name")
     return (
         f'umask 077; d="{REMOTE_ROOT}/{folder}"; '

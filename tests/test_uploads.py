@@ -62,7 +62,7 @@ class FolderTests(unittest.TestCase):
 
     def test_upload_ids(self):
         self.assertTrue(uploads.valid_upload_id("a1B2-c3_d4"))
-        for bad in ("short", "x" * 65, "../etc/pass", None, 12345678):
+        for bad in ("short", "x" * 65, "../etc/pass", None, 12345678, "abcdefgh\n"):
             self.assertFalse(uploads.valid_upload_id(bad))
 
     def test_stored_name_prefixes_the_token(self):
@@ -114,6 +114,12 @@ class RemoteScriptTests(unittest.TestCase):
             uploads.remote_write_script("../x", "a.png")
         with self.assertRaises(ValueError):
             uploads.remote_write_script("s-0123456789abcdef", "a b;rm.png")
+
+    def test_write_script_refuses_a_trailing_newline(self):
+        with self.assertRaises(ValueError):
+            uploads.remote_write_script("s-0123456789abcdef\n", "a.png")
+        with self.assertRaises(ValueError):
+            uploads.remote_write_script("s-0123456789abcdef", "a.png\n")
 
 
 if __name__ == "__main__":
