@@ -119,16 +119,19 @@ polls, including everything in `HERDR_REMOTES`.
 - Two rules delete uploads:
   1. **The conversation ends.** The relay records each folder it writes in `uploads.json` in
      `HERDR_LOG_DIR`. After a clean `pane list` read of a host, it deletes a recorded folder when the
-     pane is gone, or when the pane now reports a different agent session ref, or none. It deletes
+     pane is gone, or when the pane now reports a different agent session ref, or none. An entry
+     written while the pane had no agent session ref ends only when its pane closes. It deletes
      only folders it recorded, so the uploads of a second relay on the same host are safe. It
      judges an entry only against the herdr session it was written under, so a `session_switch`
      does not delete the other session's uploads. A failed `pane list`, or one that answers with an
      error, deletes nothing for that host, because an empty list reads as "every pane closed".
   2. **The file is older than 72 hours** (`HERDR_UPLOAD_TTL_HOURS`). At start-up and then every
      hour, the relay deletes old files from every folder whose name has the exact `s-` or `p-`
-     plus 16 hex shape, recorded or not, and then every empty folder of that shape. This rule
-     covers the uploads of every relay, because every relay applies the same age limit. Neither
-     rule follows a symlink, and neither rule touches any other name under the root.
+     plus 16 hex shape, recorded or not, and then every empty folder of that shape. Each relay
+     deletes any matching folder's files past its own age limit, so this rule also reaches the
+     uploads of other relays on the host. On a remote host the rule runs only when the last
+     `pane list` read of that host was clean. Neither rule follows a symlink, and neither rule
+     touches any other name under the root.
 - Each finished upload writes an `upload` audit line with the client IP, the device string, the
   pane id, the path and the size.
 - Set `HERDR_UPLOADS=0` to switch the capability off. The relay then sends no `upload_max_bytes`,
