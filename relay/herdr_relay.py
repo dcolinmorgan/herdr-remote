@@ -4,7 +4,7 @@
 # dependencies = ["websockets>=14.0", "zeroconf>=0.80.0", "pywebpush>=2.0.0", "py-vapid>=1.9.0"]
 # ///
 """herdr-remote relay — polls herdr, accepts push events (HTTP POST + WebSocket + UDP), broadcasts to clients."""
-import asyncio, hashlib, json, logging, os, re, shlex, shutil, signal, socket, subprocess, threading, time
+import asyncio, base64, binascii, hashlib, json, logging, os, re, secrets, shlex, shutil, signal, socket, subprocess, tempfile, threading, time
 
 try:
     from websockets.asyncio.server import serve
@@ -39,6 +39,18 @@ except ModuleNotFoundError:
     )
     transcript = module_from_spec(_transcript_spec)
     _transcript_spec.loader.exec_module(transcript)
+
+try:
+    import uploads
+except ModuleNotFoundError:
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    _uploads_spec = spec_from_file_location(
+        "herdr_remote_uploads",
+        os.path.join(os.path.dirname(__file__), "uploads.py"),
+    )
+    uploads = module_from_spec(_uploads_spec)
+    _uploads_spec.loader.exec_module(uploads)
 
 def _get_log_dir():
     if sys.platform == "darwin":
@@ -172,8 +184,30 @@ ACTIVITY_FLUSH_DEBOUNCE = 10.0
 # at through the relay. So are the tab/workspace verbs, which name no pane.
 SEEN_ON = frozenset({
     "read_pane", "get_history", "respond", "send_keys", "send_text", "agent_prompt",
-    "question_toggle", "question_submit",
+    "question_toggle", "question_submit", "upload_start",
 })
+
+# Files a client uploads to an agent's machine (see relay/uploads.py for the naming rules). This is
+# a write power the relay did not have before: a file of the reader's choosing lands on the host,
+# and the pane's agent reads it. It is on by default because the files land outside every project,
+# in a folder the relay deletes when the conversation ends, and HERDR_UPLOADS=0 turns it off.
+UPLOADS_ENABLED = os.environ.get("HERDR_UPLOADS", "").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+UPLOAD_MAX_BYTES = int(os.environ.get("HERDR_UPLOAD_MAX_BYTES", "") or 20 * 1024 * 1024)
+UPLOAD_TTL_HOURS = float(os.environ.get("HERDR_UPLOAD_TTL_HOURS", "") or 72)
+UPLOAD_ROOT = os.path.expanduser("~/.cache/herdr-remote/uploads")
+# Which folders this relay wrote, so the sweep deletes its own and never another relay's.
+UPLOAD_LEDGER_FILE = os.path.join(LOG_DIR, "uploads.json")
+# Chunks collect here before the file is placed. A remote pane needs a local copy anyway -- the SSH
+# call pipes the whole file in one session -- and spooling a local pane too gives both one path.
+UPLOAD_SPOOL_DIR = os.path.join(LOG_DIR, "upload-spool")
+# An upload that sends no chunk for this long is dropped, so a phone that lost its signal mid-file
+# does not leave a spool file behind until the connection itself times out.
+UPLOAD_IDLE_SECONDS = 60
+# One SSH session carries the whole file. 20 MiB over a slow uplink takes far longer than the 15s a
+# herdr call gets, so this has its own ceiling.
+UPLOAD_SSH_TIMEOUT = 120
 
 if RELAY_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_TOKEN:
     raise SystemExit("HERDR_RELAY_TOKEN is required when HERDR_RELAY_HOST binds beyond loopback")
@@ -256,6 +290,18 @@ tab_remote_map = {}
 _remote_locks = {}
 _remote_locks_guard = threading.Lock()
 _session_list_cache = {}  # source -> (monotonic_timestamp, sessions_list)
+# host label -> did the last `pane list` on that host parse. A failed read and a host with no panes
+# both come back from list_panes_from_host as ([], []), and the upload sweep must tell them apart:
+# reading "no panes" off a failed SSH call would delete every folder recorded for that host.
+pane_list_ok = {}
+# Every folder this relay has written an upload into (see uploads.valid_entry for the shape).
+# Appended from a worker thread by store_upload and swept from another by the poll, so every
+# change and every save goes through the lock.
+upload_ledger = uploads.load_ledger(UPLOAD_LEDGER_FILE)
+_upload_ledger_lock = threading.Lock()
+# Idle-timeout drops in flight. The loop keeps only a weak reference to a task, so one that is not
+# held here can be collected before it has deleted its spool.
+_upload_tasks = set()
 
 
 WEB_APP_CSP = (
@@ -900,6 +946,69 @@ def transcript_ssh(remote, script, ssh_args=()):
     return proc.returncode, proc.stdout
 
 
+def upload_ssh(remote, script, stdin_path):
+    """Run an upload script on a remote host with a local file as its stdin. BLOCKING.
+
+    Unlike transcript_ssh this does NOT take _remote_lock. ControlMaster carries this session
+    beside the poll's on the one connection, and a 20 MiB transfer on a slow link held under the
+    lock would stall that host's polls -- and every read a client asks for -- for as long as it
+    runs. The script never calls herdr, so there is nothing for the lock to protect it from.
+    """
+    cmd = ["ssh", *SSH_BASE_ARGS, remote, "sh -c " + shlex.quote(script)]
+    with open(stdin_path, "rb") as source:
+        proc = subprocess.run(cmd, stdin=source, capture_output=True, timeout=UPLOAD_SSH_TIMEOUT)
+    if proc.returncode != 0:
+        log.warning("upload ssh on %s exited %s: %s", remote, proc.returncode,
+                    proc.stderr.decode("utf-8", "replace").strip()[:200])
+    return proc.returncode, proc.stdout
+
+
+def store_upload(spool_path, pane_id, name):
+    """Put a finished spool file where the pane's agent can read it, and record the folder. BLOCKING.
+
+    Returns the absolute path on the agent's machine. The folder follows the pane's agent session
+    rather than its id (see uploads.folder_for), and the ledger entry keeps the herdr session this
+    relay polls for that host, so a sweep after a `session_switch` cannot mistake another session's
+    panes for ended ones. Raises OSError when the remote write fails.
+    """
+    remote = pane_remote_map.get(pane_id)
+    ref = pane_session_map.get(pane_id)
+    folder = uploads.folder_for(pane_id, ref)
+    name = uploads.stored_name(uploads.clean_name(name), secrets.token_hex(4))
+    if remote:
+        code, out = upload_ssh(remote, uploads.remote_write_script(folder, name), spool_path)
+        lines = out.decode("utf-8", "replace").strip().splitlines()
+        if code != 0 or not lines:
+            raise OSError(f"upload to {remote} exited {code}")
+        path = lines[-1]
+        os.remove(spool_path)
+    else:
+        path = uploads.place_local(spool_path, UPLOAD_ROOT, folder, name)
+    entry = {
+        "host": remote or "local",
+        "remote": remote,
+        "session": active_session_for(remote),
+        "pane_id": pane_id,
+        "folder": folder,
+        "ref": uploads.ref_key(ref),
+        "path": path,
+        "at": time.time(),
+    }
+    with _upload_ledger_lock:
+        upload_ledger.append(entry)
+        uploads.save_ledger(UPLOAD_LEDGER_FILE, list(upload_ledger))
+    return path
+
+
+def upload_advert():
+    """The field an `agents` message carries so a client knows it may offer uploads, and how big.
+
+    Absent rather than zero when uploads are off: the web app shows its button on the field's
+    presence, and older clients never look for it at all.
+    """
+    return {"upload_max_bytes": UPLOAD_MAX_BYTES} if UPLOADS_ENABLED else {}
+
+
 def run_herdr_result(*args, remote=None):
     return _invoke_herdr(*args, remote=remote)
 
@@ -1056,7 +1165,9 @@ def list_panes_from_host(remote=None):
         workspace_labels = get_workspace_labels(remote=remote) if panes else {}
         agent_names = get_agent_names(remote=remote) if panes else {}
     except (json.JSONDecodeError, KeyError):
+        pane_list_ok[host_label] = False
         return [], []
+    pane_list_ok[host_label] = True
 
     agents, shells = [], []
     for order, p in enumerate(panes):
@@ -2583,7 +2694,8 @@ async def send_current_snapshot(ws):
     # waiting out the slow cadence would show it agents filed under ids for a few seconds.
     spaces = await asyncio.to_thread(refresh_spaces, force=True)
     await ws.send(json.dumps(
-        {"type": "agents", "agents": agents, "spaces": spaces, "panes": shells}))
+        {"type": "agents", "agents": agents, "spaces": spaces, "panes": shells,
+         **upload_advert()}))
     for agent in agents:
         if agent["status"] != "blocked":
             continue
@@ -2667,7 +2779,8 @@ async def _poll_once():
         # Always broadcast (even empty list) so clients stay in sync
         spaces = await asyncio.to_thread(refresh_spaces)
         await broadcast(
-            {"type": "agents", "agents": agents, "spaces": spaces, "panes": shells})
+            {"type": "agents", "agents": agents, "spaces": spaces, "panes": shells,
+             **upload_advert()})
         if gen != POLL_GENERATION:
             return          # a switch landed; this snapshot is stale
         for a in agents:
@@ -3048,6 +3161,239 @@ async def process_request(connection, request):
     return Response(404, "Not Found", headers, b"not found\n")
 
 
+# --- Uploads: a file from a client, onto the agent's machine ---
+#
+# The client sends `upload_start`, then one `upload_chunk` at a time, each only after the ack for
+# the one before, then `upload_end`. A connection holds at most one upload, kept in a per-connection
+# slot rather than a module-wide table, so no client can name -- or cancel -- another's upload.
+# Every refusal is an `upload_result` with `ok: false` and a short `error` the web app shows as it
+# is, so the text never carries a local path or an exception's own words; those go to the log.
+
+
+def create_upload_spool():
+    """BLOCKING. mkstemp makes the file 0600, so a partial upload is never readable by others."""
+    os.makedirs(UPLOAD_SPOOL_DIR, mode=0o700, exist_ok=True)
+    fd, path = tempfile.mkstemp(dir=UPLOAD_SPOOL_DIR, suffix=".part")
+    os.close(fd)
+    return path
+
+
+def append_upload_spool(path, data):
+    """BLOCKING."""
+    with open(path, "ab") as spool:
+        spool.write(data)
+
+
+def delete_upload_spool(path):
+    """BLOCKING. Already gone is fine: placing a local file consumes its spool."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def decode_upload_chunk(value):
+    """The chunk's bytes, or None. `validate` refuses stray characters rather than skipping them,
+    which would silently shorten the file."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def upload_limit_text():
+    mib = 1024 * 1024
+    if UPLOAD_MAX_BYTES >= mib and UPLOAD_MAX_BYTES % mib == 0:
+        return f"{UPLOAD_MAX_BYTES // mib} MiB"
+    return f"{UPLOAD_MAX_BYTES}-byte"
+
+
+def upload_result(upload_id, ok, **fields):
+    """An `upload_result`. The id is echoed only when it is a string, so a refusal of a malformed
+    one still reaches the client without the relay sending back whatever object it was given."""
+    message = {"type": "upload_result"}
+    if isinstance(upload_id, str):
+        message["upload_id"] = upload_id
+    message["ok"] = ok
+    message.update(fields)
+    return json.dumps(message)
+
+
+def pause_upload_timer(upload):
+    """Stop the idle clock while a message for this upload is being handled.
+
+    Bumping `armed` matters as much as the cancel: a timer that fired an instant ago has already
+    scheduled its drop, and the stale count is what tells that drop to stand down.
+    """
+    upload["armed"] += 1
+    if upload["timer"] is not None:
+        upload["timer"].cancel()
+        upload["timer"] = None
+
+
+def arm_upload_timer(ws, slot, upload):
+    pause_upload_timer(upload)
+    upload["timer"] = asyncio.get_running_loop().call_later(
+        UPLOAD_IDLE_SECONDS, _upload_went_idle, ws, slot, upload, upload["armed"])
+
+
+def _upload_went_idle(ws, slot, upload, armed):
+    """Runs on the loop from call_later, so it only schedules: the drop deletes a file, and that
+    goes through a worker thread like every other blocking call."""
+    task = asyncio.ensure_future(expire_upload(ws, slot, upload, armed))
+    _upload_tasks.add(task)
+    task.add_done_callback(_upload_tasks.discard)
+
+
+async def expire_upload(ws, slot, upload, armed):
+    if slot["upload"] is not upload or upload["armed"] != armed:
+        return
+    log.info("Upload %s timed out after %ss without a chunk", upload["id"], UPLOAD_IDLE_SECONDS)
+    await drop_upload(slot)
+    try:
+        await ws.send(upload_result(upload["id"], False, error="upload timed out"))
+    except (ConnectionClosedError, ConnectionClosedOK):
+        pass
+
+
+async def drop_upload(slot):
+    """Forget the connection's open upload, if any, and delete its spool."""
+    upload = slot["upload"]
+    if upload is None:
+        return
+    slot["upload"] = None
+    pause_upload_timer(upload)
+    await asyncio.to_thread(delete_upload_spool, upload["spool"])
+
+
+async def refuse_upload(ws, slot, upload_id, error):
+    """Refuse one upload message. The refusal ends the upload it names and only that one: a stray
+    message for another id must not cost the reader the file that is still on its way."""
+    upload = slot["upload"]
+    if upload is not None and upload["id"] == upload_id:
+        await drop_upload(slot)
+    await ws.send(upload_result(upload_id, False, error=error))
+
+
+def upload_start_error(slot, msg):
+    """Why this `upload_start` cannot begin, or None."""
+    pane_id, size = msg.get("pane_id"), msg.get("size")
+    if not UPLOADS_ENABLED:
+        return "uploads are turned off on this relay"
+    if not uploads.valid_upload_id(msg.get("upload_id")):
+        return "invalid upload_id"
+    if slot["upload"] is not None:
+        return "another upload is in progress"
+    if not isinstance(pane_id, str) or pane_id not in known_panes:
+        return f"unknown pane {pane_id}"
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        return "invalid size"
+    if size > UPLOAD_MAX_BYTES:
+        return f"file is over the {upload_limit_text()} limit"
+    return None
+
+
+async def start_upload(ws, slot, msg):
+    upload_id = msg.get("upload_id")
+    error = upload_start_error(slot, msg)
+    if error:
+        await refuse_upload(ws, slot, upload_id, error)
+        return
+    try:
+        spool = await asyncio.to_thread(create_upload_spool)
+    except OSError as exc:
+        log.warning("Upload %s: could not create a spool file: %s", upload_id, exc)
+        await refuse_upload(ws, slot, upload_id, "could not start the upload")
+        return
+    upload = {
+        "id": upload_id, "pane_id": msg["pane_id"], "name": msg.get("name"),
+        "size": msg["size"], "received": 0, "seq": 0, "spool": spool,
+        "timer": None, "armed": 0,
+    }
+    slot["upload"] = upload
+    arm_upload_timer(ws, slot, upload)
+    await ws.send(json.dumps({"type": "upload_ack", "upload_id": upload_id, "received": 0}))
+
+
+def upload_chunk_error(upload, msg, data):
+    """Why this chunk cannot be appended, or None."""
+    seq = msg.get("seq")
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq != upload["seq"]:
+        return "chunk out of order"
+    if data is None:
+        return "invalid chunk data"
+    if len(data) > uploads.CHUNK_BYTES:
+        return "chunk too large"
+    if upload["received"] + len(data) > upload["size"]:
+        return "more bytes than declared"
+    return None
+
+
+async def append_upload_chunk(ws, slot, msg):
+    upload_id = msg.get("upload_id")
+    upload = slot["upload"]
+    if upload is None or upload["id"] != upload_id:
+        await refuse_upload(ws, slot, upload_id, "no such upload")
+        return
+    pause_upload_timer(upload)
+    data = decode_upload_chunk(msg.get("data"))
+    error = upload_chunk_error(upload, msg, data)
+    if error:
+        await refuse_upload(ws, slot, upload_id, error)
+        return
+    try:
+        await asyncio.to_thread(append_upload_spool, upload["spool"], data)
+    except OSError as exc:
+        log.warning("Upload %s: could not write to the spool: %s", upload_id, exc)
+        await refuse_upload(ws, slot, upload_id, "could not write the upload")
+        return
+    upload["received"] += len(data)
+    upload["seq"] += 1
+    arm_upload_timer(ws, slot, upload)
+    await ws.send(json.dumps(
+        {"type": "upload_ack", "upload_id": upload_id, "received": upload["received"]}))
+
+
+async def finish_upload(ws, slot, msg, ip, device):
+    upload_id = msg.get("upload_id")
+    upload = slot["upload"]
+    if upload is None or upload["id"] != upload_id:
+        await refuse_upload(ws, slot, upload_id, "no such upload")
+        return
+    pause_upload_timer(upload)
+    pane_id = upload["pane_id"]
+    if upload["received"] != upload["size"]:
+        await refuse_upload(ws, slot, upload_id, "upload incomplete")
+        return
+    # Checked again because the pane may have closed while the chunks were arriving, and a file
+    # placed for a pane that is gone would sit in a folder no sweep ties to a live session.
+    if pane_id not in known_panes:
+        await refuse_upload(ws, slot, upload_id, f"pane {pane_id} is gone")
+        return
+    try:
+        path = await asyncio.to_thread(store_upload, upload["spool"], pane_id, upload["name"])
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        log.warning("Upload %s for pane %s failed: %s", upload_id, pane_id, exc)
+        await refuse_upload(ws, slot, upload_id, "could not store the file")
+        return
+    slot["upload"] = None
+    clean = uploads.clean_name(upload["name"])
+    log.info("Upload from %s (%s): pane=%s name=%r size=%d path=%r",
+             ip, device, pane_id, clean, upload["size"], path)
+    audit("upload", ip, device, pane_id, f"name={clean!r} size={upload['size']} path={path!r}")
+    await ws.send(upload_result(upload_id, True, path=path))
+
+
+async def cancel_upload(slot, msg):
+    """No reply: the client has already given up on this file, and an unknown id is one it gave
+    up on before the relay heard of it."""
+    upload = slot["upload"]
+    if upload is not None and upload["id"] == msg.get("upload_id"):
+        await drop_upload(slot)
+
+
 async def handle_client(ws):
     remote_addr = ws.remote_address
     ip = remote_addr[0] if remote_addr else "unknown"
@@ -3079,6 +3425,7 @@ async def handle_client(ws):
     log.info("Client connected: ip=%s device=%s origin=%s", ip, device, origin or "-")
     clients.add(ws)
     connected_at = time.monotonic()
+    upload_slot = {"upload": None}
     try:
         if not command_connection:
             await send_current_snapshot(ws)
@@ -3634,6 +3981,14 @@ async def handle_client(ws):
                     _mutate_herdr, *args, remote=remote
                 )
                 await ws.send(json.dumps({"type": "command_result", "command": "rename_agent", "ok": renamed}))
+            elif msg_type == "upload_start":
+                await start_upload(ws, upload_slot, msg)
+            elif msg_type == "upload_chunk":
+                await append_upload_chunk(ws, upload_slot, msg)
+            elif msg_type == "upload_end":
+                await finish_upload(ws, upload_slot, msg, ip, device)
+            elif msg_type == "upload_cancel":
+                await cancel_upload(upload_slot, msg)
             elif msg_type == "push_subscribe":
                 sub = msg.get("subscription")
                 if sub and sub not in push_subscriptions:
@@ -3653,6 +4008,8 @@ async def handle_client(ws):
         duration = int(time.monotonic() - connected_at)
         log.info("Client disconnected: ip=%s device=%s duration=%ds", ip, device, duration)
         clients.discard(ws)
+        # A closed connection can never finish its upload, so the partial file goes with it.
+        await drop_upload(upload_slot)
 
 
 class UDPPlugin(asyncio.DatagramProtocol):

@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import base64
 import importlib.util
 import json
 import logging
@@ -2444,6 +2445,8 @@ class RelaySubprocessConcurrencyTests(unittest.TestCase):
         self.assertIn("run_herdr", blocking)
         self.assertIn("read_pane", blocking)
         self.assertIn("get_all_agents", blocking)
+        self.assertIn("store_upload", blocking)
+        self.assertIn("upload_ssh", blocking)
 
         offenders = [
             f"{RELAY_PATH.name}:{line} {call}() inside async def {holder}()"
@@ -2466,6 +2469,287 @@ def _dotted(node):
     return None
 
 
+
+
+UPLOAD_CHUNK = 256 * 1024
+
+
+def upload_messages(upload_id, data, name="shot.png", pane_id="w1:p1", size=None):
+    msgs = [{"type": "upload_start", "pane_id": pane_id, "upload_id": upload_id,
+             "name": name, "size": len(data) if size is None else size}]
+    for seq, start in enumerate(range(0, len(data), UPLOAD_CHUNK)):
+        msgs.append({"type": "upload_chunk", "upload_id": upload_id, "seq": seq,
+                     "data": base64.b64encode(data[start:start + UPLOAD_CHUNK]).decode()})
+    msgs.append({"type": "upload_end", "upload_id": upload_id})
+    return [json.dumps(m) for m in msgs]
+
+
+class _LingeringWebSocket(_FakeWebSocket):
+    """Holds the connection open for `linger` seconds after its last message, so a timer can fire."""
+
+    def __init__(self, messages, linger):
+        super().__init__(messages)
+        self._linger = linger
+
+    async def __anext__(self):
+        try:
+            return next(self._messages)
+        except StopIteration:
+            await asyncio.sleep(self._linger)
+            raise StopAsyncIteration
+
+
+class RelayUploadTests(unittest.TestCase):
+    """The six upload messages, driven through handle_client the way a web client sends them."""
+
+    PANE = "w1:p1"
+    UPLOAD_ID = "upload-0001"
+
+    def run_client(self, relay, messages, ws=None):
+        ws = ws or _FakeWebSocket(messages)
+        with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()):
+            asyncio.run(relay.handle_client(ws))
+        return [json.loads(m) for m in ws.sent]
+
+    @contextmanager
+    def relay_with_root(self):
+        with loaded_relay() as relay, tempfile.TemporaryDirectory() as root:
+            relay.UPLOAD_ROOT = root
+            relay.known_panes.add(self.PANE)
+            yield relay
+
+    @staticmethod
+    def results(sent):
+        return [m for m in sent if m.get("type") == "upload_result"]
+
+    def spool_files(self, relay):
+        if not os.path.isdir(relay.UPLOAD_SPOOL_DIR):
+            return []
+        return os.listdir(relay.UPLOAD_SPOOL_DIR)
+
+    def test_a_small_file_lands_and_the_result_names_its_path(self):
+        data = b"\x89PNG small file"
+        with self.relay_with_root() as relay:
+            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, data))
+
+            acks = [m for m in sent if m.get("type") == "upload_ack"]
+            self.assertEqual([a["received"] for a in acks], [0, len(data)])
+            self.assertTrue(all(a["upload_id"] == self.UPLOAD_ID for a in acks))
+            (result,) = self.results(sent)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["upload_id"], self.UPLOAD_ID)
+            path = result["path"]
+            self.assertEqual(Path(path).read_bytes(), data)
+            self.assertTrue(os.path.realpath(path).startswith(os.path.realpath(relay.UPLOAD_ROOT) + os.sep))
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertTrue(path.endswith("-shot.png"))
+
+    def test_a_file_over_two_chunks_is_reassembled_in_order(self):
+        data = os.urandom(300 * 1024)
+        with self.relay_with_root() as relay:
+            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, data))
+
+            acks = [m["received"] for m in sent if m.get("type") == "upload_ack"]
+            self.assertEqual(acks, [0, UPLOAD_CHUNK, len(data)])
+            (result,) = self.results(sent)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(Path(result["path"]).read_bytes(), data)
+
+    def test_an_empty_file_lands(self):
+        with self.relay_with_root() as relay:
+            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, b""))
+
+            (result,) = self.results(sent)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(Path(result["path"]).read_bytes(), b"")
+
+    def test_a_file_of_exactly_the_limit_lands_and_one_byte_more_is_refused(self):
+        with self.relay_with_root() as relay:
+            relay.UPLOAD_MAX_BYTES = 1000
+            exact = self.results(self.run_client(relay, upload_messages(self.UPLOAD_ID, b"x" * 1000)))
+            over = self.results(self.run_client(relay, upload_messages("upload-0002", b"x" * 1001)))
+
+            self.assertTrue(exact[0]["ok"], exact)
+            # Refused at upload_start. The chunks a careless client sends after it are refused
+            # too, as belonging to no upload, and nothing lands.
+            self.assertEqual(over[0], {"type": "upload_result", "upload_id": "upload-0002",
+                                       "ok": False, "error": "file is over the 1000-byte limit"})
+            self.assertFalse(any(r["ok"] for r in over))
+
+    def test_more_bytes_than_declared_is_refused(self):
+        with self.relay_with_root() as relay:
+            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, b"x" * 20, size=10))
+
+            results = self.results(sent)
+            self.assertFalse(results[0]["ok"], results)
+            self.assertEqual(self.spool_files(relay), [])
+            self.assertEqual(list(Path(relay.UPLOAD_ROOT).rglob("*")), [])
+
+    def test_an_unknown_pane_is_refused(self):
+        with self.relay_with_root() as relay, mock.patch.object(relay, "audit") as audit:
+            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, b"data", pane_id="w9:p9"))
+
+            results = self.results(sent)
+            self.assertFalse(results[0]["ok"])
+            self.assertIn("w9:p9", results[0]["error"])
+            audit.assert_not_called()
+
+    def test_a_chunk_out_of_order_is_refused(self):
+        with self.relay_with_root() as relay:
+            messages = [
+                json.dumps({"type": "upload_start", "pane_id": self.PANE,
+                            "upload_id": self.UPLOAD_ID, "name": "a.txt", "size": 4}),
+                json.dumps({"type": "upload_chunk", "upload_id": self.UPLOAD_ID, "seq": 1,
+                            "data": base64.b64encode(b"data").decode()}),
+            ]
+            sent = self.run_client(relay, messages)
+
+            (result,) = self.results(sent)
+            self.assertFalse(result["ok"])
+            self.assertEqual(self.spool_files(relay), [])
+
+    def test_a_second_upload_while_one_runs_is_refused(self):
+        with self.relay_with_root() as relay:
+            first = upload_messages(self.UPLOAD_ID, b"first")
+            second_start = upload_messages("upload-0002", b"second")[0]
+            sent = self.run_client(relay, [first[0], second_start, *first[1:]])
+
+            results = self.results(sent)
+            self.assertEqual([(r["upload_id"], r["ok"]) for r in results],
+                             [("upload-0002", False), (self.UPLOAD_ID, True)])
+            self.assertEqual(Path(results[1]["path"]).read_bytes(), b"first")
+
+    def test_uploads_off_refuses_and_advertises_nothing(self):
+        with self.relay_with_root() as relay:
+            relay.UPLOADS_ENABLED = False
+            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, b"data"))
+
+            self.assertFalse(self.results(sent)[0]["ok"])
+            self.assertEqual(relay.upload_advert(), {})
+            self.assertEqual(list(Path(relay.UPLOAD_ROOT).rglob("*")), [])
+
+    def test_a_closed_connection_deletes_its_spool(self):
+        with self.relay_with_root() as relay:
+            messages = upload_messages(self.UPLOAD_ID, os.urandom(300 * 1024))[:2]
+            sent = self.run_client(relay, messages)
+
+            self.assertEqual(self.results(sent), [])
+            self.assertEqual(self.spool_files(relay), [])
+
+    def test_cancel_deletes_the_spool(self):
+        with self.relay_with_root() as relay:
+            messages = upload_messages(self.UPLOAD_ID, os.urandom(300 * 1024))[:2]
+            messages.append(json.dumps({"type": "upload_cancel", "upload_id": self.UPLOAD_ID}))
+            ws = _LingeringWebSocket(messages, linger=0.05)
+            spool_during = []
+
+            async def watch():
+                await asyncio.sleep(0.03)
+                spool_during.extend(self.spool_files(relay))
+
+            async def drive():
+                with mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()):
+                    await asyncio.gather(relay.handle_client(ws), watch())
+
+            asyncio.run(drive())
+            self.assertEqual(spool_during, [])
+            self.assertEqual(self.results([json.loads(m) for m in ws.sent]), [])
+
+    def test_an_idle_upload_times_out_and_its_spool_goes(self):
+        with self.relay_with_root() as relay:
+            relay.UPLOAD_IDLE_SECONDS = 0.05
+            messages = upload_messages(self.UPLOAD_ID, b"data")[:1]
+            ws = _LingeringWebSocket(messages, linger=0.3)
+            sent = self.run_client(relay, messages, ws=ws)
+
+            (result,) = self.results(sent)
+            self.assertEqual(result, {"type": "upload_result", "upload_id": self.UPLOAD_ID,
+                                      "ok": False, "error": "upload timed out"})
+            self.assertEqual(self.spool_files(relay), [])
+
+    def test_a_remote_pane_pipes_the_bytes_over_ssh(self):
+        data = os.urandom(1000)
+        printed = "/home/u/.cache/herdr-remote/uploads/p-0123456789abcdef/x-shot.png"
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["stdin"] = kwargs["stdin"].read()
+            return subprocess.CompletedProcess(cmd, 0, stdout=(printed + "\n").encode(), stderr=b"")
+
+        with self.relay_with_root() as relay:
+            relay.pane_remote_map[self.PANE] = "user@box"
+            with mock.patch.object(relay.subprocess, "run", side_effect=fake_run):
+                sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, data))
+
+            (result,) = self.results(sent)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["path"], printed)
+            cmd = captured["cmd"]
+            self.assertEqual(cmd[:-1], ["ssh", *relay.SSH_BASE_ARGS, "user@box"])
+            self.assertTrue(cmd[-1].startswith("sh -c '"), cmd[-1])
+            self.assertTrue(cmd[-1].endswith("'"), cmd[-1])
+            self.assertEqual(captured["stdin"], data)
+            self.assertEqual(self.spool_files(relay), [])
+            self.assertEqual(list(Path(relay.UPLOAD_ROOT).rglob("*")), [])
+            self.assertEqual(relay.upload_ledger[0]["host"], "user@box")
+            self.assertEqual(relay.upload_ledger[0]["remote"], "user@box")
+
+    def test_a_failed_remote_write_is_refused_without_leaking_detail(self):
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"mkdir: /secret: denied")
+
+        with self.relay_with_root() as relay:
+            relay.pane_remote_map[self.PANE] = "user@box"
+            with mock.patch.object(relay.subprocess, "run", side_effect=fake_run):
+                sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, b"data"))
+
+            (result,) = self.results(sent)
+            self.assertFalse(result["ok"])
+            self.assertNotIn("secret", result["error"])
+            self.assertEqual(self.spool_files(relay), [])
+            self.assertEqual(relay.upload_ledger, [])
+
+    def test_a_finished_upload_is_audited_and_recorded(self):
+        with self.relay_with_root() as relay, mock.patch.object(relay, "audit") as audit:
+            relay.pane_session_map[self.PANE] = {"kind": "id", "value": "abc", "agent": "claude"}
+            sent = self.run_client(relay, upload_messages(self.UPLOAD_ID, b"data"))
+
+            (result,) = self.results(sent)
+            audit.assert_called_once()
+            args = audit.call_args.args
+            self.assertEqual(args[0], "upload")
+            self.assertEqual(args[3], self.PANE)
+            self.assertIn(result["path"], args[4])
+            (entry,) = relay.upload_ledger
+            self.assertEqual(entry["host"], "local")
+            self.assertIsNone(entry["remote"])
+            self.assertEqual(entry["pane_id"], self.PANE)
+            self.assertEqual(entry["ref"], "id:abc")
+            self.assertEqual(entry["path"], result["path"])
+            self.assertTrue(relay.uploads.valid_entry(entry))
+            self.assertEqual(relay.uploads.load_ledger(relay.UPLOAD_LEDGER_FILE), [entry])
+
+    def test_the_snapshot_advertises_the_limit(self):
+        with loaded_relay() as relay:
+            ws = _FakeWebSocket([])
+            with mock.patch.object(relay, "sessions_message", return_value={"type": "sessions"}), \
+                 mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+                 mock.patch.object(relay, "refresh_spaces", return_value={"workspaces": [], "tabs": []}):
+                asyncio.run(relay.send_current_snapshot(ws))
+
+            (agents,) = [json.loads(m) for m in ws.sent if json.loads(m).get("type") == "agents"]
+            self.assertEqual(agents["upload_max_bytes"], relay.UPLOAD_MAX_BYTES)
+
+    def test_a_failed_pane_list_marks_the_host_not_ok(self):
+        with loaded_relay() as relay:
+            with mock.patch.object(relay, "run_herdr", return_value=""):
+                relay.list_panes_from_host()
+            self.assertIs(relay.pane_list_ok["local"], False)
+            empty = json.dumps({"result": {"panes": []}})
+            with mock.patch.object(relay, "run_herdr", return_value=empty):
+                relay.list_panes_from_host()
+            self.assertIs(relay.pane_list_ok["local"], True)
 
 
 class RelayPaneReadSourceTests(unittest.TestCase):
