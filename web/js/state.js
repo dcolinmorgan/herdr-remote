@@ -292,6 +292,8 @@ function connect() {
   if (!url) { showSetup(); return; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (ws) {
+    // The old socket's onclose is detached below and never runs, so an upload on it ends here.
+    cancelUploads('Connection lost. The upload stopped.');
     ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
     ws.close();
   }
@@ -305,7 +307,8 @@ function connect() {
   sock.onopen = () => { if (ws !== sock) return; setStatus('connected'); if(window.cue) cue('ready');
     // Push: the relay's copy of this device's subscription can be stale (see push.js).
     if (typeof resyncPushSubscription === 'function') resyncPushSubscription(); };
-  sock.onclose = () => { if (ws !== sock) return; setStatus('disconnected'); scheduleReconnect(); };
+  sock.onclose = () => { if (ws !== sock) return; setStatus('disconnected');
+    cancelUploads('Connection lost. The upload stopped.'); scheduleReconnect(); };
   sock.onerror = () => { if (ws !== sock) return; setStatus('disconnected'); };
   sock.onmessage = (e) => { if (ws !== sock) return; handleMessage(JSON.parse(e.data)); };
 }

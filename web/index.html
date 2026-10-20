@@ -138,6 +138,10 @@ document.addEventListener('DOMContentLoaded', () => bind());
   <div class="qa-hint qa-error send-error" id="sendError" role="alert" hidden></div>
   <div class="term-input">
     <button class="term-cmd" onclick="openCommandPalette()" aria-label="Commands">/</button>
+    <!-- Shown only when the relay advertises upload_max_bytes (upload.js). No `accept`: every
+         type is allowed, and Android then offers photos, camera and files in one picker. -->
+    <button class="term-attach" id="attachBtn" hidden onclick="pickFiles()" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+    <input type="file" id="attachInput" multiple hidden onchange="queueUploads(this.files); this.value=''" />
     <!-- type/name plus the managers' own opt-outs: the page also holds a password field (the
          relay token), and password managers ignore autocomplete="off" and offer to fill this. -->
     <input id="termInput" type="text" name="message" placeholder="Type…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" />
@@ -219,6 +223,7 @@ document.addEventListener('DOMContentLoaded', () => bind());
 <script src="js/spaces.js"></script>
 <script src="js/cards.js"></script>
 <script src="js/mirror.js"></script>
+<script src="js/upload.js"></script>
 <script src="js/nav.js"></script>
 <script src="js/palette.js"></script>
 <script src="js/push.js"></script>

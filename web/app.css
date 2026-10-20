@@ -422,6 +422,14 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
 .dock-toggle.dock-quick { color: var(--orange); }
 .dock-toggle.dock-keys { color: var(--muted); }
 .dock-toggle[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+/* The same box as the dock toggles, so the row keeps its height. `[hidden]` has to be restated:
+   `display: flex` here outranks the attribute's own `display: none`. Busy pulses rather than
+   fills -- a fill is "pressed" in this row, and the attach button is not a toggle. */
+.term-attach { padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--muted); cursor: pointer; flex-shrink: 0; display: flex; align-items: center; }
+.term-attach[hidden] { display: none; }
+.term-attach[aria-busy="true"] { color: var(--blue); border-color: var(--blue); animation: attach-busy 1.2s ease-in-out infinite; }
+@keyframes attach-busy { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .term-attach[aria-busy="true"] { animation: none; } }
 .term-keys { border-top: 1px solid var(--border); padding: 5px 10px; display: flex; flex-direction: column; background: var(--surface); flex-shrink: 0; }
 .nav-key { padding: 10px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s; }
 .nav-key:active { background: var(--border); transform: scale(0.97); }

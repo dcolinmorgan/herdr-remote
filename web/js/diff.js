@@ -25,6 +25,7 @@ function diffFragment(diff) {
 }
 
 function handleMessage(msg) {
+  if (handleUploadMessage(msg)) return;
   if (msg.type === 'sessions') {
     sessionState = msg;
     renderSessionSelector();
@@ -54,6 +55,9 @@ function handleMessage(msg) {
     switchingSession = false;
     if (msg.spaces) spaces = msg.spaces;
     if (Array.isArray(msg.panes)) shellPanes = msg.panes;
+    // Absent from an older relay and demo-worker, which is what keeps the attach button hidden.
+    uploadMaxBytes = Number(msg.upload_max_bytes) > 0 ? Number(msg.upload_max_bytes) : 0;
+    updateAttachButton();
     // Track timeline on status changes
     for (const a of msg.agents) {
       const prev = prevStatuses[a.pane_id];
