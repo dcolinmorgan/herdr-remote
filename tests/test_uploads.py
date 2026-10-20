@@ -55,6 +55,12 @@ class FolderTests(unittest.TestCase):
         b = {"kind": "id", "value": "x"}
         self.assertEqual(uploads.folder_for("w1:p1", a), uploads.folder_for("w1:p1", b))
 
+    def test_a_ref_key_gives_the_same_folder_as_its_ref(self):
+        ref = {"kind": "id", "value": "x", "agent": "claude"}
+        self.assertEqual(uploads.folder_for_key("w1:p1", uploads.ref_key(ref)),
+                         uploads.folder_for("w1:p1", ref))
+        self.assertEqual(uploads.folder_for_key("w1:p1", None), uploads.folder_for("w1:p1", None))
+
     def test_ref_key_joins_kind_and_value(self):
         self.assertEqual(uploads.ref_key({"kind": "id", "value": "x"}), "id:x")
 

@@ -2447,6 +2447,8 @@ class RelaySubprocessConcurrencyTests(unittest.TestCase):
         self.assertIn("get_all_agents", blocking)
         self.assertIn("store_upload", blocking)
         self.assertIn("upload_ssh", blocking)
+        self.assertIn("sweep_ended_uploads", blocking)
+        self.assertIn("expire_uploads", blocking)
 
         offenders = [
             f"{RELAY_PATH.name}:{line} {call}() inside async def {holder}()"
@@ -2712,7 +2714,7 @@ class RelayUploadTests(unittest.TestCase):
 
     def test_a_finished_upload_is_audited_and_recorded(self):
         with self.relay_with_root() as relay, mock.patch.object(relay, "audit") as audit:
-            relay.pane_session_map[self.PANE] = {"kind": "id", "value": "abc", "agent": "claude"}
+            relay.pane_refs_by_host["local"] = {self.PANE: "id:abc"}
             sent = self.run_client(relay, upload_messages(
                 self.UPLOAD_ID, b"data", name="Screenshot_20261020-101500.png"))
 
@@ -2762,6 +2764,288 @@ class RelayUploadTests(unittest.TestCase):
             with mock.patch.object(relay, "run_herdr", return_value=error):
                 self.assertEqual(relay.list_panes_from_host(), ([], []))
             self.assertIs(relay.pane_list_ok["local"], False)
+
+
+class RelayUploadSweepTests(unittest.TestCase):
+    """Rule 1 (the conversation ended) and rule 2 (the TTL) of the upload sweep, driven by hand.
+
+    Each test seeds the ledger and real folders under a temp UPLOAD_ROOT, then sets what a poll
+    would have recorded -- pane_list_ok and pane_refs_by_host -- before calling the sweep.
+    """
+
+    PANE = "w1:p1"
+    REF = "id:abc"
+
+    @contextmanager
+    def relay_with_root(self):
+        with loaded_relay() as relay, tempfile.TemporaryDirectory() as root:
+            relay.UPLOAD_ROOT = root
+            yield relay
+
+    def seed(self, relay, pane_id=PANE, ref=REF, host="local", session=None, at=None):
+        """One ledger entry, and its folder on disk when the host is local."""
+        folder = relay.uploads.folder_for_key(pane_id, ref)
+        remote = None if host == "local" else host
+        if remote is None:
+            os.makedirs(os.path.join(relay.UPLOAD_ROOT, folder), exist_ok=True)
+            Path(relay.UPLOAD_ROOT, folder, "a1b2c3d4-shot.png").write_bytes(b"x")
+        entry = {"host": host, "remote": remote, "session": session, "pane_id": pane_id,
+                 "folder": folder, "ref": ref, "path": f"/x/{folder}/a1b2c3d4-shot.png",
+                 "at": time.time() if at is None else at}
+        relay.upload_ledger.append(entry)
+        return entry
+
+    @staticmethod
+    def poll_saw(relay, host, live, ok=True):
+        relay.pane_list_ok[host] = ok
+        relay.pane_refs_by_host[host] = dict(live)
+
+    def folder_exists(self, relay, entry):
+        return os.path.isdir(os.path.join(relay.UPLOAD_ROOT, entry["folder"]))
+
+    def test_a_closed_pane_loses_its_folder(self):
+        with self.relay_with_root() as relay:
+            entry = self.seed(relay)
+            self.poll_saw(relay, "local", {})
+            relay.sweep_ended_uploads()
+            self.assertFalse(self.folder_exists(relay, entry))
+            self.assertEqual(relay.upload_ledger, [])
+            self.assertEqual(relay.uploads.load_ledger(relay.UPLOAD_LEDGER_FILE), [])
+
+    def test_a_live_conversation_keeps_its_folder(self):
+        with self.relay_with_root() as relay:
+            entry = self.seed(relay)
+            self.poll_saw(relay, "local", {self.PANE: self.REF})
+            relay.sweep_ended_uploads()
+            self.assertTrue(self.folder_exists(relay, entry))
+            self.assertEqual(relay.upload_ledger, [entry])
+
+    def test_a_new_conversation_in_the_same_pane_ends_the_old_one(self):
+        with self.relay_with_root() as relay:
+            entry = self.seed(relay)
+            self.poll_saw(relay, "local", {self.PANE: "id:other"})
+            relay.sweep_ended_uploads()
+            self.assertFalse(self.folder_exists(relay, entry))
+
+    def test_a_failed_pane_list_deletes_nothing(self):
+        with self.relay_with_root() as relay:
+            entry = self.seed(relay)
+            self.poll_saw(relay, "local", {}, ok=False)
+            relay.sweep_ended_uploads(force=True)
+            self.assertTrue(self.folder_exists(relay, entry))
+            self.assertEqual(relay.upload_ledger, [entry])
+
+    def test_an_unrecorded_folder_survives(self):
+        with self.relay_with_root() as relay:
+            stray = os.path.join(relay.UPLOAD_ROOT, "s-" + "0" * 16)
+            os.makedirs(stray)
+            self.poll_saw(relay, "local", {})
+            relay.sweep_ended_uploads(force=True)
+            self.assertTrue(os.path.isdir(stray))
+
+    def test_an_entry_from_another_herdr_session_survives(self):
+        with self.relay_with_root() as relay:
+            relay.ACTIVE_SESSIONS[None] = "personal"
+            self.assertEqual(relay.active_session_for(None), "personal")
+            entry = self.seed(relay, session="work")
+            self.poll_saw(relay, "local", {})
+            relay.sweep_ended_uploads(force=True)
+            self.assertTrue(self.folder_exists(relay, entry))
+            self.assertEqual(relay.upload_ledger, [entry])
+
+    def test_a_folder_another_live_entry_uses_is_kept(self):
+        # Two herdr sessions can both hold a pane w1:p1 with no ref, and folder_for names both
+        # folders after the pane id alone, so they are one folder on disk.
+        with self.relay_with_root() as relay:
+            relay.ACTIVE_SESSIONS[None] = "personal"
+            ended = self.seed(relay, ref=None, session="personal")
+            other = self.seed(relay, ref=None, session="work")
+            self.assertEqual(ended["folder"], other["folder"])
+            self.poll_saw(relay, "local", {})
+            relay.sweep_ended_uploads()
+            self.assertTrue(self.folder_exists(relay, other))
+            self.assertEqual(relay.upload_ledger, [other])
+
+    def test_nothing_runs_again_until_the_panes_change(self):
+        with self.relay_with_root() as relay:
+            self.seed(relay, pane_id="w1:p9")
+            self.poll_saw(relay, "local", {self.PANE: self.REF})
+            calls = []
+            with mock.patch.object(relay.uploads, "delete_local_folders",
+                                   side_effect=lambda root, folders: calls.append(folders)):
+                relay.sweep_ended_uploads()
+                self.seed(relay, pane_id="w1:p8", ref="id:p8")
+                relay.sweep_ended_uploads()
+                self.assertEqual(len(calls), 1)
+                # The hourly force is what catches an entry the unchanged live set never revisits.
+                relay.sweep_ended_uploads(force=True)
+                self.assertEqual(len(calls), 2)
+
+    def test_panes_closed_while_the_relay_was_down_are_swept_on_the_first_good_poll(self):
+        with self.relay_with_root() as relay:
+            entry = self.seed(relay)
+            relay.uploads.save_ledger(relay.UPLOAD_LEDGER_FILE, list(relay.upload_ledger))
+            relay.upload_ledger[:] = relay.uploads.load_ledger(relay.UPLOAD_LEDGER_FILE)
+            self.assertEqual(relay.upload_ledger, [entry])
+            self.poll_saw(relay, "local", {})
+            relay.sweep_ended_uploads()
+            self.assertFalse(self.folder_exists(relay, entry))
+            self.assertEqual(relay.upload_ledger, [])
+
+    def test_a_remote_host_deletes_over_ssh(self):
+        with self.relay_with_root() as relay:
+            entry = self.seed(relay, host="user@box")
+            self.poll_saw(relay, "user@box", {})
+            with mock.patch.object(relay, "upload_ssh", return_value=(0, b"")) as ssh:
+                relay.sweep_ended_uploads()
+            ssh.assert_called_once()
+            remote, script = ssh.call_args.args[:2]
+            self.assertEqual(remote, "user@box")
+            self.assertIn(entry["folder"], script)
+            self.assertIn("rm -rf", script)
+            self.assertEqual(relay.upload_ledger, [])
+
+    def test_a_failed_remote_delete_keeps_the_entries_for_the_next_run(self):
+        with self.relay_with_root() as relay:
+            entry = self.seed(relay, host="user@box")
+            self.poll_saw(relay, "user@box", {})
+            for outcome in ({"return_value": (255, b"")}, {"side_effect": OSError("no ssh")},
+                            {"side_effect": subprocess.TimeoutExpired("ssh", 1)}):
+                with mock.patch.object(relay, "upload_ssh", **outcome):
+                    relay.sweep_ended_uploads(force=True)
+                self.assertEqual(relay.upload_ledger, [entry])
+            with mock.patch.object(relay, "upload_ssh", return_value=(0, b"")):
+                relay.sweep_ended_uploads(force=True)
+            self.assertEqual(relay.upload_ledger, [])
+
+    def test_a_pane_id_on_two_hosts_is_judged_per_host(self):
+        # Every herdr numbers its own panes, so w1:p1 exists on both. Here it is still running on
+        # this host and has closed on the remote one: only the remote entry may end.
+        with self.relay_with_root() as relay:
+            local = self.seed(relay, host="local")
+            remote = self.seed(relay, host="user@box")
+            self.poll_saw(relay, "local", {self.PANE: self.REF})
+            self.poll_saw(relay, "user@box", {})
+            with mock.patch.object(relay, "upload_ssh", return_value=(0, b"")) as ssh:
+                relay.sweep_ended_uploads()
+            ssh.assert_called_once()
+            self.assertEqual(ssh.call_args.args[0], "user@box")
+            self.assertTrue(self.folder_exists(relay, local))
+            self.assertEqual(relay.upload_ledger, [local])
+            self.assertNotIn(remote, relay.upload_ledger)
+
+    def test_a_good_pane_list_records_every_pane_and_its_ref_per_host(self):
+        listing = json.dumps({"result": {"panes": [
+            {"pane_id": "w1:p1", "agent": "claude", "agent_status": "idle",
+             "agent_session": {"kind": "id", "value": "abc", "agent": "claude"}},
+            {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
+            {"pane_id": "w1:p3"},
+        ]}})
+        with loaded_relay() as relay, \
+             mock.patch.object(relay, "get_workspace_labels", return_value={}), \
+             mock.patch.object(relay, "get_agent_names", return_value={}):
+            with mock.patch.object(relay, "run_herdr", return_value=listing):
+                relay.list_panes_from_host(remote="user@box")
+            expected = {"w1:p1": "id:abc", "w1:p2": None, "w1:p3": None}
+            self.assertEqual(relay.live_upload_refs("user@box"), expected)
+            self.assertEqual(relay.live_upload_refs("local"), {})
+            with mock.patch.object(relay, "run_herdr", return_value=""):
+                relay.list_panes_from_host(remote="user@box")
+            self.assertEqual(relay.live_upload_refs("user@box"), expected)
+
+    def test_store_upload_names_the_folder_from_the_per_host_ref(self):
+        with self.relay_with_root() as relay:
+            relay.pane_refs_by_host["local"] = {self.PANE: self.REF}
+            spool = os.path.join(relay.UPLOAD_ROOT, "spool.part")
+            Path(spool).write_bytes(b"x")
+            relay.store_upload(spool, self.PANE, "shot.png")
+            (entry,) = relay.upload_ledger
+            self.assertEqual(entry["ref"], self.REF)
+            self.assertEqual(entry["folder"], relay.uploads.folder_for_key(self.PANE, self.REF))
+
+    def test_expire_drops_entries_whose_folder_is_gone(self):
+        with self.relay_with_root() as relay:
+            kept = self.seed(relay, pane_id="w1:p1", ref=None)
+            gone = self.seed(relay, pane_id="w1:p2", ref=None)
+            shutil.rmtree(os.path.join(relay.UPLOAD_ROOT, gone["folder"]))
+            relay.expire_uploads()
+            self.assertEqual(relay.upload_ledger, [kept])
+            self.assertEqual(relay.uploads.load_ledger(relay.UPLOAD_LEDGER_FILE), [kept])
+
+    def test_expire_drops_entries_past_the_ttl_and_their_files(self):
+        with self.relay_with_root() as relay:
+            old_at = time.time() - relay.UPLOAD_TTL_HOURS * 3600 - 60
+            old = self.seed(relay, pane_id="w1:p1", ref=None, at=old_at)
+            fresh = self.seed(relay, pane_id="w1:p2", ref=None)
+            old_file = os.path.join(relay.UPLOAD_ROOT, old["folder"], "a1b2c3d4-shot.png")
+            os.utime(old_file, (old_at, old_at))
+            relay.expire_uploads()
+            self.assertFalse(self.folder_exists(relay, old))
+            self.assertEqual(relay.upload_ledger, [fresh])
+
+    def test_expire_runs_the_ttl_script_on_every_remote(self):
+        with self.relay_with_root() as relay:
+            relay.REMOTES = ["user@box", "user@other"]
+            with mock.patch.object(relay, "upload_ssh", side_effect=[OSError("down"), (0, b"")]) as ssh:
+                relay.expire_uploads()
+            self.assertEqual([c.args[0] for c in ssh.call_args_list], ["user@box", "user@other"])
+            self.assertIn(f"-mmin +{int(relay.UPLOAD_TTL_HOURS * 60)}", ssh.call_args.args[1])
+
+    def run_polls(self, relay, count):
+        with mock.patch.object(relay, "get_all_panes", return_value=([], [])), \
+             mock.patch.object(relay, "probe_idle_questions", return_value={}), \
+             mock.patch.object(relay, "refresh_spaces", return_value={"workspaces": [], "tabs": []}), \
+             mock.patch.object(relay, "broadcast", new=mock.AsyncMock()), \
+             mock.patch.object(relay, "sweep_ended_uploads") as sweep, \
+             mock.patch.object(relay, "expire_uploads") as expire:
+            for _ in range(count):
+                asyncio.run(relay._poll_once())
+        return sweep, expire
+
+    def test_the_poll_sweeps_every_time_and_expires_on_the_first_poll(self):
+        with self.relay_with_root() as relay:
+            sweep, expire = self.run_polls(relay, 2)
+            self.assertEqual([c.kwargs for c in sweep.call_args_list],
+                             [{"force": True}, {"force": False}])
+            expire.assert_called_once_with()
+
+    def test_the_poll_expires_again_after_an_hour(self):
+        with self.relay_with_root() as relay:
+            self.run_polls(relay, 1)
+            relay._upload_expired_at -= relay.UPLOAD_EXPIRE_INTERVAL
+            sweep, expire = self.run_polls(relay, 1)
+            expire.assert_called_once_with()
+            sweep.assert_called_once_with(force=True)
+
+    def test_the_first_poll_empties_the_spool(self):
+        with self.relay_with_root() as relay:
+            os.makedirs(relay.UPLOAD_SPOOL_DIR, exist_ok=True)
+            Path(relay.UPLOAD_SPOOL_DIR, "left-over.part").write_bytes(b"x")
+            self.run_polls(relay, 1)
+            self.assertEqual(os.listdir(relay.UPLOAD_SPOOL_DIR), [])
+            Path(relay.UPLOAD_SPOOL_DIR, "in-flight.part").write_bytes(b"x")
+            self.run_polls(relay, 1)
+            self.assertEqual(os.listdir(relay.UPLOAD_SPOOL_DIR), ["in-flight.part"])
+
+    def test_nothing_runs_when_uploads_are_off(self):
+        with self.relay_with_root() as relay:
+            relay.UPLOADS_ENABLED = False
+            os.makedirs(relay.UPLOAD_SPOOL_DIR, exist_ok=True)
+            Path(relay.UPLOAD_SPOOL_DIR, "left-over.part").write_bytes(b"x")
+            sweep, expire = self.run_polls(relay, 1)
+            sweep.assert_not_called()
+            expire.assert_not_called()
+            self.assertEqual(os.listdir(relay.UPLOAD_SPOOL_DIR), ["left-over.part"])
+
+    def test_a_sweep_error_does_not_escape_into_the_poll(self):
+        with self.relay_with_root() as relay:
+            self.seed(relay)
+            self.poll_saw(relay, "local", {})
+            with mock.patch.object(relay.uploads, "delete_local_folders",
+                                   side_effect=PermissionError("denied")), \
+                 mock.patch.object(relay.uploads, "expire_local", side_effect=OSError("denied")):
+                relay.sweep_ended_uploads()
+                relay.expire_uploads()
 
 
 class RelayPaneReadSourceTests(unittest.TestCase):

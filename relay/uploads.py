@@ -59,7 +59,11 @@ def folder_for(pane_id, ref):
     The ref's `agent` field is left out of the key on purpose: it is metadata about the ref, and
     two reads of one session that disagree on it must still land in one folder.
     """
-    key = ref_key(ref)
+    return folder_for_key(pane_id, ref_key(ref))
+
+
+def folder_for_key(pane_id, key):
+    """`folder_for` from a ref already reduced by `ref_key`, which is what the poll keeps per host."""
     prefix, source = ("s", key) if key is not None else ("p", pane_id)
     return f"{prefix}-{hashlib.sha256(source.encode('utf-8')).hexdigest()[:FOLDER_HASH_CHARS]}"
 
