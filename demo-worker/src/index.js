@@ -59,9 +59,14 @@ export default {
       { uuid: 'd11', role: 'assistant', text: 'Done. The redraw is gated on a content hash:\n\n| case | renders before | after |\n|------|---------------:|------:|\n| same data | 12 | 1 |\n| changed data | 12 | 1 |\n\n`Graph.test.tsx` asserts one render per data change, and it fails on the old code.', ts: '2026-08-21T09:12:58Z', truncated: false },
     ];
 
+    // The real relay writes the file to the agent's machine. The demo has no machine, so it
+    // acks the bytes it is shown and answers with a path that looks like the real one.
+    const UPLOAD_MAX_BYTES = 20971520;
+    const uploads = new Map();
+
     const blockedPrompt = `Do you want to allow this tool call?\n\nTool: write_file\nPath: src/components/Graph.tsx\n\n> yes, single permission\n> trust, always allow\n> no (tab to edit)`;
 
-    server.send(JSON.stringify({ type: 'agents', agents }));
+    server.send(JSON.stringify({ type: 'agents', agents, upload_max_bytes: UPLOAD_MAX_BYTES }));
     server.send(JSON.stringify({
       type: 'blocked', pane_id: 'demo:3', agent: 'kiro', project: 'orbit-ui',
       prompt: blockedPrompt, host: 'local',
@@ -73,7 +78,7 @@ export default {
       const statuses = ['working', 'idle', 'blocked'];
       agents[idx].status = statuses[Math.floor(Math.random() * statuses.length)];
       try {
-        server.send(JSON.stringify({ type: 'agents', agents }));
+        server.send(JSON.stringify({ type: 'agents', agents, upload_max_bytes: UPLOAD_MAX_BYTES }));
         if (agents[idx].status === 'blocked') {
           server.send(JSON.stringify({
             type: 'blocked', pane_id: agents[idx].pane_id, agent: agents[idx].agent,
@@ -100,10 +105,29 @@ export default {
             agent: agents.find(a => a.pane_id === msg.pane_id)?.agent || 'claude',
             file_truncated: false, unavailable: null,
           }));
+        } else if (msg.type === 'upload_start') {
+          const name = String(msg.name || '').replace(/[^A-Za-z0-9._-]/g, '_') || 'file';
+          uploads.set(msg.upload_id, { name, received: 0 });
+          server.send(JSON.stringify({ type: 'upload_ack', upload_id: msg.upload_id, received: 0 }));
+        } else if (msg.type === 'upload_chunk') {
+          const up = uploads.get(msg.upload_id);
+          if (!up) return;
+          up.received += atob(msg.data).length;
+          server.send(JSON.stringify({ type: 'upload_ack', upload_id: msg.upload_id, received: up.received }));
+        } else if (msg.type === 'upload_end') {
+          const up = uploads.get(msg.upload_id);
+          if (!up) return;
+          uploads.delete(msg.upload_id);
+          server.send(JSON.stringify({
+            type: 'upload_result', upload_id: msg.upload_id, ok: true,
+            path: '/home/demo/.cache/herdr-remote/uploads/s-0000000000000000/demo-' + up.name,
+          }));
+        } else if (msg.type === 'upload_cancel') {
+          uploads.delete(msg.upload_id);
         } else if (msg.type === 'respond') {
           const a = agents.find(x => x.pane_id === msg.pane_id);
           if (a) a.status = 'working';
-          server.send(JSON.stringify({ type: 'agents', agents }));
+          server.send(JSON.stringify({ type: 'agents', agents, upload_max_bytes: UPLOAD_MAX_BYTES }));
         }
       } catch {}
     });
