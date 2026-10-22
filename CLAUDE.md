@@ -837,7 +837,8 @@ naming and placement rules, and `SECURITY.md#what-the-relay-can-write` lists eve
   lands while the reader is on the herd list waits in `uploadHeld`. When its pane opens again, the
   path goes into the box and `#sendError` shows `Attached <name>.` without the error tint. A
   refusal waits the same way. A re-entry of `openTerminal` for the same pane cancels nothing. A
-  closed socket and a relay switch cancel every upload, with a notice in `#sendError`.
+  closed socket and a relay switch cancel every upload, with a notice in `#sendError`. They also
+  drop every held result, because a pane id on the next relay can name a different pane.
 - **The native clients did not change.** macOS, iOS, Windows, the TUI and Telegram send none of the
   new messages and ignore `upload_max_bytes`. `demo-worker` acks every chunk and answers with a
   placeholder path, so the demo shows the button.

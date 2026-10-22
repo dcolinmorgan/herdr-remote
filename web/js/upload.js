@@ -158,6 +158,7 @@ function cancelUploads(reason) {
   uploadCurrent = null;
   uploadQueue = [];
   uploadBatch = {done: 0, total: 0};
+  uploadHeld.clear();
   renderUploadBusy();
   if (reason && had) showSendError(reason);
 }

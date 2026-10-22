@@ -442,6 +442,18 @@ class WebUploadTests(_UploadPage, unittest.TestCase):
         self.assertEqual(self.uploads()[-1], {"type": "upload_cancel", "upload_id": uid})
         self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
 
+    def test_a_relay_switch_drops_a_held_path(self):
+        """Pane ids repeat across relays, so a held path would land in a namesake pane's box."""
+        self.pick(_file())
+        self.wait_uploads(1)
+        self.back()
+        self.drive()
+        self.page.evaluate("() => connect()")
+        self.page.evaluate("() => __open(1)")
+        self.open_pane("w1:p1")
+        self.assertEqual(self.box(), "")
+        self.assertIsNone(self.notice())
+
     def test_a_closed_socket_uploads_nothing_and_says_so(self):
         self.page.evaluate("() => { __sock(0).readyState = 3; }")  # the page slept; no onclose yet
         self.pick(_file())
