@@ -286,17 +286,20 @@ function renderSessions() {
 // then closed the healthy socket -- switching relays started a permanent offline/connecting/live
 // cycle. Hence: detach before closing, a per-socket guard, and one pending reconnect at a time.
 let reconnectTimer = null;
+let wsRelayUrl = null;  // the relay the socket belongs to, so a reconnect is told apart from a switch
 
 function connect() {
   let url = localStorage.getItem('herdr_relay_url') || (isSelfRelay ? autoRelayUrl : (isDemo ? DEMO_RELAY : ''));
   if (!url) { showSetup(); return; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (ws) {
-    // The old socket's onclose is detached below and never runs, so an upload on it ends here.
-    cancelUploads('Connection lost. The upload stopped.');
+    // The old socket's onclose is detached below and never runs, so its uploads are settled here.
+    if (url === wsRelayUrl) pauseUploads();
+    else cancelUploads('Relay changed. The upload stopped.');
     ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
     ws.close();
   }
+  wsRelayUrl = url;
   setStatus('connecting');
   // Append token as query param if stored separately
   const token = localStorage.getItem('herdr_relay_token');
@@ -305,10 +308,11 @@ function connect() {
   const sock = new WebSocket(wsUrl);
   ws = sock;
   sock.onopen = () => { if (ws !== sock) return; setStatus('connected'); if(window.cue) cue('ready');
+    resumeUploads();
     // Push: the relay's copy of this device's subscription can be stale (see push.js).
     if (typeof resyncPushSubscription === 'function') resyncPushSubscription(); };
   sock.onclose = () => { if (ws !== sock) return; setStatus('disconnected');
-    cancelUploads('Connection lost. The upload stopped.'); scheduleReconnect(); };
+    pauseUploads(); scheduleReconnect(); };
   sock.onerror = () => { if (ws !== sock) return; setStatus('disconnected'); };
   sock.onmessage = (e) => { if (ws !== sock) return; handleMessage(JSON.parse(e.data)); };
 }

@@ -18,6 +18,11 @@ let uploadBatch = {done: 0, total: 0};  // what the placeholder counts: "Uploadi
 // pane -> {paths, names, error}: answers that came back while the reader was on the herd list.
 // Back keeps an upload going, so its file lands, and the path waits here for the pane to reopen.
 const uploadHeld = new Map();
+// Android puts the browser in the background for the file picker, and the relay drops a socket
+// that stops answering pings. The file then comes back to a socket that is closed or reconnecting,
+// so it waits in the queue and starts when the socket opens. Only a switch to another relay ends it.
+const UPLOAD_WAIT_PICKED = 'Not connected. The upload starts when the connection is back.';
+const UPLOAD_WAIT_DROPPED = 'Connection lost. The upload starts again when the connection is back.';
 
 function updateAttachButton() {
   document.getElementById('attachBtn').hidden = !(uploadMaxBytes > 0);
@@ -31,7 +36,7 @@ function pickFiles() {
 function queueUploads(files) {
   const list = Array.from(files || []).slice(0, UPLOAD_MAX_FILES);
   if (!list.length || !(uploadMaxBytes > 0) || !activePane) return 0;
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
+  if (!ws) {
     showSendError('Not connected. Your text is still here.');
     return 0;
   }
@@ -51,8 +56,14 @@ function queueUploads(files) {
 }
 
 function startNextUpload() {
+  if (!uploadQueue.length) { uploadCurrent = null; uploadBatch = {done: 0, total: 0}; renderUploadBusy(); return; }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    uploadCurrent = null;
+    renderUploadBusy();
+    showSendNotice(UPLOAD_WAIT_PICKED);
+    return;
+  }
   const next = uploadQueue.shift();
-  if (!next) { uploadCurrent = null; uploadBatch = {done: 0, total: 0}; renderUploadBusy(); return; }
   uploadBatch.done++;
   uploadCurrent = {id: newUploadId(), file: next.file, pane: next.pane, offset: 0, seq: 0, awaiting: 0};
   renderUploadBusy();
@@ -149,7 +160,25 @@ function cancelUploadsExcept(paneId) {
   startNextUpload();
 }
 
-// Called when the socket goes, so the reader learns the file did not land.
+// The socket dropped on the same relay. The relay discards a half-sent upload when its connection
+// closes, so the file goes back to the head of the queue and starts again from its first byte.
+function pauseUploads() {
+  if (!uploadCurrent) return;
+  uploadQueue.unshift({file: uploadCurrent.file, pane: uploadCurrent.pane});
+  uploadBatch.done--;
+  uploadCurrent = null;
+  renderUploadBusy();
+  showSendNotice(UPLOAD_WAIT_DROPPED);
+}
+
+// Called when a socket opens.
+function resumeUploads() {
+  const el = document.getElementById('sendError');
+  if (el.textContent === UPLOAD_WAIT_PICKED || el.textContent === UPLOAD_WAIT_DROPPED) el.hidden = true;
+  if (!uploadCurrent) startNextUpload();
+}
+
+// Called on a switch to another relay, so the reader learns the file did not land.
 function cancelUploads(reason) {
   const had = uploadCurrent || uploadQueue.length;
   if (uploadCurrent && ws && ws.readyState === WebSocket.OPEN) {
@@ -175,7 +204,7 @@ function showSendNotice(message) {
 function renderUploadBusy() {
   const btn = document.getElementById('attachBtn');
   const input = document.getElementById('termInput');
-  if (uploadCurrent) {
+  if (uploadCurrent || uploadQueue.length) {
     btn.setAttribute('aria-busy', 'true');
     input.placeholder = 'Uploading ' + uploadBatch.done + ' of ' + uploadBatch.total + '…';
   } else {

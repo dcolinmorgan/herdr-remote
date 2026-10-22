@@ -28,6 +28,7 @@ PHONE = {"width": 390, "height": 844}
 NARROW = {"width": 320, "height": 640}
 
 RELAY = "ws://relay-a.test:8375"
+OTHER_RELAY = "ws://relay-b.test:8375"
 MAX_BYTES = 20 * 1024 * 1024
 CHUNK = 256 * 1024
 PATH = "/u/.cache/herdr-remote/uploads/s-0123456789abcdef/a3f9c0de-shot.png"
@@ -91,8 +92,9 @@ window.__msg = (i, payload) => {
   const s = window.__sockets[i];
   if (s.onmessage) s.onmessage({data: JSON.stringify(payload)});
 };
-window.__uploads = () => window.__sockets[0].sent.map(m => JSON.parse(m))
+window.__uploadsOn = i => window.__sockets[i].sent.map(m => JSON.parse(m))
   .filter(m => m.type.startsWith('upload_'));
+window.__uploads = () => window.__uploadsOn(window.__sockets.length - 1);
 """
 
 SEED = (
@@ -128,7 +130,7 @@ class _UploadPage:
                     "agents": [{"pane_id": p, "agent": "claude", "status": "idle"} for p in panes]}
         if max_bytes is not None:
             snapshot["upload_max_bytes"] = max_bytes
-        self.page.evaluate("m => __msg(0, m)", snapshot)
+        self.page.evaluate("m => __msg(__sockets.length - 1, m)", snapshot)
 
     def open_pane(self, pane="w1:p1"):
         self.page.evaluate("p => openTerminal(p)", pane)
@@ -144,7 +146,7 @@ class _UploadPage:
         return self.uploads()
 
     def reply(self, payload):
-        self.page.evaluate("m => __msg(0, m)", payload)
+        self.page.evaluate("m => __msg(__sockets.length - 1, m)", payload)
 
     def ack(self, upload_id, received):
         self.reply({"type": "upload_ack", "upload_id": upload_id, "received": received})
@@ -425,21 +427,92 @@ class WebUploadTests(_UploadPage, unittest.TestCase):
         self.drive()
         self.assertEqual(self.box(), PATH + " ")
 
-    def test_a_dropped_socket_stops_the_upload_and_keeps_the_text(self):
+    def reconnect(self, relay=None):
+        """connect() as the reconnect timer or a return to the tab calls it, then the new socket opens."""
+        if relay:
+            self.page.evaluate("u => localStorage.setItem('herdr_relay_url', u)", relay)
+        self.page.evaluate("() => connect()")
+        self.page.evaluate("() => __open(__sockets.length - 1)")
+
+    def status(self):
+        return self.page.evaluate("() => document.getElementById('connLabel').textContent")
+
+    def test_a_dropped_socket_keeps_the_upload_and_the_text(self):
         self.type_into_box("still here")
         self.pick(_file())
         self.wait_uploads(1)
         self.page.evaluate("() => __drop(0)")
         self.assertIn("Connection lost", self.notice())
+        self.assertFalse(self.notice_is_error())
         self.assertEqual(self.box(), "still here")
-        self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
+        self.assertEqual(self.page.get_attribute("#attachBtn", "aria-busy"), "true")
+
+    def test_an_upload_cut_by_a_drop_starts_again_on_reconnect(self):
+        self.pick(_file())
+        first = self.wait_uploads(1)[0]
+        self.page.evaluate("() => __drop(0)")
+        self.reconnect()
+        (start,) = self.wait_uploads(1)
+        self.assertEqual(start["type"], "upload_start")
+        self.assertEqual(start["name"], "shot.png")
+        self.assertNotEqual(start["upload_id"], first["upload_id"])
+        self.assertIsNone(self.notice())
+        self.drive()
+        self.assertEqual(self.box(), PATH + " ")
+
+    def test_a_file_picked_while_the_socket_reconnects_waits_for_it(self):
+        """Android backgrounds the browser for the picker, so the file comes back to a closed socket."""
+        self.page.evaluate("() => __drop(0)")
+        self.page.evaluate("() => connect()")
+        self.assertEqual(self.status(), "connecting…")
+        self.pick(_file())
+        self.page.wait_for_timeout(50)
+        self.assertEqual(self.uploads(), [])
+        self.assertIn("Not connected", self.notice())
+        self.assertFalse(self.notice_is_error())
+        self.page.evaluate("() => __open(1)")
+        self.assertEqual(self.status(), "live")
+        self.assertEqual(self.wait_uploads(1)[0]["type"], "upload_start")
+        self.assertIsNone(self.notice())
+        self.drive()
+        self.assertEqual(self.box(), PATH + " ")
+
+    def test_a_file_picked_before_the_close_event_waits_for_the_reconnect(self):
+        self.page.evaluate("() => { __sock(0).readyState = 3; }")  # the page slept; no onclose yet
+        self.pick(_file())
+        self.page.wait_for_timeout(50)
+        self.assertEqual(self.page.evaluate("() => __uploadsOn(0)"), [])
+        self.assertIn("Not connected", self.notice())
+        self.reconnect()
+        self.assertEqual(self.wait_uploads(1)[0]["type"], "upload_start")
+
+    def test_a_drop_keeps_a_held_path(self):
+        self.pick(_file())
+        self.wait_uploads(1)
+        self.back()
+        self.drive()
+        self.page.evaluate("() => __drop(0)")
+        self.reconnect()
+        self.open_pane("w1:p1")
+        self.assertEqual(self.box(), PATH + " ")
 
     def test_a_relay_switch_stops_the_upload(self):
         """connect() detaches the old socket before closing it, so its onclose never runs."""
         self.pick(_file())
         uid = self.wait_uploads(1)[0]["upload_id"]
-        self.page.evaluate("() => connect()")
-        self.assertEqual(self.uploads()[-1], {"type": "upload_cancel", "upload_id": uid})
+        self.reconnect(relay=OTHER_RELAY)
+        self.assertEqual(self.page.evaluate("() => __uploadsOn(0)")[-1],
+                         {"type": "upload_cancel", "upload_id": uid})
+        self.page.wait_for_timeout(50)
+        self.assertEqual(self.uploads(), [])
+        self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
+
+    def test_a_relay_switch_drops_a_waiting_file(self):
+        self.page.evaluate("() => __drop(0)")
+        self.pick(_file())
+        self.reconnect(relay=OTHER_RELAY)
+        self.page.wait_for_timeout(50)
+        self.assertEqual(self.uploads(), [])
         self.assertIsNone(self.page.get_attribute("#attachBtn", "aria-busy"))
 
     def test_a_relay_switch_drops_a_held_path(self):
@@ -448,17 +521,16 @@ class WebUploadTests(_UploadPage, unittest.TestCase):
         self.wait_uploads(1)
         self.back()
         self.drive()
-        self.page.evaluate("() => connect()")
-        self.page.evaluate("() => __open(1)")
+        self.reconnect(relay=OTHER_RELAY)
         self.open_pane("w1:p1")
         self.assertEqual(self.box(), "")
         self.assertIsNone(self.notice())
 
-    def test_a_closed_socket_uploads_nothing_and_says_so(self):
-        self.page.evaluate("() => { __sock(0).readyState = 3; }")  # the page slept; no onclose yet
+    def test_no_relay_uploads_nothing_and_says_so(self):
+        self.page.evaluate("() => { ws = null; }")
         self.pick(_file())
         self.page.wait_for_timeout(50)
-        self.assertEqual(self.uploads(), [])
+        self.assertEqual(self.page.evaluate("() => __uploadsOn(0)"), [])
         self.assertIn("Not connected", self.notice())
 
 

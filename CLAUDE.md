@@ -836,9 +836,17 @@ naming and placement rules, and `SECURITY.md#what-the-relay-can-write` lists eve
   belongs to that pane's reply, and the box serves every pane. Back cancels nothing. A file that
   lands while the reader is on the herd list waits in `uploadHeld`. When its pane opens again, the
   path goes into the box and `#sendError` shows `Attached <name>.` without the error tint. A
-  refusal waits the same way. A re-entry of `openTerminal` for the same pane cancels nothing. A
-  closed socket and a relay switch cancel every upload, with a notice in `#sendError`. They also
-  drop every held result, because a pane id on the next relay can name a different pane.
+  refusal waits the same way. A re-entry of `openTerminal` for the same pane cancels nothing.
+- **A dropped socket pauses the uploads. A relay switch cancels them.** Android puts the browser in
+  the background for the file picker. The relay drops a socket that stops answering pings, so the
+  picked file returns to a socket that is closed or still reconnecting. A file picked while the
+  socket is not open waits in the queue. An upload cut by a drop returns to the head of the queue.
+
+  Each one starts from its first byte when a socket to the same relay opens. The relay discards a
+  half-sent upload when its connection closes. The notice in `#sendError` has no error tint, and it
+  hides when the socket opens. The function `connect()` uses the relay URL to tell a reconnect from
+  a switch. A switch cancels every upload and drops every held result. A pane id on the next relay
+  can name a different pane.
 - **The native clients did not change.** macOS, iOS, Windows, the TUI and Telegram send none of the
   new messages and ignore `upload_max_bytes`. `demo-worker` acks every chunk and answers with a
   placeholder path, so the demo shows the button.
