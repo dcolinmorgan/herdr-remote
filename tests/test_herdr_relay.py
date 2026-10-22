@@ -2758,6 +2758,27 @@ class RelayUploadTests(unittest.TestCase):
             self.assertEqual(list(Path(relay.UPLOAD_ROOT).rglob("*")), [])
             self.assertEqual(relay.upload_ledger, [])
 
+    def test_the_spool_opens_in_binary_mode_where_the_platform_has_one(self):
+        # Without O_BINARY a Windows relay writes every \n as \r\n, and the size check then
+        # refuses almost every binary file as "upload incomplete".
+        fake_binary = 0x40000000
+        real_open = os.open
+        flags_seen = []
+
+        def recording_open(path, flags, *args):
+            flags_seen.append(flags)
+            return real_open(path, flags & ~fake_binary, *args)
+
+        with self.relay_with_root() as relay:
+            path = relay.create_upload_spool()
+            with mock.patch.object(relay.os, "O_BINARY", fake_binary, create=True), \
+                 mock.patch.object(relay.os, "open", side_effect=recording_open):
+                relay.append_upload_spool(path, b"a\nb")
+
+            self.assertEqual(Path(path).read_bytes(), b"a\nb")
+            (flags,) = flags_seen
+            self.assertTrue(flags & fake_binary, hex(flags))
+
     def test_a_spool_whose_size_differs_from_the_declared_size_is_refused(self):
         data = b"0123456789"
         with self.relay_with_root() as relay, mock.patch.object(relay, "audit") as audit:

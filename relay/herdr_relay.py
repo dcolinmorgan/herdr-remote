@@ -3376,8 +3376,9 @@ def append_upload_spool(path, data):
 
     A second relay sharing HERDR_LOG_DIR empties the spool when it starts. With "ab" the next chunk
     would create the file again, and the later chunks alone would land as the whole file.
+    O_BINARY exists on Windows only. Without it each \\n lands as \\r\\n and fails the size check.
     """
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
     with os.fdopen(fd, "ab") as spool:
         spool.write(data)
 
