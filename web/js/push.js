@@ -87,6 +87,36 @@ async function togglePush() {
   }
 }
 
+// A blocked push carries the pane that asked, as `url: "/?pane=<id>"`. A tap delivers it in one of
+// two ways (sw.js). With no window open, the worker opens that URL. With a window open, the worker
+// posts `{type: 'navigate', url}` to it. The id waits in `pendingPane` for the next `agents`
+// message, because only a snapshot says which panes exist. A snapshot is the whole herd, so the
+// link is spent when the snapshot does not list its pane. A link kept for later would pull the
+// reader out of the session they opened next.
+let pendingPane = new URLSearchParams(location.search).get('pane');
+let herdSnapshotSeen = false;
+
+function openPendingPane() {
+  herdSnapshotSeen = true;
+  const id = pendingPane;
+  pendingPane = null;
+  if (id && (agents.some(a => a.pane_id === id) || shellPane(id))) openTerminal(id);
+}
+
+function followPushLink(url) {
+  let id = null;
+  try { id = new URL(url, location.href).searchParams.get('pane'); } catch (e) { return; }
+  if (!id) return;
+  pendingPane = id;
+  if (herdSnapshotSeen) openPendingPane();
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'navigate') followPushLink(e.data.url);
+  });
+}
+
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');

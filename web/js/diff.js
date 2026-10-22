@@ -81,6 +81,7 @@ function handleMessage(msg) {
       };
     });
     render();
+    openPendingPane();
   }
   else if (msg.type === 'agent_update') {
     const update = msg.agent;
