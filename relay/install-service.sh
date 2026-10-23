@@ -1475,7 +1475,8 @@ async def test():
                 agents = data.get("agents", [])
                 print(f"ws_ok:agents:{len(agents)}")
             else:
-                print(f"ws_ok:msg:{data.get('type', 'unknown')}")
+                kind = data.get("type", "unknown")
+                print(f"ws_ok:msg:{kind}")
     except Exception as e:
         print(f"ws_fail:{e}")
 asyncio.run(test())

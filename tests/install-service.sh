@@ -140,8 +140,9 @@ run_install() {
         HERDR_TEST_CALLS="$CALLS" \
         HERDR_INSTALL_OS="$os" \
         HERDR_INSTALL_SKIP_CLOUDFLARED=1 \
-        HERDR_INSTALL_SKIP_WEBSOCKET_SMOKE=1 \
+        HERDR_INSTALL_SKIP_WEBSOCKET_SMOKE="${HERDR_TEST_SKIP_WEBSOCKET_SMOKE:-1}" \
         HERDR_INSTALL_SETTLE_SECONDS=0 \
+        PYTHONPATH="${HERDR_TEST_PYTHONPATH:-}" \
         HERDR_INSTALL_SERVICE_DELAY=0 \
         HERDR_LOG_DIR= \
         HERDR_RELAY= \
@@ -301,6 +302,29 @@ run_install macos "$SKIP_HOME" 'ynn' > "$TMP/skip.log"
     echo "Telegram LaunchAgent created for skipped setup" >&2
     exit 1
 }
+
+SMOKE_STUB="$TMP/smoke-stub"
+mkdir -p "$SMOKE_STUB"
+cat > "$SMOKE_STUB/websockets.py" <<'EOF'
+class _Socket:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def recv(self):
+        return '{"type": "sessions"}'
+
+
+def connect(url, **kwargs):
+    return _Socket()
+EOF
+SMOKE_HOME="$TMP/smoke-home"
+HERDR_TEST_SKIP_WEBSOCKET_SMOKE=0 HERDR_TEST_PYTHONPATH="$SMOKE_STUB" \
+    run_install macos "$SMOKE_HOME" 'ynn' > "$TMP/smoke.log"
+assert_contains "$TMP/smoke.log" 'received message (type: sessions)'
+assert_not_contains "$TMP/smoke.log" 'WebSocket test failed'
 
 LINUX_HOME="$TMP/linux-home"
 mkdir -p "$LINUX_HOME/.config/systemd/user"
