@@ -2887,11 +2887,25 @@ async def process_request(connection, request):
     public_paths = {"/sw.js", "/api/vapid-public-key"}
     request_path = (request.path or "/").split("?", 1)[0]
 
+    # Read the upgrade header before anything is exempted from the token. A WebSocket handshake is
+    # not a file fetch, whatever path it names: with the exemption checked first, a socket opened
+    # on `/app.css` skipped the token entirely and landed on the command surface, which can type
+    # into every pane. The path a socket names is otherwise unused.
+    upgrade = None
+    origin = None
+    for key, value in request.headers.raw_items():
+        if key.lower() == "upgrade":
+            upgrade = value.lower()
+        if key.lower() == "origin":
+            origin = value
+    is_handshake = upgrade == "websocket"
+
     # Token auth (if configured). Static assets under web/ are exempt because a browser fetches
     # the stylesheet, the scripts and the fonts before anything has authenticated, and the
     # service worker reads its notification icon with no session at all. index.html is NOT one of
     # them -- see web_asset -- so the app itself stays behind the token exactly as before.
-    if AUTH_TOKEN and request_path not in public_paths and web_asset(request_path) is None:
+    exempt = not is_handshake and (request_path in public_paths or web_asset(request_path) is not None)
+    if AUTH_TOKEN and not exempt:
         token = None
         for key, value in request.headers.raw_items():
             if key.lower() == "authorization":
@@ -2917,15 +2931,7 @@ async def process_request(connection, request):
             headers = Headers([("Content-Type", "text/plain")])
             return Response(401, "Unauthorized", headers, b"Invalid token\n")
 
-    # Check if this is a WebSocket upgrade
-    upgrade = None
-    origin = None
-    for key, value in request.headers.raw_items():
-        if key.lower() == "upgrade":
-            upgrade = value.lower()
-        if key.lower() == "origin":
-            origin = value
-    if upgrade == "websocket":
+    if is_handshake:
         # Validate origin to prevent drive-by attacks from malicious webpages
         if not trusted_websocket_origin(origin):
             log.warning("Rejected WebSocket from untrusted origin: %s", origin)

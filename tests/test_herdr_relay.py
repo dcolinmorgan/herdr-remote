@@ -4560,5 +4560,50 @@ class RelayIdAllowlistEventQueueTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(relay.agent_cache[pane_id]["pane_id"], pane_id)
 
 
+class RelayWebSocketTokenTests(unittest.TestCase):
+    """A socket carries the token whatever path it names.
+
+    The asset exemption exists so a browser can fetch the stylesheet and the scripts before it has
+    authenticated. It was read before the upgrade header, so a handshake that named an exempt path
+    skipped the token and reached the command surface, which types into every pane.
+    """
+
+    HANDSHAKE = (("upgrade", "websocket"), ("origin", "http://localhost:8375"))
+
+    def request(self, path, headers=()):
+        return types.SimpleNamespace(
+            path=path,
+            headers=types.SimpleNamespace(raw_items=lambda: tuple(headers)),
+        )
+
+    def answer(self, relay, request):
+        with mock.patch.dict(sys.modules, _http_stubs(), clear=False):
+            return asyncio.run(relay.process_request(None, request))
+
+    def test_a_handshake_on_an_asset_path_still_needs_the_token(self):
+        for path in ("/app.css", "/js/cards.js", "/sw.js", "/manifest.webmanifest", "/logo.svg"):
+            with self.subTest(path=path), loaded_relay(relay_token="secret") as relay:
+                answer = self.answer(relay, self.request(path, self.HANDSHAKE))
+                self.assertIsNotNone(answer, f"{path} opened a socket with no token")
+                self.assertEqual(answer.status_code, 401)
+
+    def test_a_handshake_with_the_token_proceeds_on_any_path(self):
+        for path in ("/?token=secret", "/app.css?token=secret"):
+            with self.subTest(path=path), loaded_relay(relay_token="secret") as relay:
+                self.assertIsNone(self.answer(relay, self.request(path, self.HANDSHAKE)))
+
+    def test_a_plain_asset_fetch_still_needs_no_token(self):
+        """What the exemption is for: the page's own files load before anything has a cookie."""
+        with loaded_relay(relay_token="secret") as relay:
+            for path in ("/app.css", "/js/cards.js", "/sw.js"):
+                answer = self.answer(relay, self.request(path))
+                self.assertEqual(answer.status_code, 200, path)
+            self.assertEqual(self.answer(relay, self.request("/")).status_code, 401)
+
+    def test_a_tokenless_relay_still_opens_a_socket(self):
+        with loaded_relay() as relay:
+            self.assertIsNone(self.answer(relay, self.request("/", self.HANDSHAKE)))
+
+
 if __name__ == "__main__":
     unittest.main()

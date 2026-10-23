@@ -4,12 +4,16 @@ Two separate claims. That every file the page asks for is reachable -- which use
 hand-maintained table and is why an asset could work on Cloudflare Pages and 404 over a tunnel.
 And that widening it to a directory did not also widen it into the filesystem, or past the token.
 """
+import asyncio
 import os
 import pathlib
 import re
+import sys
+import types
 import unittest
+from unittest import mock
 
-from test_herdr_relay import loaded_relay
+from test_herdr_relay import _http_stubs, loaded_relay
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
@@ -129,14 +133,37 @@ class WebAssetContainmentTests(unittest.TestCase):
 
 
 class WebAssetAuthTests(unittest.TestCase):
+    """A browser fetches the stylesheet and the scripts before it can authenticate.
+
+    Asserted through process_request rather than against the source line that spells the rule:
+    what matters is which requests the relay answers without a token, and the exemption has to
+    stay narrow enough that index.html and a WebSocket handshake are not among them.
+    """
+
+    def answer(self, relay, path, headers=()):
+        request = types.SimpleNamespace(
+            path=path,
+            headers=types.SimpleNamespace(raw_items=lambda: tuple(headers)),
+        )
+        with mock.patch.dict(sys.modules, _http_stubs(), clear=False):
+            return asyncio.run(relay.process_request(None, request))
+
     def test_assets_are_exempt_from_the_token_but_the_app_is_not(self):
-        """A browser fetches the stylesheet and the scripts before it can authenticate."""
-        source = (ROOT / "relay" / "herdr_relay.py").read_text(encoding="utf-8")
-        # The exemption is written as an extra condition on the auth branch, so it can only ever
-        # widen to what web_asset resolves -- and web_asset refuses index.html.
-        self.assertIn(
-            "if AUTH_TOKEN and request_path not in public_paths and web_asset(request_path) is None:",
-            source)
+        with loaded_relay(relay_token="secret") as relay:
+            for path in ("/app.css", "/js/cards.js", "/logo.svg"):
+                with self.subTest(path=path):
+                    self.assertEqual(self.answer(relay, path).status_code, 200)
+            for path in ("/", "/index.html"):
+                with self.subTest(path=path):
+                    self.assertEqual(self.answer(relay, path).status_code, 401)
+
+    def test_the_exemption_does_not_reach_a_websocket_handshake(self):
+        """A socket is not a file fetch, and it lands on the surface that types into panes."""
+        with loaded_relay(relay_token="secret") as relay:
+            answer = self.answer(relay, "/app.css",
+                                 (("upgrade", "websocket"), ("origin", "http://localhost:8375")))
+            self.assertIsNotNone(answer)
+            self.assertEqual(answer.status_code, 401)
 
 
 if __name__ == "__main__":
