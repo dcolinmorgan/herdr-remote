@@ -28,6 +28,7 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
     private var cardShortcut: GlobalShortcut?
     let relay = RelayConnection()
     private var statusItem: NSStatusItem?
+    private let connectPhone = ConnectPhoneWindowController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Request notification permissions
@@ -127,6 +128,11 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         relayItem.target = self
         relayItem.state = relay.mode == .relay ? .on : .off
         menu.addItem(relayItem)
+
+        let phoneItem = NSMenuItem(title: "Connect a Phone…", action: #selector(showConnectPhone), keyEquivalent: "")
+        phoneItem.target = self
+        phoneItem.image = NSImage(systemSymbolName: "qrcode", accessibilityDescription: nil)
+        menu.addItem(phoneItem)
 
         menu.addItem(.separator())
 
@@ -236,6 +242,10 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func showConnectPhone() {
+        connectPhone.show()
+    }
+
     @objc private func sendTestNotification() {
         relay.sendTestNotification()
     }
@@ -247,6 +257,7 @@ class HerdiAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePresentationMode() {
         Quiet.presentationMode.toggle()
+        connectPhone.presentationModeChanged()
         refreshChrome()
     }
 
