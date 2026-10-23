@@ -211,6 +211,12 @@ UPLOAD_SSH_TIMEOUT = 120
 # The sweep's delete and expire scripts move no file, so they get the herdr call's 15s. They run
 # inside the poll, and a hung sshd would otherwise hold every client's snapshot for 120s per host.
 UPLOAD_SWEEP_SSH_TIMEOUT = 15
+# How many files may be placed at once, across every connection. Placing a file runs on asyncio's
+# default executor, and the remote branch holds its thread for up to UPLOAD_SSH_TIMEOUT -- the same
+# pool the poll, every pane read and every keystroke use. One upload per connection caps a single
+# client, but nothing caps connections, so a handful of tabs finishing remote uploads together
+# would otherwise stall the relay itself rather than just the uploads.
+UPLOAD_STORE_SLOTS = int(os.environ.get("HERDR_UPLOAD_STORE_SLOTS", "") or 2)
 
 if RELAY_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_TOKEN:
     raise SystemExit("HERDR_RELAY_TOKEN is required when HERDR_RELAY_HOST binds beyond loopback")
@@ -314,6 +320,8 @@ _upload_ledger_lock = threading.Lock()
 # Idle-timeout drops in flight. The loop keeps only a weak reference to a task, so one that is not
 # held here can be collected before it has deleted its spool.
 _upload_tasks = set()
+# Held while a file is placed, so the executor keeps threads for the poll and for keystrokes.
+_upload_store_slots = asyncio.Semaphore(UPLOAD_STORE_SLOTS)
 # host label -> the (session, live set) the last sweep of that host acted on. The sweep compares against it so
 # a remote host costs an SSH call when its panes or refs change, not one per poll.
 _upload_swept_refs = {}
@@ -3587,7 +3595,10 @@ async def finish_upload(ws, slot, msg, ip, device):
         await refuse_upload(ws, slot, upload_id, f"pane {pane_id} is gone")
         return
     try:
-        path = await asyncio.to_thread(store_upload, upload["spool"], pane_id, upload["name"])
+        # Queued rather than refused: the client has already sent the bytes, and the wait is the
+        # one ahead of it finishing. The idle timer is paused above, so waiting cannot drop it.
+        async with _upload_store_slots:
+            path = await asyncio.to_thread(store_upload, upload["spool"], pane_id, upload["name"])
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         log.warning("Upload %s for pane %s failed: %s", upload_id, pane_id, exc)
         await refuse_upload(ws, slot, upload_id, "could not store the file")

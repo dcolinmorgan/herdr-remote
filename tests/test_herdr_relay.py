@@ -2830,6 +2830,55 @@ class RelayUploadTests(unittest.TestCase):
             self.assertIs(relay.pane_list_ok["local"], False)
 
 
+class RelayUploadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    """Placing a file holds a thread of the executor the poll and every keystroke also use.
+
+    One upload per connection caps one client; nothing caps connections, and the remote branch
+    holds its thread for up to UPLOAD_SSH_TIMEOUT.
+    """
+
+    async def test_no_more_files_are_placed_at_once_than_there_are_slots(self):
+        with loaded_relay() as relay:
+            relay.known_panes.add("w1:p1")
+            live = 0
+            peak = 0
+            started = asyncio.Event()
+            release = threading.Event()
+            loop = asyncio.get_running_loop()
+
+            def slow_store(spool_path, pane_id, name):
+                nonlocal live, peak
+                live += 1
+                peak = max(peak, live)
+                loop.call_soon_threadsafe(started.set)
+                # Blocking on purpose: this runs in a worker thread, as store_upload does.
+                release.wait(timeout=5)
+                live -= 1
+                return "/tmp/upload"
+
+            with mock.patch.object(relay, "store_upload", side_effect=slow_store), \
+                 mock.patch.object(relay, "spool_size", return_value=1), \
+                 mock.patch.object(relay, "create_upload_spool", return_value="/tmp/spool"), \
+                 mock.patch.object(relay, "append_upload_spool"), \
+                 mock.patch.object(relay, "delete_upload_spool"), \
+                 mock.patch.object(relay, "send_current_snapshot", new=mock.AsyncMock()):
+                clients = [_FakeWebSocket(upload_messages(f"upload-{i:04d}", b"x"))
+                           for i in range(relay.UPLOAD_STORE_SLOTS + 2)]
+                tasks = [asyncio.create_task(relay.handle_client(ws)) for ws in clients]
+                await asyncio.wait_for(started.wait(), timeout=5)
+                await asyncio.sleep(0.2)
+                self.assertLessEqual(peak, relay.UPLOAD_STORE_SLOTS)
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+
+            results = [json.loads(m) for ws in clients for m in ws.sent
+                       if json.loads(m).get("type") == "upload_result"]
+            # Every one of them still lands: a slot queues an upload, it does not refuse it.
+            self.assertEqual(len(results), len(clients))
+            self.assertTrue(all(r["ok"] for r in results), results)
+            self.assertLessEqual(peak, relay.UPLOAD_STORE_SLOTS)
+
+
 class RelayUploadSweepTests(unittest.TestCase):
     """Rule 1 (the conversation ended) and rule 2 (the TTL) of the upload sweep, driven by hand.
 
