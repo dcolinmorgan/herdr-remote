@@ -19,7 +19,7 @@ try {
   if (pinned === 'dark' || pinned === 'light') document.documentElement.dataset.theme = pinned;
 } catch (e) {}  // Safari private mode throws on localStorage; Auto is the right fallback anyway.
 </script>
-<link rel="manifest" href="manifest.webmanifest">
+<link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">

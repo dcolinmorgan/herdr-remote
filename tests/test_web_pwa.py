@@ -83,6 +83,13 @@ class WebManifestTests(unittest.TestCase):
         self.assertIn("192x192", sizes)
         self.assertIn("512x512", sizes)
 
+    def test_the_manifest_request_carries_the_login_cookie(self):
+        """A manifest is fetched without cookies by default, and Cloudflare Access answers that with
+        its login page. Chrome then finds no manifest and offers only a shortcut."""
+        link = re.search(r'<link rel="manifest"[^>]*>', INDEX)
+        self.assertTrue(link)
+        self.assertIn('crossorigin="use-credentials"', link.group(0))
+
     def test_one_icon_is_maskable_so_android_does_not_letterbox_it(self):
         purposes = " ".join(icon.get("purpose", "") for icon in manifest()["icons"])
         self.assertIn("maskable", purposes)
