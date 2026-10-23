@@ -753,7 +753,8 @@ for i, t in enumerate(tunnels, 1):
                         if launchctl list 2>/dev/null | grep -qi "cloudflare"; then
                             EXISTING_SERVICE=true
                         fi
-                        if sudo launchctl list 2>/dev/null | grep -qi "cloudflare"; then
+                        # print system reads system daemons without a password.
+                        if launchctl print system 2>/dev/null | grep -qi "cloudflare"; then
                             EXISTING_SERVICE=true
                             # System daemon is always auto-start
                             EXISTING_SERVICE_AUTO=true

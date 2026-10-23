@@ -127,6 +127,21 @@ case "$url" in
 esac
 EOF
 
+cat > "$MOCK_BIN/cloudflared" <<'EOF'
+#!/bin/sh
+printf 'cloudflared %s\n' "$*" >> "$HERDR_TEST_CALLS"
+if [ "$1" = "tunnel" ] && [ "$2" = "list" ]; then
+    printf '%s\n' '[{"id":"00000000-0000-0000-0000-000000000000","name":"herdr-relay","connections":[]}]'
+fi
+exit 0
+EOF
+
+cat > "$MOCK_BIN/sudo" <<'EOF'
+#!/bin/sh
+printf 'sudo %s\n' "$*" >> "$HERDR_TEST_CALLS"
+exit 1
+EOF
+
 chmod +x "$MOCK_BIN"/*
 
 run_install() {
@@ -139,7 +154,7 @@ run_install() {
         PATH="$MOCK_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
         HERDR_TEST_CALLS="$CALLS" \
         HERDR_INSTALL_OS="$os" \
-        HERDR_INSTALL_SKIP_CLOUDFLARED=1 \
+        HERDR_INSTALL_SKIP_CLOUDFLARED="${HERDR_TEST_SKIP_CLOUDFLARED:-1}" \
         HERDR_INSTALL_SKIP_WEBSOCKET_SMOKE="${HERDR_TEST_SKIP_WEBSOCKET_SMOKE:-1}" \
         HERDR_INSTALL_SETTLE_SECONDS=0 \
         PYTHONPATH="${HERDR_TEST_PYTHONPATH:-}" \
@@ -325,6 +340,15 @@ HERDR_TEST_SKIP_WEBSOCKET_SMOKE=0 HERDR_TEST_PYTHONPATH="$SMOKE_STUB" \
     run_install macos "$SMOKE_HOME" 'ynn' > "$TMP/smoke.log"
 assert_contains "$TMP/smoke.log" 'received message (type: sessions)'
 assert_not_contains "$TMP/smoke.log" 'WebSocket test failed'
+NAMED_HOME="$TMP/named-home"
+mkdir -p "$NAMED_HOME/.cloudflared"
+touch "$NAMED_HOME/.cloudflared/cert.pem"
+: > "$CALLS"
+HERDR_TEST_SKIP_CLOUDFLARED=0 \
+    run_install macos "$NAMED_HOME" $'yn1herdr-relay\nrelay.example.com\n' > "$TMP/named.log"
+assert_contains "$TMP/named.log" 'Found 1 existing tunnel'
+assert_contains "$TMP/named.log" 'Named tunnel: wss://relay.example.com'
+assert_not_contains "$CALLS" '^sudo '
 
 LINUX_HOME="$TMP/linux-home"
 mkdir -p "$LINUX_HOME/.config/systemd/user"
