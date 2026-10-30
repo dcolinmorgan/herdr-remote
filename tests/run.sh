@@ -94,7 +94,7 @@ assert_eq "$?" "0" "no duplicate function declarations"
 
 echo "9c2. every script the page loads exists"
 MISSING=""
-for src in $(grep -oE '<script src="[^"]+"' "$WEB" | sed -e 's/.*src="//' -e 's/"//'); do
+for src in $(grep -oE '<script src="[^"]+"' "$WEB" | sed -e 's/.*src="//' -e 's/"//' -e 's/[?].*//'); do
   [ -f "$DIR/web/$src" ] || MISSING="$MISSING $src"
 done
 [ -z "$MISSING" ]

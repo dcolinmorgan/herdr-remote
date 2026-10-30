@@ -6,6 +6,7 @@ web/js/*.js, so a `grep`-shaped test that keeps reading only index.html does not
 passes vacuously, having looked in the wrong file. Go through here instead.
 """
 import pathlib
+from urllib.parse import urlsplit
 
 WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / "web"
 
@@ -15,7 +16,7 @@ def script_files():
     import re
     index = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     refs = re.findall(r'<script src="([^"]+)"></script>', index)
-    return [WEB_DIR / ref.lstrip("./") for ref in refs]
+    return [WEB_DIR / urlsplit(ref).path.lstrip("./") for ref in refs]
 
 
 def web_source():

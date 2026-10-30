@@ -119,7 +119,7 @@ Runtime session overrides (per source) are persisted to `active_sessions.json` i
 
 ## Web App
 
-`web/` is `index.html` (markup) + `app.css` + eleven scripts under `web/js/`, and **still has no build
+`web/` is `index.html` (markup) + `app.css` + twelve scripts under `web/js/`, and **still has no build
 step** — plain `<script src>` tags, loaded in the order they are listed. It's deployed to Cloudflare
 Pages. It carries a mobile terminal keyboard, PWA support, and agent-icon detection.
 
@@ -135,7 +135,8 @@ Three things about that layout are load-bearing:
 - **The relay serves `web/` as a directory** (`web_asset`), not from a list of filenames — see
   below. Adding a file needs no relay change.
 
-`web/js/` in load order: `state` (globals, settings, theme, socket) → `markdown` → `diff` →
+`web/js/theme.js` runs in the head before CSS. The remaining scripts load in order:
+`state` (globals, settings, socket) → `markdown` → `diff` →
 `triage` → `spaces` (grouping and naming lookups) → `cards` (what a row is called and how it
 renders) → `mirror` (the terminal reconciler) → `upload` (attach and paste) → `nav` → `palette` →
 `push`.
@@ -158,8 +159,8 @@ file.
   attributes and therefore follow the OS rather than the pin, so a pinned reader is given the pinned
   colour in *both*. The choice is a **bare string** in `localStorage.herdr_theme`, written by
   `setTheme` and read by a script in `<head>` before first paint; `JSON.stringify` there would store
-  `"dark"` *with* the quotes and the anti-flash would silently never fire again. Three exclusive
-  choices are a `radiogroup`, not three `aria-pressed` toggles announcing three independent
+  `"dark"` *with* the quotes and the anti-flash would silently never fire again. The exclusive
+  choices are a `radiogroup`, not `aria-pressed` toggles announcing independent
   switches, and the selected one fills with the inverted neutral the session view's toggles already
   use — blue would read as the *selection* colour the chips own.
 - **`--on-accent` is the text ON a saturated fill.** A saturated token is dark in the light theme
@@ -178,6 +179,14 @@ file.
   `--font-term`, where its Nerd Font glyphs are the reason it is shipped at all. Every measured
   layout assertion in `tests/test_web_*.py` — the key labels that must not clip at 320px, the herd
   row that gives up the project before the tab, the chrome budgets — passes unchanged under it.
+
+`web/js/theme.js` now owns appearance and runs synchronously in `<head>` before the stylesheet,
+including the pre-paint restore. Optional Custom palettes are strict, bounded JSON: a light/dark
+`colorScheme` and ten allowlisted `#RRGGBB` semantic colors, validated for text contrast before use.
+They live in `localStorage.herdr_custom_theme`; `herdr_theme = custom` selects one. Leaving Custom
+removes all its CSS overrides, including the header and native color scheme. Invalid saved palettes
+fall back safely; unavailable storage still permits changes for this tab. The editor and reset are
+in Settings, and terminal tokens/ANSI rendering are deliberately outside this feature.
 
 `tests/test_web_theme.py` measures all of it in a browser: the two grounds, a pin beating the OS in
 both directions, the stale pin coming off, the pre-paint stamp surviving a reload, the metas, the

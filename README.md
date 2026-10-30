@@ -90,6 +90,53 @@ Access hostname), set `HERDR_TRUSTED_ORIGINS`:
 export HERDR_TRUSTED_ORIGINS="https://herdr.example.com"
 ```
 
+## Web appearance
+
+In **Settings → Appearance**, Auto follows the system; Light and Dark pin the existing palette.
+For a different palette, expand **Customize colors**, edit or paste the prefilled JSON, and choose
+**Apply custom colors**. The Custom option then becomes available alongside the original choices.
+Switching back to Auto, Light or Dark keeps the saved custom palette; **Reset custom colors**
+removes it and returns to Auto if Custom was selected.
+
+A palette contains a fixed native color scheme and exactly ten semantic colors, for example:
+
+```json
+{
+  "colorScheme": "light",
+  "colors": {
+    "bg": "#f5f5f5", "surface": "#ffffff", "border": "#e5e5e5",
+    "text": "#0a0a0a", "muted": "#5d5d5d",
+    "green": "#006a29", "red": "#ac0010", "blue": "#005bb5",
+    "orange": "#804a00", "on-accent": "#ffffff"
+  }
+}
+```
+
+Use `light` or `dark` for `colorScheme`, and `#RRGGBB` for every color. Text, muted text and
+status colors must have at least 4.5:1 contrast against both backgrounds; `on-accent` is the text
+on the four accent-colored buttons and must also meet that ratio. Invalid palettes leave the
+active appearance unchanged. CSS, remote theme URLs and terminal color tokens are not accepted.
+
+Custom colors apply to the web interface, including Conversation History, **not** the live terminal's
+ANSI/truecolor output. Preferences stay in this browser, not on the relay or in the agent's settings.
+If browser storage is unavailable, changes work for the current tab and a notice explains that they
+cannot be saved. Copy the palette JSON to reuse it in another browser.
+
+<details>
+<summary>Color-theme examples</summary>
+
+| Built-in Light (unchanged) | Custom warm light example | Custom cool dark example |
+|:--:|:--:|:--:|
+| <img src="public/web-theme-history-light.png" alt="Synthetic conversation history using the built-in Light palette" width="220"> | <img src="public/web-theme-history-custom.png" alt="The same synthetic history using a custom warm light palette" width="220"> | <img src="public/web-theme-history-custom-dark.png" alt="The same synthetic history using a custom cool dark palette" width="220"> |
+
+<img src="public/web-theme-settings-custom.png" alt="Mobile Settings showing the Custom palette editor with synthetic preview data" width="300">
+
+Browser-rendered previews using synthetic English data in a 390 × 844 viewport, not original
+phone screenshots. The history comparisons use identical content and layout. The palettes are
+configuration examples, not built-in presets; live terminal colors are unchanged.
+
+</details>
+
 ## Telegram Bot
 
 For an automatically restarting relay and Telegram bot:

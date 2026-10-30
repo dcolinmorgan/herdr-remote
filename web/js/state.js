@@ -48,67 +48,6 @@ const savedToken = localStorage.getItem('herdr_relay_token') || '';
 document.getElementById('relayUrl').value = savedUrl;
 document.getElementById('relayToken').value = savedToken;
 
-// Appearance -- Auto / Light / Dark.
-//
-// The VISUAL switch is pure CSS and none of this code's business: every token is a `light-dark()`
-// pair and the root's `color-scheme` picks the half, so Auto is correct with JavaScript disabled
-// entirely. What is left here is the part CSS cannot do:
-//   1. the pin attribute, in BOTH directions -- a stale `data-theme` has to come off, or Dark → Auto
-//      leaves the page pinned dark until a reload;
-//   2. the theme-color metas, which carry `media` attributes and so follow the OS rather than a pin.
-// The <head> script has already stamped the attribute for a pinned reader before first paint; this
-// is idempotent for that case and additionally fixes up the metas and the control.
-const THEME_KEY = 'herdr_theme';
-const THEME_META = {light: '#f5f5f5', dark: '#0a0a0a'};  // --bg's two halves, rasterized.
-
-function themePref() {
-  try {
-    const raw = localStorage.getItem(THEME_KEY);
-    return raw === 'light' || raw === 'dark' ? raw : 'auto';
-  } catch (e) { return 'auto'; }
-}
-
-function themeResolved(pref) {
-  if (pref !== 'auto') return pref;
-  return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
-function applyTheme() {
-  const pref = themePref(), resolved = themeResolved(pref);
-  if (pref === 'auto') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = pref;
-  // Pinned: hand BOTH metas the pinned colour, so whichever one the browser's own media query
-  // selects is the right answer. On Auto: give each back its own half and let the query decide.
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    const own = (meta.getAttribute('media') || '').includes('dark') ? 'dark' : 'light';
-    meta.content = THEME_META[pref === 'auto' ? own : resolved];
-  }
-  for (const btn of document.querySelectorAll('[data-theme-choice]'))
-    btn.setAttribute('aria-checked', btn.dataset.themeChoice === pref ? 'true' : 'false');
-  const note = document.getElementById('themeResolved');
-  if (note) note.textContent = pref === 'auto' ? 'Now ' + resolved + '.' : '';
-}
-
-function setTheme(pref) {
-  try {
-    // Absent means Auto, so un-pinning REMOVES the key rather than storing a sentinel: the
-    // pre-paint script's getItem then returns null and it does nothing, which is exactly right.
-    if (pref === 'auto') localStorage.removeItem(THEME_KEY);
-    else localStorage.setItem(THEME_KEY, pref);
-  } catch (e) {}  // Private mode: the choice still holds for this session.
-  applyTheme();
-  if (window.cue) cue('toggle');
-}
-
-// Follow the OS while on Auto, so an evening switch lands without a reload. The CSS half handles
-// itself; this keeps the metas and the control's readout honest.
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  if (themePref() === 'auto') applyTheme();
-});
-applyTheme();
-
-
-
 // Back-button navigation — every view or overlay that covers the agent list
 // pushes a history entry when it opens, so the Android system back button (and
 // the browser's) dismisses the top layer instead of leaving the app.

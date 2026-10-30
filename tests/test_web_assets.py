@@ -12,6 +12,7 @@ import sys
 import types
 import unittest
 from unittest import mock
+from urllib.parse import urlsplit
 
 from test_herdr_relay import _http_stubs, loaded_relay
 
@@ -34,11 +35,25 @@ def referenced_assets():
     for ref in found:
         if ref.startswith(("http://", "https://", "data:")):
             continue
-        paths.add(ref if ref.startswith("/") else "/" + ref.lstrip("./"))
+        path = urlsplit(ref).path
+        paths.add(path if path.startswith("/") else "/" + path.lstrip("./"))
     return paths
 
 
 class WebAssetRoutingTests(unittest.TestCase):
+    def test_versioned_theme_assets_are_served_without_a_token(self):
+        """A new query bypasses stale browser caches, but the relay still resolves the same file."""
+        with loaded_relay(relay_token="test-token") as relay:
+            for path in ("app.css", "js/theme.js", "js/state.js"):
+                with self.subTest(path=path):
+                    request = types.SimpleNamespace(
+                        path="/" + path + "?v=themes-1",
+                        headers=types.SimpleNamespace(raw_items=lambda: ()))
+                    with mock.patch.dict(sys.modules, _http_stubs(), clear=False):
+                        response = asyncio.run(relay.process_request(None, request))
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.body, (WEB / path).read_bytes())
+
     def test_every_asset_the_page_loads_is_served(self):
         """The failure this replaces: add a file to web/, forget the relay, ship it broken."""
         assets = referenced_assets()

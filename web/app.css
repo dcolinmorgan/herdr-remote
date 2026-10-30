@@ -112,8 +112,8 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
 .setting-group button { margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--green); color: var(--on-accent); font-weight: 600; font-size: 13px; cursor: pointer; box-shadow: 0 1px 6px -1px color-mix(in srgb, var(--green) 45%, transparent); transition: transform 0.12s var(--ease), box-shadow 0.18s var(--ease), filter 0.18s var(--ease); }
 .setting-group button:hover { filter: brightness(1.06); box-shadow: 0 2px 10px -1px color-mix(in srgb, var(--green) 55%, transparent); }
 .setting-group button:active { transform: scale(0.97); box-shadow: none; }
-/* Appearance: one row, three exclusive choices, so a `radiogroup` rather than three `aria-pressed`
-   toggles -- which would announce three independent switches, one of which happens to be on. The
+/* Appearance: one row of exclusive choices, so a `radiogroup` rather than `aria-pressed`
+   toggles -- which would announce independent switches instead of one choice. The
    selected one fills with the INVERTED NEUTRAL, the same pair every toggle in the session view uses
    and the only one guaranteed to contrast under both themes; blue here would read as the selection
    colour the chips already own. Buttons override .setting-group button's margin, which is written
@@ -121,6 +121,17 @@ body { font-family: var(--font-mono); background: var(--bg); color: var(--text);
 .theme-seg { display: flex; gap: 6px; margin-top: 2px; }
 .theme-seg button { flex: 1; margin-top: 0; padding: 0; min-height: 32px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 .theme-seg button[aria-checked="true"] { background: var(--text); border-color: var(--text); color: var(--bg); }
+.theme-seg button:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
+.theme-editor { margin-top: 12px; }
+.theme-editor summary { color: var(--blue); cursor: pointer; font-size: 0.75rem; }
+.theme-editor .hint { margin: 8px 0; line-height: 1.5; overflow-wrap: anywhere; }
+.theme-editor label { margin-top: 8px; }
+.theme-editor textarea { display: block; width: 100%; max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 16px; line-height: 1.4; resize: vertical; }
+.theme-editor textarea[aria-invalid="true"] { border-color: var(--red); }
+.theme-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.theme-actions button { min-height: 36px; }
+.theme-actions .theme-reset { background: var(--bg); color: var(--text); border: 1px solid var(--border); box-shadow: none; }
+#themeStatus[data-error="true"] { color: var(--red); }
 
 
 /* Agent list */

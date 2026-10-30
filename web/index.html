@@ -7,18 +7,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#f5f5f5" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
-<!-- The pin, before anything paints: someone who chose Dark must not be shown the OS's Light
-     first. Inline because this app is one file with no build step and no CSP to satisfy, and a
-     BARE string rather than JSON -- setTheme writes the same three words, and JSON.stringify
-     would store `"dark"` with the quotes and silently stop this from ever firing. Someone on
-     Auto -- the default -- needs none of it: `color-scheme: light dark` below gets their first
-     paint right with no JavaScript at all. -->
-<script>
-try {
-  var pinned = localStorage.getItem('herdr_theme');
-  if (pinned === 'dark' || pinned === 'light') document.documentElement.dataset.theme = pinned;
-} catch (e) {}  // Safari private mode throws on localStorage; Auto is the right fallback anyway.
-</script>
+<!-- Blocking, before the stylesheet: restore a saved appearance before the first paint. -->
+<script src="js/theme.js?v=themes-1"></script>
 <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
@@ -29,7 +19,7 @@ import { play, bind } from './js/cuelume.js';
 window.cue = play;
 document.addEventListener('DOMContentLoaded', () => bind());
 </script>
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v=themes-1">
 </head>
 <body>
 
@@ -55,8 +45,20 @@ document.addEventListener('DOMContentLoaded', () => bind());
       <button type="button" role="radio" data-theme-choice="auto" aria-checked="true" onclick="setTheme('auto')">Auto</button>
       <button type="button" role="radio" data-theme-choice="light" aria-checked="false" onclick="setTheme('light')">Light</button>
       <button type="button" role="radio" data-theme-choice="dark" aria-checked="false" onclick="setTheme('dark')">Dark</button>
+      <button type="button" role="radio" data-theme-choice="custom" aria-checked="false" onclick="setTheme('custom')" disabled>Custom</button>
     </div>
     <div class="hint">Auto follows the system. <span id="themeResolved"></span></div>
+    <details class="theme-editor">
+      <summary>Customize colors</summary>
+      <p class="hint" id="customThemeHint">Edit or paste a palette JSON, then apply to enable Custom. Use #RRGGBB colors with at least 4.5:1 text contrast. This changes the web interface and history, not live terminal colors.</p>
+      <label for="themePalette">Palette JSON</label>
+      <textarea id="themePalette" rows="14" maxlength="4096" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" aria-describedby="customThemeHint themeStatus" aria-invalid="false"></textarea>
+      <div class="theme-actions">
+        <button type="button" onclick="applyCustomTheme()">Apply custom colors</button>
+        <button type="button" class="theme-reset" onclick="resetCustomTheme()">Reset custom colors</button>
+      </div>
+      <p class="hint" id="themeStatus" role="status" aria-live="polite"></p>
+    </details>
   </div>
   <div class="setting-group">
     <label for="relayUrl">Relay URL</label>
@@ -216,7 +218,7 @@ document.addEventListener('DOMContentLoaded', () => bind());
   </div>
 </div>
 
-<script src="js/state.js"></script>
+<script src="js/state.js?v=themes-1"></script>
 <script src="js/markdown.js"></script>
 <script src="js/diff.js"></script>
 <script src="js/triage.js"></script>
