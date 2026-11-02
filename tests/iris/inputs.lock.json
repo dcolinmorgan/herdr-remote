@@ -1,0 +1,23 @@
+{
+  "python_image": "python@sha256:aaf08c5490d52cd92bc27142a5215b1e47355a5eaf9adfad2a0fbc022d0b5490",
+  "herdr": {
+    "version": "0.9.5",
+    "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-x86_64",
+    "sha256": "14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d"
+  },
+  "iris": {
+    "version": "2026.10.30",
+    "url": "https://github.com/irislib/iris-chat-rs/releases/download/v2026.10.30/iris-v2026.10.30-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "e4da5384fb713546db2af1f3b087fdc134ee1d4e73e40d6d32cb1643280037eb"
+  },
+  "pi": {
+    "version": "1.4.0",
+    "url": "https://github.com/earendil-works/pi/releases/download/v1.4.0/pi-linux-x64.tar.gz",
+    "sha256": "f2e4e4329603223d03260cdb8bd5033dbdc1f73ba58ab8939db2e56546e115d2"
+  },
+  "node": {
+    "version": "v22.21.1",
+    "url": "https://nodejs.org/dist/v22.21.1/node-v22.21.1-linux-x64.tar.xz",
+    "sha256": "680d3f30b24a7ff24b98db5e96f294c0070f8f9078df658da1bce1b9c9873c88"
+  }
+}

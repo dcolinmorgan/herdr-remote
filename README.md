@@ -178,6 +178,12 @@ The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers kee
 
 Finished and blocked notifications include **Open output & reply**. You can also reply directly to the notification to send a follow-up without returning to the agent list. Blocked notifications retain their one-tap approval controls.
 
+## Iris Chat
+
+Use [Iris Chat](https://irischat.org) for end-to-end encrypted agent notifications
+and remote commands without signup, a phone number or email.
+[Set up the optional Iris client](relay/IRIS.md).
+
 ## Conversation history
 
 The web terminal's **History** panel reads Claude, Codex, Pi and Kimi transcripts.
