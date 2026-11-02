@@ -1,0 +1,4 @@
+websockets==15.0.1
+python-telegram-bot==22.5
+ruff==0.14.3
+uv==0.9.5

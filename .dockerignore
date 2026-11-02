@@ -1,0 +1,8 @@
+.git
+.iris-test
+!.iris-test/downloads
+!.iris-test/downloads/**
+.venv
+**/__pycache__
+**/.build
+dist
