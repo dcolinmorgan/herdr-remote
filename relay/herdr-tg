@@ -1,0 +1,4 @@
+#!/bin/sh
+# Drive a remote herdr session through an encrypted Telegram link.
+DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+exec uv run "$DIR/herdr_tg.py" "$@"

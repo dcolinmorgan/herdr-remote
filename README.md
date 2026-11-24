@@ -178,6 +178,31 @@ The `/start`, `/read`, `/reply`, `/send`, `/interrupt`, and `/trust` pickers kee
 
 Finished and blocked notifications include **Open output & reply**. You can also reply directly to the notification to send a follow-up without returning to the agent list. Blocked notifications retain their one-tap approval controls.
 
+### Another computer, no SSH
+
+`relay/herdr-tg` drives a session on the machine running the bot. Only outbound HTTPS is required. The pane name, the command, and the output are sealed with AES-256-GCM before they are given to Telegram, using a key you generate and copy out of band. Telegram can see that the chat exchanged a message, not what it said. This is not a Telegram secret chat — a bot cannot join one — so the seal is the encryption that matters.
+
+The bot token stays on the herdr machine. The other computer logs in once as your Telegram user. A bot does not receive messages it sends itself, and a second program polling `getUpdates` would take the approval bot's messages, so the client is a user session.
+
+On the herdr machine, generate a key, put it in the environment of the bot as `HERDR_TG_LINK_KEY`, and keep `HERDR_TG_CHAT_ID` set. Envelopes are ignored until the chat id is set. Restart the bot after adding the key.
+
+```bash
+uv run relay/herdr_tg.py keygen
+```
+
+On the other computer, create an API id at [my.telegram.org](https://my.telegram.org) and:
+
+```bash
+export HERDR_TG_API_ID="12345" HERDR_TG_API_HASH="..."
+export HERDR_TG_LINK_KEY="..." HERDR_TG_CHAT_ID="..." HERDR_TG_BOT="YourBot"
+uv run relay/herdr_tg.py login
+uv run relay/herdr_tg.py read my-project
+uv run relay/herdr_tg.py send my-project "run the tests"
+uv run relay/herdr_tg.py shell my-project
+```
+
+`send` submits an agent prompt, the same path as `/send`. It is not a terminal: full-screen programs and streaming logs are out of scope. `interrupt` sends Ctrl+C. The chat shows ciphertext on purpose.
+
 ## Iris Chat
 
 Use [Iris Chat](https://irischat.org) for end-to-end encrypted agent notifications

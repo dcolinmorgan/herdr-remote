@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["python-telegram-bot>=21.0", "websockets>=14.0"]
+# dependencies = ["python-telegram-bot>=21.0", "websockets>=14.0", "cryptography>=43"]
 # ///
 """herdr-remote Telegram bot — monitor and approve agents from Telegram."""
 import asyncio, hashlib, json, os, logging, secrets
@@ -11,6 +11,7 @@ from telegram import ForceReply, Update, InlineKeyboardButton, InlineKeyboardMar
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 from agent_state import apply_agent_message
+import tg_link
 
 logging.basicConfig(level=logging.INFO)
 # httpx logs every request URL at INFO; that URL contains the bot token. Silence it.
@@ -31,8 +32,9 @@ def scrub(value) -> str:
     ?token= query, so raw exception text must never be surfaced unredacted.
     """
     s = str(value)
-    for secret in (_RELAY_TOKEN, TOKEN):
-        if secret:
+    link_key = os.environ.get("HERDR_TG_LINK_KEY", "").strip()
+    for secret in (_RELAY_TOKEN, TOKEN, link_key):
+        if secret and len(secret) >= 16:
             s = s.replace(secret, "<redacted>")
     return s
 
@@ -835,9 +837,42 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # --- Free text reply ---
 
+async def answer_link(update: Update):
+    """Run one sealed command and reply with ciphertext.
+
+    Discovery mode (no HERDR_TG_CHAT_ID) refuses these. A link envelope is a
+    remote command, and an unset chat id would accept it from anyone who can
+    see the bot. A failed seal is silence: a reply would tell a prober that
+    the bytes were recognized.
+    """
+    if not CHAT_ID or str(update.effective_chat.id) != str(CHAT_ID):
+        return
+    reply = await tg_link.dispatch(
+        update.message.text or "",
+        chat_id=str(CHAT_ID),
+        key=tg_link.load_key(),
+        agents=agents,
+        relay_up=relay_connected,
+        read=lambda pane_id: read_pane(pane_id, lines=80),
+        prompt=send_text_to_relay,
+        interrupt=lambda pane_id: send_keys_to_relay(pane_id, ["C-c"]),
+    )
+    if reply:
+        await update.message.reply_text(reply)
+
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Send a Telegram reply to its associated agent pane."""
-    if not authorized(update) or not update.message.reply_to_message:
+    """Send a Telegram reply to its associated agent pane.
+
+    A sealed link envelope is handled first, including when it is not a reply
+    to an approval card. It must not fall through and be typed into a pane.
+    """
+    if not authorized(update) or update.message is None:
+        return
+    if tg_link.is_envelope(update.message.text or ""):
+        await answer_link(update)
+        return
+    if not update.message.reply_to_message:
         return
     pane_id = pending_pane(update.effective_chat.id, update.message.reply_to_message.message_id)
     if not pane_id:
