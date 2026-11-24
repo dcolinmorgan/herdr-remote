@@ -27,7 +27,7 @@ echo "1. relay syntax"
 assert_eq "$?" "0" "herdr_relay.py parses"
 
 echo "1b. relay behavior"
-uv run --with 'python-telegram-bot>=21.0' --with 'websockets>=14.0' \
+uv run --with 'python-telegram-bot>=21.0' --with 'websockets>=14.0' --with 'cryptography>=43' \
   python -m unittest discover -s "$DIR/tests" -p "test_*.py"
 assert_eq "$?" "0" "relay behavior"
 
